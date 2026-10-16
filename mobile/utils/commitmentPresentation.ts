@@ -581,6 +581,13 @@ export type ObligationSeries = {
   linked_purchase?: any;
   categoria?: string;
   subcategoria?: string;
+  natureza?: string;
+  plataforma?: string;
+  metodo_pagamento?: string;
+  payment_method?: string;
+  account_id?: string;
+  card_id?: string;
+  card_label?: string;
 };
 
 function seriesTitle(items: any[]): string {
@@ -606,7 +613,7 @@ export function groupObligationSeries(items: any[]): ObligationSeries[] {
     const titled = seriesTitle(sorted);
     const title = vendor ? displayTitle(vendor) : titled;
     const subtitle = vendor ? (raw || (titled !== title ? titled : '')) : (raw && raw !== titled && raw.toLowerCase() !== titled.toLowerCase() ? raw : '');
-    const sample = sorted.find(row => row.linked_purchase || row.categoria || row.category) || sorted[0];
+    const sample = sorted.find(row => row.linked_purchase || row.categoria || row.category || row.natureza || row.plataforma || row.metodo_pagamento || row.payment_method || row.account_id || row.card_id || row.card_label) || sorted[0];
     return {
       series_key: key,
       items: sorted,
@@ -619,6 +626,13 @@ export function groupObligationSeries(items: any[]): ObligationSeries[] {
       linked_purchase: sample?.linked_purchase || null,
       categoria: sample?.categoria || sample?.category || sample?.linked_purchase?.categoria || '',
       subcategoria: sample?.subcategoria || sample?.linked_purchase?.subcategoria || '',
+      ...(sample?.natureza || sample?.linked_purchase?.natureza ? {natureza: sample?.natureza || sample?.linked_purchase?.natureza} : {}),
+      ...(sample?.plataforma || sample?.linked_purchase?.plataforma ? {plataforma: sample?.plataforma || sample?.linked_purchase?.plataforma} : {}),
+      ...(sample?.metodo_pagamento || sample?.linked_purchase?.metodo_pagamento ? {metodo_pagamento: sample?.metodo_pagamento || sample?.linked_purchase?.metodo_pagamento} : {}),
+      ...(sample?.payment_method ? {payment_method: sample.payment_method} : {}),
+      ...(sample?.account_id || sample?.linked_purchase?.account_id ? {account_id: sample?.account_id || sample?.linked_purchase?.account_id} : {}),
+      ...(sample?.card_id || sample?.linked_purchase?.card_id ? {card_id: sample?.card_id || sample?.linked_purchase?.card_id} : {}),
+      ...(sample?.card_label || sample?.linked_purchase?.card_label || sample?.linked_purchase?.cartao_label ? {card_label: sample?.card_label || sample?.linked_purchase?.card_label || sample?.linked_purchase?.cartao_label} : {}),
     };
   });
 }

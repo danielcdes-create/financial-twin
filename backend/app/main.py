@@ -2815,14 +2815,43 @@ def categories(db=Depends(database)):
     catalog={item["key"]:item for item in db.categories.find({"active":{"$ne":False}})}
     names=set(catalog_category_names(db))
     ordered=sorted(names,key=lambda value:value.casefold())
-    transaction_counts={item["_id"]:item["count"] for item in db.transactions.aggregate([{"$group":{"_id":"$categoria","count":{"$sum":1}}}]) if item.get("_id")}
-    provisional_counts={item["_id"]:item["count"] for item in db.provisional_transactions.aggregate([{"$match":{"status":{"$in":["provisional","enriched","confirmed"]}}},{"$group":{"_id":"$categoria_sugerida","count":{"$sum":1}}}]) if item.get("_id")}
+    transaction_counts={}
+    for item in db.transactions.aggregate([{"$group":{"_id":"$categoria","count":{"$sum":1}}}]):
+        if item.get("_id"):
+            k=canonical_key(item["_id"])
+            transaction_counts[k]=transaction_counts.get(k,0)+item["count"]
+    provisional_counts={}
+    for item in db.provisional_transactions.aggregate([{"$match":{"status":{"$in":["provisional","enriched","confirmed"]}}},{"$group":{"_id":"$categoria_sugerida","count":{"$sum":1}}}]):
+        if item.get("_id"):
+            k=canonical_key(item["_id"])
+            provisional_counts[k]=provisional_counts.get(k,0)+item["count"]
+    extra_counts={}
+    if not isinstance(db, dict) or "commitments" in db:
+        for row in db.commitments.find({}):
+            cat=row.get("category") or row.get("categoria") or row.get("categoria")
+            if cat:
+                k=canonical_key(cat)
+                extra_counts[k]=extra_counts.get(k,0)+1
+    if not isinstance(db, dict) or "future_schedule_overrides" in db:
+        for row in db.future_schedule_overrides.find({}):
+            cat=(row.get("profile") or {}).get("categoria") if isinstance(row.get("profile"), dict) else None
+            if cat:
+                k=canonical_key(cat)
+                extra_counts[k]=extra_counts.get(k,0)+1
+    if not isinstance(db, dict) or "saving_experiments" in db:
+        for row in db.saving_experiments.find({}):
+            cat=row.get("category") or row.get("categoria")
+            if cat:
+                k=canonical_key(cat)
+                extra_counts[k]=extra_counts.get(k,0)+1
     details=[]
     subcategories_by_category=category_subcategories(db)
     for name in ordered:
-        transaction_count=transaction_counts.get(name,0)
-        provisional_count=provisional_counts.get(name,0)
-        details.append({"name":name,"usage_count":transaction_count+provisional_count,"transaction_count":transaction_count,"provisional_count":provisional_count,"custom":canonical_key(name) in catalog,"subcategory_count":len(subcategories_by_category.get(name, []))})
+        k=canonical_key(name)
+        transaction_count=transaction_counts.get(k,0)
+        provisional_count=provisional_counts.get(k,0)
+        extra_count=extra_counts.get(k,0)
+        details.append({"name":name,"usage_count":transaction_count+provisional_count+extra_count,"transaction_count":transaction_count,"provisional_count":provisional_count,"custom":k in catalog,"subcategory_count":len(subcategories_by_category.get(name, []))})
     return {"items":ordered,"details":details}
 
 class CategoryCreate(BaseModel):
@@ -2834,6 +2863,7 @@ def create_category(category:CategoryCreate,db=Depends(database)):
         return _atomic_create_category(category, db=session_database(db,session))
 
 def _atomic_create_category(category:CategoryCreate,db=Depends(database)):
+    lock_movement_insert(db)
     name=re.sub(r"\s+"," ",category.name).strip();key=canonical_key(name)
     if not key: raise HTTPException(status_code=422,detail="Informe um nome de categoria válido.")
     existing_names=catalog_category_names(db)
@@ -2851,12 +2881,19 @@ def delete_category(name:str=Query(min_length=1,max_length=120),replacement:str|
         return _atomic_delete_category(name, replacement, db=session_database(db,session))
 
 def _atomic_delete_category(name:str=Query(min_length=1,max_length=120),replacement:str|None=Query(default=None,min_length=1,max_length=120),db=Depends(database)):
+    lock_movement_insert(db)
     known={canonical_key(value):value for value in catalog_category_names(db)}
     key=canonical_key(name);canonical_name=known.get(key)
     if not canonical_name: raise HTTPException(status_code=404,detail="Categoria não encontrada.")
-    transaction_count=db.transactions.count_documents({"categoria":canonical_name})
-    provisional_count=db.provisional_transactions.count_documents({"categoria_sugerida":canonical_name,"status":{"$in":["provisional","enriched","confirmed"]}})
-    usage_count=transaction_count+provisional_count
+    tx_rows=[row for row in db.transactions.find({"categoria":{"$nin":[None,""]}},{"_id":1,"categoria":1}) if canonical_key(row.get("categoria"))==key]
+    prov_rows=[row for row in db.provisional_transactions.find({"categoria_sugerida":{"$nin":[None,""]},"status":{"$in":["provisional","enriched","confirmed"]}},{"_id":1,"categoria_sugerida":1}) if canonical_key(row.get("categoria_sugerida"))==key]
+    comm_rows=[row for row in db.commitments.find({}) if canonical_key(row.get("category") or row.get("categoria") or "")==key] if (not isinstance(db, dict) or "commitments" in db) else []
+    over_rows=[row for row in db.future_schedule_overrides.find({}) if isinstance(row.get("profile"), dict) and canonical_key(row["profile"].get("categoria") or "")==key] if (not isinstance(db, dict) or "future_schedule_overrides" in db) else []
+    exp_rows=[row for row in db.saving_experiments.find({}) if canonical_key(row.get("category") or row.get("categoria") or "")==key] if (not isinstance(db, dict) or "saving_experiments" in db) else []
+    transaction_count=len(tx_rows)
+    provisional_count=len(prov_rows)
+    extra_count=len(comm_rows)+len(over_rows)+len(exp_rows)
+    usage_count=transaction_count+provisional_count+extra_count
     canonical_replacement=None
     if usage_count:
         if not replacement: raise HTTPException(status_code=409,detail=f"A categoria está em uso por {usage_count} registro(s). Escolha uma categoria substituta.")
@@ -2865,8 +2902,31 @@ def _atomic_delete_category(name:str=Query(min_length=1,max_length=120),replacem
         if replacement_key==key: raise HTTPException(status_code=422,detail="Escolha uma categoria substituta diferente.")
     now=datetime.now(timezone.utc)
     if canonical_replacement:
-        db.transactions.update_many({"categoria":canonical_name},{"$set":{"categoria":canonical_replacement,"updated_at":now}})
-        db.provisional_transactions.update_many({"categoria_sugerida":canonical_name,"status":{"$in":["provisional","enriched","confirmed"]}},{"$set":{"categoria_sugerida":canonical_replacement,"updated_at":now}})
+        if tx_rows:
+            tx_ids=[row["_id"] for row in tx_rows if "_id" in row]
+            if tx_ids:
+                db.transactions.update_many({"_id":{"$in":tx_ids}},{"$set":{"categoria":canonical_replacement,"updated_at":now},"$unset":{"subcategoria":""}})
+            else:
+                db.transactions.update_many({"categoria":canonical_name},{"$set":{"categoria":canonical_replacement,"updated_at":now},"$unset":{"subcategoria":""}})
+        if prov_rows:
+            prov_ids=[row["_id"] for row in prov_rows if "_id" in row]
+            if prov_ids:
+                db.provisional_transactions.update_many({"_id":{"$in":prov_ids},"status":{"$in":["provisional","enriched","confirmed"]}},{"$set":{"categoria_sugerida":canonical_replacement,"updated_at":now},"$unset":{"subcategoria":""}})
+            else:
+                db.provisional_transactions.update_many({"categoria_sugerida":canonical_name,"status":{"$in":["provisional","enriched","confirmed"]}},{"$set":{"categoria_sugerida":canonical_replacement,"updated_at":now},"$unset":{"subcategoria":""}})
+        for row in comm_rows:
+            updates={"category":canonical_replacement,"updated_at":now}
+            if "categoria" in row: updates["categoria"]=canonical_replacement
+            db.commitments.update_one({"_id":row["_id"]},{"$set":updates,"$unset":{"subcategoria":""},"$inc":{"revision":1}})
+        for row in over_rows:
+            profile=dict(row.get("profile") or {})
+            profile["categoria"]=canonical_replacement
+            profile.pop("subcategoria",None)
+            db.future_schedule_overrides.update_one({"_id":row["_id"]},{"$set":{"profile":profile,"updated_at":now},"$inc":{"revision":1}})
+        for row in exp_rows:
+            exp_updates={"category":canonical_replacement,"updated_at":now}
+            if "categoria" in row: exp_updates["categoria"]=canonical_replacement
+            db.saving_experiments.update_one({"_id":row["_id"]},{"$set":exp_updates,"$inc":{"revision":1}})
     db.categories.update_one({"key":key},{"$set":{"name":canonical_name,"active":False,"deleted_at":now,"replacement":canonical_replacement,"updated_at":now}},upsert=True)
-    db.audit_log.insert_one({"event":"category_deleted","category":canonical_name,"replacement":canonical_replacement,"affected_transactions":transaction_count,"affected_provisionals":provisional_count,"source":"mobile_manual","created_at":now})
+    db.audit_log.insert_one({"event":"category_deleted","category":canonical_name,"replacement":canonical_replacement,"affected_transactions":transaction_count,"affected_provisionals":provisional_count,"affected_commitments":len(comm_rows)+len(over_rows),"affected_experiments":len(exp_rows),"source":"mobile_manual","created_at":now})
     return {"name":canonical_name,"deleted":True,"replacement":canonical_replacement,"affected_count":usage_count}

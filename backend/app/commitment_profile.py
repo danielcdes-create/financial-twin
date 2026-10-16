@@ -4,6 +4,7 @@ Imported plans and obligations stay as imported. The overlay and the linked
 statement rows change together. Amount and date never fan out beyond the
 chosen open charges.
 """
+import calendar
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Literal
@@ -17,6 +18,7 @@ from app.auth import require_session
 from pymongo.errors import DuplicateKeyError
 
 from app.atomic import mongo_transaction, session_database
+from app.commitments import as_date
 from app.economic_policy import amount
 from app import future_commitments
 from app.future_commitments import (
@@ -27,6 +29,12 @@ from app.future_commitments import (
 Nature = Literal['COMPRA', 'IMPOSTO_TRIBUTO', 'TARIFA_ENCARGO', 'ESTORNO', 'RENDIMENTO', 'TRANSFERENCIA']
 Pay = Literal['cartao', 'debito', 'pix', 'boleto', 'paypal', 'outro']
 FrequencyName = Literal['semanal', 'mensal', 'trimestral', 'semestral', 'anual']
+
+_CLEARABLE_PROFILE_FIELDS = (
+    'display_name', 'natureza', 'categoria', 'subcategoria',
+    'plataforma', 'metodo_pagamento', 'payment_method',
+    'account_id', 'card_id', 'card_label',
+)
 
 
 class ProfileWrite(BaseModel):
@@ -67,6 +75,18 @@ def _blank(value):
     return value is None or (isinstance(value, str) and not value.strip())
 
 
+def _provided_fields(body) -> set[str]:
+    return set(getattr(body, 'model_fields_set', getattr(body, '__fields_set__', set())))
+
+
+def _cleared_profile_fields(body: ProfileWrite) -> set[str]:
+    provided = _provided_fields(body)
+    cleared = {field for field in _CLEARABLE_PROFILE_FIELDS if field in provided and _blank(getattr(body, field, None))}
+    if 'card_id' in cleared and 'card_label' not in provided and _blank(body.card_label):
+        cleared.add('card_label')
+    return cleared
+
+
 def _same(left, right) -> bool:
     return str(left) == str(right)
 
@@ -94,9 +114,11 @@ def _visible_card(db, profile: dict) -> dict:
     return profile
 
 
-def _paint(document, profile: dict) -> dict:
+def _paint(document, profile: dict, cleared: set[str] | tuple[str, ...] = ()) -> tuple[dict, dict]:
     """Metadata only. Description, amount and event date stay unless the caller sets them."""
     changes = {}
+    unsets = {}
+    cleared_set = set(cleared or ())
     mapping = {
         'display_name': 'vendedor',
         'natureza': 'natureza',
@@ -108,25 +130,42 @@ def _paint(document, profile: dict) -> dict:
         'card_id': 'card_id',
         'card_label': 'card_label',
     }
+    previous_category = document.get('categoria')
     for source, target in mapping.items():
         value = profile.get(source)
-        if _blank(value):
-            continue
-        text = value.strip() if isinstance(value, str) else value
-        if document.get(target) != text:
-            changes[target] = text
+        if not _blank(value):
+            text = value.strip() if isinstance(value, str) else value
+            if document.get(target) != text:
+                changes[target] = text
+        elif source in cleared_set and source not in {'display_name', 'account_id'}:
+            if source == 'subcategoria':
+                if document.get('subcategoria') not in (None, ''):
+                    changes['subcategoria'] = ''
+            elif document.get(target) is not None:
+                unsets[target] = ''
+    if changes.get('categoria') and changes['categoria'] != previous_category and _blank(profile.get('subcategoria')):
+        if document.get('subcategoria') not in (None, ''):
+            changes['subcategoria'] = ''
     if changes.get('vendedor'):
         changes['merchant_name'] = changes['vendedor']
-    return changes
+    return changes, unsets
 
 
-def paint_movement(db, document, profile: dict):
-    changes = _paint(document, profile)
-    if not changes or not document:
+def paint_movement(db, document, profile: dict, cleared: set[str] | tuple[str, ...] = ()):
+    if not document:
+        return {}
+    changes, unsets = _paint(document, profile, cleared)
+    if not changes and not unsets:
         return {}
     changes['updated_at'] = datetime.now(timezone.utc)
-    db.transactions.update_one({'_id': document['_id']}, {'$set': changes})
-    return {key: value for key, value in changes.items() if key != 'updated_at'}
+    update = {'$set': changes}
+    if unsets:
+        update['$unset'] = unsets
+    db.transactions.update_one({'_id': document['_id']}, update)
+    return {
+        **{key: value for key, value in changes.items() if key != 'updated_at'},
+        **{key: None for key in unsets},
+    }
 
 
 def _signed(current, new_amount: Decimal) -> Decimal:
@@ -141,11 +180,20 @@ def _stamp(day: date) -> datetime:
     return datetime(day.year, day.month, day.day, 15, 0, tzinfo=timezone.utc)
 
 
-def _store_override(db, key: str, profile: dict, rows: dict | None, label: str | None):
+def _store_override(db, key: str, profile: dict, rows: dict | None, label: str | None, cleared: set[str] | tuple[str, ...] = ()):
     stored = db.future_schedule_overrides.find_one({'_id': key}) or {}
     now = datetime.now(timezone.utc)
+    cleared_set = set(cleared or ())
+    merged_profile = dict(stored.get('profile') or {})
+    if 'categoria' in profile and not _blank(profile.get('categoria')) and profile.get('categoria') != merged_profile.get('categoria') and _blank(profile.get('subcategoria')):
+        merged_profile.pop('subcategoria', None)
+    for field in cleared_set:
+        merged_profile.pop(field, None)
+    for k, v in profile.items():
+        if not _blank(v):
+            merged_profile[k] = v
     replacement = {
-        'profile': {**(stored.get('profile') or {}), **{k: v for k, v in profile.items() if not _blank(v)}},
+        'profile': merged_profile,
         'rows': stored.get('rows') or {},
         'payment_links': stored.get('payment_links') or [],
         'revision': int(stored.get('revision') or 0) + 1,
@@ -153,12 +201,19 @@ def _store_override(db, key: str, profile: dict, rows: dict | None, label: str |
     }
     if rows is not None:
         replacement['rows'] = rows
+    unsets = {}
     if label:
         replacement['label'] = label
+    elif 'display_name' in cleared_set:
+        if stored.get('label') is not None:
+            unsets['label'] = ''
     elif stored.get('label'):
         replacement['label'] = stored['label']
     if stored:
-        db.future_schedule_overrides.update_one({'_id': key}, {'$set': replacement})
+        update = {'$set': replacement}
+        if unsets:
+            update['$unset'] = unsets
+        db.future_schedule_overrides.update_one({'_id': key}, update)
     else:
         db.future_schedule_overrides.insert_one({'_id': key, **replacement})
     return replacement['revision']
@@ -255,6 +310,8 @@ def _linked_ids_for(db, source, identity) -> list:
     found = []
     if source == 'managed':
         document = db.commitments.find_one({'commitment_id': identity}) or {}
+        if document.get('purchase_transaction_id'):
+            found.append(document['purchase_transaction_id'])
         for link in document.get('linked_transactions') or []:
             if link.get('transaction_id'):
                 found.append(link['transaction_id'])
@@ -280,6 +337,8 @@ def _linked_ids_for(db, source, identity) -> list:
 def _targets_for_transaction(db, transaction_id: str):
     targets = []
     for commitment in db.commitments.find({}):
+        if _same(commitment.get('purchase_transaction_id'), transaction_id):
+            targets.append(('managed', commitment['commitment_id']))
         for link in commitment.get('linked_transactions') or []:
             if _same(link.get('transaction_id'), transaction_id):
                 targets.append(('managed', commitment['commitment_id']))
@@ -343,6 +402,7 @@ def apply_commitment_profile(db, body: ProfileWrite):
                     raise HTTPException(404, 'Compromisso não encontrado.')
             elif not _series_rows(writing, body.identity) and not any(obligation_series_key(row) == body.identity for row in writing.obligations.find({})):
                 raise HTTPException(404, 'Compromisso não encontrado.')
+            cleared = _cleared_profile_fields(body)
             profile = _visible_card(writing, _profile_dict(body))
             if (body.amount is not None or body.due_date is not None) and body.source != 'managed' and body.scope is None:
                 raise HTTPException(422, 'Escolha a próxima parcela em aberto ou todas as futuras.')
@@ -355,35 +415,58 @@ def apply_commitment_profile(db, body: ProfileWrite):
                 seen.add(str(identity))
                 document = _tx(writing, identity)
                 if document:
-                    paint_movement(writing, document, profile)
+                    paint_movement(writing, document, profile, cleared)
                     linked.append(str(document['_id']))
             amount_ids = []
             if body.source == 'managed':
                 document = writing.commitments.find_one({'commitment_id': body.identity})
                 sets = {'updated_at': datetime.now(timezone.utc)}
+                unsets = {}
+                previous_category = document.get('category') or document.get('categoria')
                 if profile.get('display_name'):
                     if not document.get('original_description'):
                         sets['original_description'] = document.get('name') or ''
                     sets['name'] = profile['display_name']
                     sets['display_name'] = profile['display_name']
+                elif 'display_name' in cleared and document.get('display_name'):
+                    if document.get('original_description'):
+                        sets['name'] = document['original_description']
+                    unsets['display_name'] = ''
                 for key, field in (('categoria', 'category'), ('plataforma', 'billing_platform'), ('payment_method', 'payment_method'), ('account_id', 'account_id'), ('card_id', 'card_id')):
-                    if profile.get(key if key != 'categoria' else 'categoria'):
-                        sets[field] = profile['categoria' if key == 'categoria' else key]
-                if profile.get('natureza'):
-                    sets['natureza'] = profile['natureza']
-                if profile.get('subcategoria'):
-                    sets['subcategoria'] = profile['subcategoria']
-                if profile.get('metodo_pagamento'):
-                    sets['metodo_pagamento'] = profile['metodo_pagamento']
+                    if profile.get(key):
+                        sets[field] = profile[key]
+                    elif key in cleared and key != 'payment_method':
+                        sets[field] = None
+                        if key == 'categoria' and 'categoria' in document:
+                            unsets['categoria'] = ''
+                        if key == 'plataforma' and 'plataforma' in document:
+                            unsets['plataforma'] = ''
+                if profile.get('card_label'):
+                    sets['card_label'] = profile['card_label']
+                elif 'card_label' in cleared and 'card_label' in document:
+                    unsets['card_label'] = ''
+                for key in ('natureza', 'subcategoria', 'metodo_pagamento'):
+                    if profile.get(key):
+                        sets[key] = profile[key]
+                    elif key in cleared:
+                        unsets[key] = ''
+                if profile.get('categoria') and profile['categoria'] != previous_category and _blank(profile.get('subcategoria')):
+                    unsets['subcategoria'] = ''
+                    sets.pop('subcategoria', None)
                 if body.frequency:
                     sets['frequency'] = body.frequency
-                if body.scope is None and body.amount is not None and document.get('kind') != 'parcelamento':
+                if body.amount is not None:
                     sets['amount'] = Decimal128(body.amount)
-                if body.scope is None and body.due_date is not None and document.get('kind') != 'parcelamento':
-                    sets['next_due_date'] = _stamp(body.due_date)
-                writing.commitments.update_one({'_id': document['_id']}, {'$set': sets, '$inc': {'revision': 1}})
+                if body.due_date is not None:
+                    sets['next_due_date'] = body.due_date.isoformat() if isinstance(document.get('next_due_date'), str) else _stamp(body.due_date)
+                    if not document.get('next_due_date') or as_date(document['next_due_date']) != body.due_date:
+                        sets['schedule_anchor_day'] = body.due_date.day
+                        sets['schedule_anchor_end'] = body.due_date.day == calendar.monthrange(body.due_date.year, body.due_date.month)[1]
+                update_doc = {'$set': sets, '$inc': {'revision': 1}}
+                if unsets:
+                    update_doc['$unset'] = unsets
+                writing.commitments.update_one({'_id': document['_id']}, update_doc)
                 if body.scope and document.get('kind') == 'parcelamento' and (body.amount is not None or body.due_date is not None):
-                    # Managed installment rows live on linked_transactions, matched by due date below.
                     opens = []
                     for link in document.get('linked_transactions') or []:
                         due = str(link.get('due_date') or '')[:10]
@@ -394,7 +477,7 @@ def apply_commitment_profile(db, body: ProfileWrite):
                     amount_ids = _apply_amount_to_statement(writing, [link['transaction_id'] for link in chosen], body.amount, body.due_date)
             elif body.source == 'installment':
                 label = profile.get('display_name')
-                _store_override(writing, f"installment:{body.identity}", profile, None, label)
+                _store_override(writing, f"installment:{body.identity}", profile, None, label, cleared)
                 if body.scope and (body.amount is not None or body.due_date is not None):
                     rows = _open_installment_rows(writing, body.identity)
                     chosen = rows if body.scope == 'future' else rows[:1]
@@ -407,7 +490,7 @@ def apply_commitment_profile(db, body: ProfileWrite):
                 documents = [row for row in writing.obligations.find({}) if obligation_series_key(row) == body.identity]
                 opens = _series_rows(writing, body.identity)
                 for document in documents:
-                    _store_override(writing, f"obligation:{document['_id']}", profile, None, profile.get('display_name'))
+                    _store_override(writing, f"obligation:{document['_id']}", profile, None, profile.get('display_name'), cleared)
                 if body.scope and (body.amount is not None or body.due_date is not None):
                     chosen = opens if body.scope == 'future' else opens[:1]
                     for document in chosen:
@@ -446,16 +529,16 @@ def sync_statement_metadata(db, body: StatementProfileWrite):
     targets = _targets_for_transaction(db, body.transaction_id)
     if not targets:
         return {'persisted': True, 'updated': 0, 'linked': []}
+    provided = _provided_fields(body)
+    fields = {}
+    for key in ('vendedor', 'natureza', 'categoria', 'subcategoria', 'plataforma', 'metodo_pagamento'):
+        if key in provided:
+            fields['display_name' if key == 'vendedor' else key] = getattr(body, key)
     profile = ProfileWrite(
         request_id=body.request_id,
         source=targets[0][0],
         identity=targets[0][1],
-        display_name=body.vendedor,
-        natureza=body.natureza,
-        categoria=body.categoria,
-        subcategoria=body.subcategoria,
-        plataforma=body.plataforma,
-        metodo_pagamento=body.metodo_pagamento,
+        **fields,
         scope=None,
         amount=None,
         due_date=None,

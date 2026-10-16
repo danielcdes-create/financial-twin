@@ -192,5 +192,22 @@ class SubcategoryTests(unittest.TestCase):
         self.assertEqual({key: value.docs for key, value in self.db.items()}, before)
 
 
-if __name__ == '__main__':
+
+    def test_commitments_and_future_overrides_participate_in_subcategory_usage_and_relabel(self):
+        self.seed()
+        self.db.commitments = self.db["commitments"] = copy.deepcopy(self.db.transactions)
+        self.db.commitments.docs = [{"_id": "c1", "category": "Habitação", "subcategoria": "Manutenção"}]
+        self.db.future_schedule_overrides = self.db["future_schedule_overrides"] = copy.deepcopy(self.db.transactions)
+        self.db.future_schedule_overrides.docs = [{"_id": "o1", "profile": {"categoria": "Habitação", "subcategoria": "Manutenção"}}]
+
+        listed = list_subcategories("Habitação", self.db)
+        manut = next(item for item in listed["details"] if item["name"] == "Manutenção")
+        self.assertEqual(manut["usage_count"], 6)
+
+        self.rename("Manutenção", "Conservação")
+        self.assertEqual(self.db.commitments.find_one({"_id": "c1"})["subcategoria"], "Conservação")
+        self.assertEqual(self.db.future_schedule_overrides.find_one({"_id": "o1"})["profile"]["subcategoria"], "Conservação")
+
+
+if __name__ == "__main__":
     unittest.main()

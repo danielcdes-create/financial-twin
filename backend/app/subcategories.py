@@ -22,6 +22,10 @@ def database(request: Request):
     return request.app.state.db
 
 
+def _has_collection(db, name: str) -> bool:
+    return not isinstance(db, dict) or name in db
+
+
 class SubcategoryCreate(BaseModel):
     category: str = Field(min_length=1, max_length=120)
     name: str = Field(min_length=1, max_length=120)
@@ -55,6 +59,25 @@ def context(db, category):
             if normalized(row.get(field, "")) != normalized(name): continue
             if field == "categoria_sugerida" and row.get("status") not in ACTIVE_CAPTURES: continue
             usage.setdefault(normalized(row["subcategoria"]), []).append([field, str(row["_id"]), row.get("revision"), row.get("status")])
+    if _has_collection(db, "commitments"):
+        for row in db.commitments.find({}):
+            cat = row.get("category") or row.get("categoria") or ""
+            sub = row.get("subcategoria") or ""
+            if normalized(cat) == normalized(name) and normalized(sub):
+                key = normalized(sub)
+                if key in items:
+                    items[key]["usage_count"] = items[key].get("usage_count", 0) + 1
+                usage.setdefault(key, []).append(["commitment", str(row.get("_id")), row.get("revision")])
+    if _has_collection(db, "future_schedule_overrides"):
+        for row in db.future_schedule_overrides.find({}):
+            profile = row.get("profile") if isinstance(row.get("profile"), dict) else {}
+            cat = profile.get("categoria") or ""
+            sub = profile.get("subcategoria") or ""
+            if normalized(cat) == normalized(name) and normalized(sub):
+                key = normalized(sub)
+                if key in items:
+                    items[key]["usage_count"] = items[key].get("usage_count", 0) + 1
+                usage.setdefault(key, []).append(["override", str(row.get("_id")), row.get("revision")])
     for key, item in items.items():
         payload = [normalized(name), key, overrides.get(key), sorted(usage.get(key, []), key=str)]
         item["token"] = hashlib.sha256(json_util.dumps(payload, sort_keys=True).encode()).hexdigest()
@@ -103,6 +126,21 @@ def relabel(db, category, name, replacement, now):
             else:
                 count += collection.update_many(pair_query, update).modified_count
         counts.append(count)
+    if _has_collection(db, "commitments"):
+        for row in list(db.commitments.find({})):
+            cat = row.get("category") or row.get("categoria") or ""
+            sub = row.get("subcategoria") or ""
+            if normalized(cat) == normalized(category) and normalized(sub) == normalized(name):
+                db.commitments.update_one({"_id": row["_id"]}, {"$set": {"subcategoria": replacement, "updated_at": now}, "$inc": {"revision": 1}})
+    if _has_collection(db, "future_schedule_overrides"):
+        for row in list(db.future_schedule_overrides.find({})):
+            profile = dict(row.get("profile") or {}) if isinstance(row.get("profile"), dict) else {}
+            if normalized(profile.get("categoria") or "") == normalized(category) and normalized(profile.get("subcategoria") or "") == normalized(name):
+                if replacement:
+                    profile["subcategoria"] = replacement
+                else:
+                    profile.pop("subcategoria", None)
+                db.future_schedule_overrides.update_one({"_id": row["_id"]}, {"$set": {"profile": profile, "updated_at": now}, "$inc": {"revision": 1}})
     return counts
 
 

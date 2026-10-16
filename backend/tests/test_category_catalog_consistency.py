@@ -103,5 +103,29 @@ class CategoryCatalogConsistencyTests(unittest.TestCase):
                 self.assertEqual(db.audit_log.docs, [])
 
 
+
+    def test_commitments_overrides_and_experiments_are_counted_and_relabeled_clearing_stale_subcategory(self):
+        db = CountDB()
+        db.categories.insert_one({"key": "destino", "name": "Destino", "active": True})
+        db.transactions.insert_one({"_id": "t1", "categoria": "Saúde", "subcategoria": "Farmácia"})
+        db.commitments.insert_one({"_id": "c1", "categoria": "saude", "subcategoria": "Consulta"})
+        db.future_schedule_overrides.insert_one({"_id": "o1", "profile": {"categoria": "SAÚDE", "subcategoria": "Exame"}})
+        db.saving_experiments.insert_one({"_id": "e1", "categoria": "Saúde"})
+
+        cat_list = categories(db)
+        saude_detail = next(d for d in cat_list["details"] if d["name"] in ("Saúde", "saude", "SAÚDE"))
+        self.assertEqual(saude_detail["usage_count"], 4)
+
+        res = _atomic_delete_category("Saúde", "Destino", db)
+        self.assertEqual(res["affected_count"], 4)
+        self.assertEqual(db.transactions.docs[0]["categoria"], "Destino")
+        self.assertIsNone(db.transactions.docs[0].get("subcategoria"))
+        self.assertEqual(db.commitments.docs[0]["categoria"], "Destino")
+        self.assertIsNone(db.commitments.docs[0].get("subcategoria"))
+        self.assertEqual(db.future_schedule_overrides.docs[0]["profile"]["categoria"], "Destino")
+        self.assertIsNone(db.future_schedule_overrides.docs[0]["profile"].get("subcategoria"))
+        self.assertEqual(db.saving_experiments.docs[0]["categoria"], "Destino")
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -179,3 +179,115 @@ class CommitmentProfileTests(unittest.TestCase):
         with_installment_references([document], again, self.db)
         self.assertEqual(again[0]['card_label'], 'Cartao Sintetico 2222')
         self.assertEqual(again[0]['installment_plan']['card_label'], 'Cartao Sintetico 2222')
+
+    def test_clearing_optional_fields_and_changing_category_resets_stale_subcategory(self):
+        tx_id = "tx-clear-1"
+        ob_id = ObjectId()
+        self.db.transactions.docs.append({
+            "_id": tx_id,
+            "vendedor": "Academia Original",
+            "account_id": "bank-original",
+            "categoria": "Saude",
+            "subcategoria": "academia",
+            "natureza": "COMPRA",
+            "plataforma": "Wellhub",
+            "metodo_pagamento": "cartao_credito",
+            "card_id": "card-1",
+            "card_label": "Nubank 1234",
+            "valor": money("-99.90"),
+        })
+        self.db.obligations.docs.append({
+            "_id": ob_id,
+            "status": "futura",
+            "tipo": "recorrente",
+            "descricao": "Academia Original",
+            "external_key": "sintetico|academia|parcela-1",
+            "data_vencimento": datetime(2026, 11, 10, tzinfo=timezone.utc),
+            "saldo_aberto": money("99.90"),
+            "valor_pago": money("0.00"),
+            "open_statement_id": tx_id,
+        })
+        # Save override profile first
+        apply_commitment_profile(self.db, ProfileWrite(
+            request_id=uuid4(),
+            source="obligation",
+            identity="sintetico|academia",
+            display_name="Gym Custom",
+            categoria="Saude",
+            subcategoria="academia",
+            natureza="COMPRA",
+            plataforma="Wellhub",
+            metodo_pagamento="cartao_credito",
+            card_id="card-1",
+        ))
+        eff1 = effective_document(self.db, "obligation", self.db.obligations.docs[-1])
+        self.assertEqual(eff1["natureza"], "COMPRA")
+        self.assertEqual(eff1["plataforma"], "Wellhub")
+        self.assertEqual(eff1["metodo_pagamento"], "cartao_credito")
+
+        # Change category without providing subcategoria, and explicitly clear optional fields (None in fields_set)
+        apply_commitment_profile(self.db, ProfileWrite(
+            request_id=uuid4(),
+            source="obligation",
+            identity="sintetico|academia",
+            display_name=None,
+            categoria="Lazer",
+            natureza=None,
+            plataforma=None,
+            metodo_pagamento=None,
+            card_id=None,
+        ))
+        tx_after = self.db.transactions.find_one({"_id": tx_id})
+        self.assertEqual(tx_after["categoria"], "Lazer")
+        self.assertEqual(tx_after.get("subcategoria", ""), "")
+        self.assertNotIn("commitment_label", tx_after)
+        self.assertEqual(tx_after["vendedor"], "Gym Custom")
+        self.assertEqual(tx_after["account_id"], "bank-original")
+        self.assertNotIn("natureza", tx_after)
+        self.assertNotIn("plataforma", tx_after)
+        self.assertNotIn("metodo_pagamento", tx_after)
+        self.assertNotIn("card_id", tx_after)
+        self.assertNotIn("card_label", tx_after)
+
+        eff2 = effective_document(self.db, "obligation", self.db.obligations.docs[-1])
+        self.assertEqual(eff2["categoria"], "Lazer")
+        self.assertNotIn("subcategoria", eff2)
+        self.assertNotIn("plataforma", eff2)
+
+    def test_managed_parcelamento_updates_amount_and_due_date_for_next_and_future_scope(self):
+        cid = ObjectId()
+        self.db.commitments.docs.append({
+            "_id": cid,
+            "commitment_id": str(cid),
+            "name": "Notebook Parcelado",
+            "kind": "parcelamento",
+            "status": "active",
+            "amount": money("250.00"),
+            "next_due_date": "2026-11-15",
+            "schedule_anchor_day": 15,
+            "category": "Tecnologia",
+            "subcategoria": "hardware",
+            "revision": 2,
+        })
+        res = apply_commitment_profile(self.db, ProfileWrite(
+            request_id=uuid4(),
+            source="managed",
+            identity=str(cid),
+            scope="next",
+            expected_revision=2,
+            amount=Decimal("275.50"),
+            due_date=date(2026, 11, 22),
+            categoria="Educacao",
+        ))
+        self.assertTrue(res["persisted"])
+        doc = self.db.commitments.find_one({"_id": cid})
+        self.assertEqual(doc["amount"].to_decimal(), Decimal("275.50"))
+        self.assertEqual(doc["next_due_date"], "2026-11-22")
+        self.assertEqual(doc["schedule_anchor_day"], 22)
+        self.assertEqual(doc["category"], "Educacao")
+        self.assertNotIn("subcategoria", doc)
+        self.assertEqual(doc["revision"], 3)
+
+
+if __name__ == "__main__":
+    unittest.main()

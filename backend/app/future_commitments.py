@@ -87,7 +87,7 @@ def effective_document(db, source, document, override=None, linked=None):
     profile = override.get('profile') if isinstance(override.get('profile'), dict) else None
     if profile:
         result['profile'] = {key: value for key, value in profile.items() if value not in (None, '')}
-        for key in ('categoria', 'subcategoria', 'natureza', 'plataforma', 'metodo_pagamento', 'card_label'):
+        for key in ('categoria', 'subcategoria', 'natureza', 'plataforma', 'metodo_pagamento', 'payment_method', 'account_id', 'card_id', 'card_label'):
             if profile.get(key):
                 result[key] = profile[key]
         if profile.get('display_name'):
@@ -255,6 +255,7 @@ def future_obligations_view(db):
                       'display_name': profile.get('display_name') or '',
                       'categoria': profile.get('categoria') or '',
                       'subcategoria': profile.get('subcategoria') or '',
+                      **({k: profile[k] for k in ('natureza', 'plataforma', 'metodo_pagamento', 'payment_method', 'account_id', 'card_id', 'card_label') if profile.get(k)}),
                       'linked_purchase': profile.get('linked_purchase') or None,
                       **({'payment_link': current['payment_link']} if current.get('payment_link') else {}),
                       **({'link_revision': current['link_revision']} if current.get('link_revision') else {})})

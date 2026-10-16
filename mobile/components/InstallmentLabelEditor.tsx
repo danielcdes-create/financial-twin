@@ -4,6 +4,7 @@ import {Pressable, TextInput} from './InteractionControls';
 import {Alert} from '../utils/appAlert';
 import {useAsyncScope} from '../utils/useAsyncScope';
 import {protectUnsavedBack, useLocalBack} from '../utils/localBack';
+import DiscardDraftAction from './DiscardDraftAction';
 
 const newId=()=> 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{const r=Math.random()*16|0;return(c==='x'?r:r&3|8).toString(16)});
 
@@ -31,6 +32,7 @@ export default function InstallmentLabelEditor({identity,name,api,onUpdated}:{id
       <Text style={s.label}>Nome compartilhado com a movimentação vinculada</Text>
       <TextInput accessibilityLabel="Nome do parcelamento" editable={!busy} value={draft} onChangeText={setDraft} maxLength={160} style={s.input}/>
       <View style={s.actions}><Pressable accessibilityRole="button" disabled={busy} onPress={save} style={s.button}><Text style={s.buttonText}>{busy?'Salvando…':'Salvar nome'}</Text></Pressable><Pressable accessibilityRole="button" disabled={busy} onPress={back} style={s.cancel}><Text style={s.cancelText}>Cancelar</Text></Pressable></View>
+      {draft!==base&&<DiscardDraftAction disabled={busy} owner={path} label="Excluir rascunho do nome" onDiscard={()=>{setDraft(base);setOpened(false);}} />}
     </>}
   </View>;
 }

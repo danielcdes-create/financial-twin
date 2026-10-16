@@ -11,6 +11,8 @@ import {parseMoneyInput} from '../utils/moneyInput';
 import {natureLabel} from '../utils/movementFilters';
 import {useAsyncScope} from '../utils/useAsyncScope';
 import {useClassificationOptions} from '../utils/useClassificationOptions';
+import DiscardDraftAction from './DiscardDraftAction';
+import {protectUnsavedBack, useLocalBack} from '../utils/localBack';
 
 type Api = (path: string, init?: RequestInit) => Promise<any>;
 type Card = {key: string; source: 'managed' | 'installment' | 'obligation'; title: string; subtitle: string; payload: any};
@@ -41,7 +43,7 @@ function moneyField(value: unknown): string {
 }
 
 function storedDue(item: any): string {
-  return formatCivilDate(String(item.next_due_date || item.due_date || '').slice(0, 10));
+  return formatCivilDate(String(item.next_due_date || item.due_date || item.nextDue || '').slice(0, 10));
 }
 
 /** Category, subcategory, and platform are already the words stored and shown. */
@@ -75,22 +77,54 @@ export default function CommitmentProfileEditor({card, api, cardLabelFor = () =>
   const identity = identityOf(card);
   const original = originalOf(card);
   const catalog = useClassificationOptions(api, card.key).options;
-  const [displayName, setDisplayName] = useState(String(item.display_name || linked.vendedor || (card.title !== original ? card.title : '') || ''));
-  const [natureza, setNatureza] = useState(String(item.natureza || linked.natureza || ''));
-  const [categoria, setCategoria] = useState(String(item.categoria || item.category || linked.categoria || ''));
-  const [subcategoria, setSubcategoria] = useState(String(item.subcategoria || linked.subcategoria || ''));
-  const [plataforma, setPlataforma] = useState(String(item.plataforma || item.billing_platform || linked.plataforma || ''));
-  const [method, setMethod] = useState(String(linked.metodo_pagamento || item.payment_method || item.metodo_pagamento || ''));
-  const [account, setAccount] = useState(String(item.account_id || linked.account_id || ''));
-  const [cardId, setCardId] = useState(String(item.card_id || linked.card_id || ''));
-  const [amount, setAmount] = useState(moneyField(item.amount ?? linked.amount ?? ''));
-  const [frequency, setFrequency] = useState(String(item.frequency || 'mensal'));
-  const [due, setDue] = useState(storedDue(item));
+  const initialDisplayName = String(item.display_name || linked.vendedor || (card.title !== original ? card.title : '') || '');
+  const initialNatureza = String(item.natureza || linked.natureza || '');
+  const initialCategoria = String(item.categoria || item.category || linked.categoria || '');
+  const initialSubcategoria = String(item.subcategoria || linked.subcategoria || '');
+  const initialPlataforma = String(item.plataforma || item.billing_platform || linked.plataforma || '');
+  const initialMethod = String(linked.metodo_pagamento || item.payment_method || item.metodo_pagamento || '');
+  const initialAccount = String(item.account_id || linked.account_id || '');
+  const initialCardId = String(item.card_id || linked.card_id || '');
+  const initialAmount = moneyField(item.amount ?? linked.amount ?? '');
+  const initialFrequency = String(item.frequency || 'mensal');
+  const initialDue = storedDue(item);
+  const [displayName, setDisplayName] = useState(initialDisplayName);
+  const [natureza, setNatureza] = useState(initialNatureza);
+  const [categoria, setCategoria] = useState(initialCategoria);
+  const [subcategoria, setSubcategoria] = useState(initialSubcategoria);
+  const [plataforma, setPlataforma] = useState(initialPlataforma);
+  const [method, setMethod] = useState(initialMethod);
+  const [account, setAccount] = useState(initialAccount);
+  const [cardId, setCardId] = useState(initialCardId);
+  const [amount, setAmount] = useState(initialAmount);
+  const [frequency, setFrequency] = useState(initialFrequency);
+  const [due, setDue] = useState(initialDue);
   const [scope, setScope] = useState<'next' | 'future'>('next');
   const [busy, setBusy] = useState(false);
   const running = useRef(false);
   const captureScope = useAsyncScope(`profile:${card.key}`);
   const scoped = needsScope(card);
+  const dirty = displayName !== initialDisplayName || natureza !== initialNatureza || categoria !== initialCategoria ||
+    subcategoria !== initialSubcategoria || plataforma !== initialPlataforma || method !== initialMethod ||
+    account !== initialAccount || cardId !== initialCardId || amount !== initialAmount ||
+    frequency !== initialFrequency || due !== initialDue;
+  const resetDraft = () => {
+    setDisplayName(initialDisplayName);
+    setNatureza(initialNatureza);
+    setCategoria(initialCategoria);
+    setSubcategoria(initialSubcategoria);
+    setPlataforma(initialPlataforma);
+    setMethod(initialMethod);
+    setAccount(initialAccount);
+    setCardId(initialCardId);
+    setAmount(initialAmount);
+    setFrequency(initialFrequency);
+    setDue(initialDue);
+    setScope('next');
+    onClose();
+  };
+  const back = () => protectUnsavedBack(dirty, onClose);
+  useLocalBack(back, true, 35);
   const natureText = (value: string) => String(catalog.natureza_labels?.[value] || natureLabel(value) || '');
   const methodText = (value: string) => paymentCodeLabel(value) || String(catalog.metodo_pagamento_labels?.[value] || '');
   const storedCardId = String(item.card_id || linked.card_id || '');
@@ -133,11 +167,13 @@ export default function CommitmentProfileEditor({card, api, cardLabelFor = () =>
     setBusy(true);
     const valid = captureScope();
     const methodCode = method.trim();
+    const expectedRevision = card.source === 'managed' && item.revision != null ? Number(item.revision) : undefined;
     try {
       const saved = await api('/v1/commitment-profile', {method: 'PUT', body: JSON.stringify({
         request_id: creationId(),
         source: card.source,
         identity,
+        ...(expectedRevision !== undefined ? {expected_revision: expectedRevision} : {}),
         display_name: displayName.trim(),
         natureza: natureza.trim() || null,
         categoria: categoria.trim(),
@@ -167,26 +203,30 @@ export default function CommitmentProfileEditor({card, api, cardLabelFor = () =>
   return <View accessibilityLabel="Editor do compromisso inteiro" accessibilityValue={{text: identity}} style={s.box}>
     <Text style={s.section}>Editar compromisso</Text>
     <Text style={s.label}>Vendedor / nome de exibição</Text>
-    <TextInput accessibilityLabel="Nome de exibição" value={displayName} onChangeText={setDisplayName} placeholderTextColor="#92A4A2" style={s.input}/>
+    <TextInput accessibilityLabel="Nome de exibição" editable={!busy} value={displayName} onChangeText={setDisplayName} placeholderTextColor="#92A4A2" style={s.input}/>
     <Text style={s.label}>Descrição original</Text>
     <Text accessibilityLabel="Descrição original" style={s.readonly}>{original}</Text>
-    <ControlledChoice label="Natureza" value={natureza} options={natures.values} display={natures.labelOf} onChange={setNatureza} allowClear/>
-    <ControlledChoice label="Categoria" value={categoria} options={categories.values} display={categories.labelOf} onChange={value => {setCategoria(value); setSubcategoria('');}} allowClear/>
-    <ControlledChoice label="Subcategoria" value={subcategoria} options={subcategories.values} display={subcategories.labelOf} onChange={setSubcategoria} allowClear/>
-    <ControlledChoice label="Plataforma" value={plataforma} options={platforms.values} display={platforms.labelOf} onChange={setPlataforma} allowClear/>
-    <ControlledChoice label="Meio de pagamento" value={method} options={methods.values} display={methods.labelOf} onChange={setMethod} allowClear/>
-    <ControlledChoice label="Conta" value={account} options={accounts.values} display={accounts.labelOf} onChange={setAccount} allowClear/>
-    <ControlledChoice label="Cartão" value={cardId} options={cards.values} display={cards.labelOf} onChange={setCardId} allowClear/>
+    <ControlledChoice disabled={busy} label="Natureza" value={natureza} options={natures.values} display={natures.labelOf} onChange={setNatureza} allowClear/>
+    <ControlledChoice disabled={busy} label="Categoria" value={categoria} options={categories.values} display={categories.labelOf} onChange={value => {setCategoria(value); setSubcategoria('');}} allowClear/>
+    <ControlledChoice disabled={busy} label="Subcategoria" value={subcategoria} options={subcategories.values} display={subcategories.labelOf} onChange={setSubcategoria} allowClear/>
+    <ControlledChoice disabled={busy} label="Plataforma" value={plataforma} options={platforms.values} display={platforms.labelOf} onChange={setPlataforma} allowClear/>
+    <ControlledChoice disabled={busy} label="Meio de pagamento" value={method} options={methods.values} display={methods.labelOf} onChange={setMethod} allowClear/>
+    <ControlledChoice disabled={busy} label="Conta" value={account} options={accounts.values} display={accounts.labelOf} onChange={setAccount} allowClear/>
+    <ControlledChoice disabled={busy} label="Cartão" value={cardId} options={cards.values} display={cards.labelOf} onChange={setCardId} allowClear/>
     <Text style={s.label}>Valor</Text>
-    <TextInput accessibilityLabel="Valor do compromisso" value={amount} onChangeText={value => setAmount(value ? `R$ ${maskMoneyInput(value)}` : '')} placeholder="R$ 0,00" placeholderTextColor="#92A4A2" keyboardType="decimal-pad" style={s.input}/>
-    <ControlledChoice label="Frequência" value={frequency} options={frequencies.values} display={frequencies.labelOf} onChange={setFrequency} allowClear={false}/>
+    <TextInput accessibilityLabel="Valor do compromisso" editable={!busy} value={amount} onChangeText={value => setAmount(value ? `R$ ${maskMoneyInput(value)}` : '')} placeholder="R$ 0,00" placeholderTextColor="#92A4A2" keyboardType="decimal-pad" style={s.input}/>
+    <ControlledChoice disabled={busy} label="Frequência" value={frequency} options={frequencies.values} display={frequencies.labelOf} onChange={setFrequency} allowClear={false}/>
     <Text style={s.label}>Vencimento</Text>
-    <TextInput accessibilityLabel="Vencimento" value={due} onChangeText={value => setDue(maskCivilDate(value))} placeholder="dd/mm/aaaa" placeholderTextColor="#92A4A2" keyboardType="number-pad" style={s.input}/>
+    <TextInput accessibilityLabel="Vencimento" editable={!busy} value={due} onChangeText={value => setDue(maskCivilDate(value))} placeholder="dd/mm/aaaa" placeholderTextColor="#92A4A2" keyboardType="number-pad" style={s.input}/>
     {scoped && <View>
-      <Pressable accessibilityRole="button" accessibilityLabel="Apenas a próxima parcela em aberto" accessibilityState={{selected: scope === 'next'}} onPress={() => setScope('next')} style={s.choice}><Text style={s.choiceText}>{scope === 'next' ? '✓ ' : ''}Apenas a próxima parcela em aberto</Text></Pressable>
-      <Pressable accessibilityRole="button" accessibilityLabel="Todas as parcelas futuras em aberto" accessibilityState={{selected: scope === 'future'}} onPress={() => setScope('future')} style={s.choice}><Text style={s.choiceText}>{scope === 'future' ? '✓ ' : ''}Todas as parcelas futuras em aberto</Text></Pressable>
+      <Pressable accessibilityRole="button" accessibilityLabel="Apenas a próxima parcela em aberto" accessibilityState={{selected: scope === 'next'}} disabled={busy} onPress={() => setScope('next')} style={s.choice}><Text style={s.choiceText}>{scope === 'next' ? '✓ ' : ''}Apenas a próxima parcela em aberto</Text></Pressable>
+      <Pressable accessibilityRole="button" accessibilityLabel="Todas as parcelas futuras em aberto" accessibilityState={{selected: scope === 'future'}} disabled={busy} onPress={() => setScope('future')} style={s.choice}><Text style={s.choiceText}>{scope === 'future' ? '✓ ' : ''}Todas as parcelas futuras em aberto</Text></Pressable>
     </View>}
-    <Pressable accessibilityRole="button" accessibilityLabel="Salvar compromisso" disabled={busy} onPress={() => {void save();}} style={s.save}><Text style={s.saveText}>Salvar</Text></Pressable>
+    <View style={s.actions}>
+      <Pressable accessibilityRole="button" accessibilityLabel="Salvar compromisso" disabled={busy} onPress={() => {void save();}} style={s.save}><Text style={s.saveText}>Salvar</Text></Pressable>
+      <Pressable accessibilityRole="button" accessibilityLabel="Cancelar edição do compromisso" disabled={busy} onPress={back} style={s.cancel}><Text style={s.choiceText}>Cancelar</Text></Pressable>
+    </View>
+    {dirty && <DiscardDraftAction disabled={busy} owner={`profile:${card.key}`} label="Excluir rascunho do compromisso" onDiscard={resetDraft} />}
   </View>;
 }
 
@@ -198,6 +238,8 @@ const s = StyleSheet.create({
   input: {minHeight: 44, borderWidth: 1, borderColor: '#395358', borderRadius: 12, paddingHorizontal: 12, color: '#F4F7F5', backgroundColor: '#142326'},
   choice: {minHeight: 44, justifyContent: 'center'},
   choiceText: {color: '#C5D5D2', fontSize: 15},
-  save: {minHeight: 44, justifyContent: 'center', backgroundColor: '#49C5AA', borderRadius: 12, paddingHorizontal: 16, alignSelf: 'flex-start', marginTop: 8},
+  actions: {flexDirection: 'row', flexWrap: 'wrap', gap: 10, alignItems: 'center', marginTop: 8},
+  save: {minHeight: 44, justifyContent: 'center', backgroundColor: '#49C5AA', borderRadius: 12, paddingHorizontal: 16, alignSelf: 'flex-start'},
   saveText: {color: '#061412', fontSize: 15, fontWeight: '800'},
+  cancel: {minHeight: 44, justifyContent: 'center', paddingHorizontal: 12},
 });

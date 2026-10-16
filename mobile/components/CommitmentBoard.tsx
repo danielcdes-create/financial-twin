@@ -13,6 +13,7 @@ import {
 } from '../utils/commitmentPresentation';
 import {headingForInstallment, headingForManaged, settlementLabel} from '../utils/commitmentProfile';
 import {useLocalBack} from '../utils/localBack';
+import {useAsyncScope} from '../utils/useAsyncScope';
 import {useScheduleOverlay} from './ScheduleOverlay';
 import CommitmentProfileEditor from './CommitmentProfileEditor';
 
@@ -45,20 +46,25 @@ function paymentOf(card: Card, cardLabelFor: (id: string) => string | undefined,
 
 function LinkedPaymentSheet({item, link, api, money, onChanged, onSwap}: {item: any; link: any; api: Api; money: (value: number) => string; onChanged: () => Promise<void>; onSwap: () => void}) {
   const [busy, setBusy] = useState(false);
+  const captureScope = useAsyncScope(item.commitment_id);
   const source = link.transaction_id ? {transaction_id: link.transaction_id} : {provisional_id: link.provisional_id};
   const remove = () => {
     if (busy) return;
+    const dialogValid = captureScope();
     Alert.alert('Desvincular pagamento', 'O lançamento continua no extrato. A agenda só volta se este for o vínculo mais recente que a moveu.', [
       {text: 'Cancelar', style: 'cancel'},
       {text: 'Desvincular', onPress: () => {void (async () => {
+        if (!dialogValid() || busy) return;
+        const valid = captureScope();
         setBusy(true);
         try {
           const result = await api(`/v1/commitments/${item.commitment_id}/payment-unlink`, {method: 'POST', body: JSON.stringify({request_id: creationId(), expected_revision: item.revision || 1, ...source})});
+          if (!valid()) return;
           Alert.alert(result?.warning ? 'Agenda mantida' : 'Vínculo removido', result?.warning || 'A agenda voltou ao estado anterior a este vínculo.');
           await onChanged();
         } catch (error: any) {
-          Alert.alert('Não foi possível desvincular', error.message);
-        } finally {setBusy(false);}
+          if (valid()) Alert.alert('Não foi possível desvincular', error.message);
+        } finally {if (valid()) setBusy(false);}
       })();}},
     ]);
   };
@@ -114,6 +120,7 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
   const [collapsedYears, setCollapsedYears] = useState<Record<string, boolean>>({});
   const [undoOffers, setUndoOffers] = useState<Array<{key: string; source: 'obligation' | 'managed' | 'installment'; title: string; rows: Array<{identity: string; delete_request_id: string}>}>>([]);
   const [busy, setBusy] = useState(false);
+  const captureScope = useAsyncScope();
   const [reconcileAll, setReconcileAll] = useState(false);
   const [importedUndo, setImportedUndo] = useState<{source: 'installment' | 'obligation'; identity: string; revision: number; title: string; transactionId?: string; provisionalId?: string} | null>(null);
 
@@ -162,7 +169,8 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
   }, [bindCharge, cards]);
 
   const removeSeries = async (card: Card) => {
-    if (busy || card.source !== 'obligation') return;
+    if (busy || card.source !== 'obligation' || !captureScope()()) return;
+    const valid = captureScope();
     setBusy(true);
     const done: Array<{identity: string; delete_request_id: string}> = [];
     try {
@@ -174,14 +182,16 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
         if (!saved.persisted || saved.identity !== String(item.id)) throw new Error('O servidor não confirmou esta alteração. Tente novamente.');
         done.push({identity: String(item.id), delete_request_id: String(saved.delete_request_id || requestId)});
       }
+      if (!valid()) return;
       rememberUndo(card.key, 'obligation', card.title, done);
       setConfirmKey(null);
       Alert.alert('Compromissos futuros excluídos', 'A alteração foi confirmada. O histórico foi preservado.');
       await onUpdated();
     } catch (failure: any) {
+      if (!valid()) return;
       if (done.length) rememberUndo(card.key, 'obligation', card.title, done);
       Alert.alert('Não foi possível concluir a remoção', failure?.message || 'A remoção parou. O que já foi retirado pode ser desfeito.');
-    } finally {setBusy(false);}
+    } finally {if (valid()) setBusy(false);}
   };
   const rememberUndo = (key: string, source: 'obligation' | 'managed' | 'installment', title: string, rows: Array<{identity: string; delete_request_id: string}>) => {
     setUndoOffers(current => {
@@ -192,23 +202,26 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
     });
   };
   const undoOffer = async (offer: {key: string; source: 'obligation' | 'managed' | 'installment'; title: string; rows: Array<{identity: string; delete_request_id: string}>}) => {
-    if (busy || !offer.rows.length) return;
+    if (busy || !offer.rows.length || !captureScope()()) return;
+    const valid = captureScope();
     setBusy(true);
     try {
       for (const row of offer.rows) {
         const saved = await api(`/v1/future-commitments/${offer.source}/${encodeURIComponent(row.identity)}/undo`, {method: 'POST', body: JSON.stringify({request_id: creationId(), delete_request_id: row.delete_request_id})});
         if (!saved.restored) throw new Error('O servidor não confirmou o desfazer.');
       }
+      if (!valid()) return;
       setUndoOffers(current => current.filter(item => item.key !== offer.key));
       Alert.alert('Exclusão futura desfeita', 'As parcelas futuras voltaram ao planejamento. Pagamentos já vinculados não foram alterados.');
       await onUpdated();
     } catch (failure: any) {
-      Alert.alert('Não foi possível desfazer', failure?.message || 'Tente novamente.');
-    } finally {setBusy(false);}
+      if (valid()) Alert.alert('Não foi possível desfazer', failure?.message || 'Tente novamente.');
+    } finally {if (valid()) setBusy(false);}
   };
 
   const closeManaged = async (card: Card) => {
-    if (busy || card.source !== 'managed') return;
+    if (busy || card.source !== 'managed' || !captureScope()()) return;
+    const valid = captureScope();
     const item = card.payload;
     setBusy(true);
     try {
@@ -223,16 +236,19 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
       if (item.kind === 'parcelamento' || (item.kind === 'obrigacao' && item.installment_count)) {body.installment_count = item.installment_count; body.next_installment_number = item.next_installment_number;}
       const saved = await api(`/v1/commitments/${item.commitment_id}`, {method: 'PUT', body: JSON.stringify(body)});
       if (!saved || (saved.status && saved.status !== 'cancelado')) throw new Error('O servidor não confirmou o encerramento.');
+      if (!valid()) return;
       setCloseKey(null);
       Alert.alert('Compromisso encerrado', item.kind === 'assinatura'
         ? 'O histórico e os pagamentos já vinculados permanecem. Isso não cancela o serviço no fornecedor.'
         : 'O histórico e os pagamentos já vinculados permanecem. Isso não quita nem altera o contrato.');
       await onUpdated();
     } catch (failure: any) {
-      Alert.alert('Não foi possível encerrar', failure?.message || 'Tente novamente.');
-    } finally {setBusy(false);}
+      if (valid()) Alert.alert('Não foi possível encerrar', failure?.message || 'Tente novamente.');
+    } finally {if (valid()) setBusy(false);}
   };
   const saveEnd = async (card: Card, end: string) => {
+    if (busy || !captureScope()()) return;
+    const valid = captureScope();
     const item = card.payload;
     setBusy(true);
     try {
@@ -247,12 +263,13 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
       if (item.kind === 'parcelamento' || (item.kind === 'obrigacao' && item.installment_count)) {body.installment_count = item.installment_count; body.next_installment_number = item.next_installment_number;}
       const saved = await api(`/v1/commitments/${item.commitment_id}`, {method: 'PUT', body: JSON.stringify(body)});
       if (!saved?.commitment_id && saved?.status === undefined && !saved?.revision) throw new Error('O servidor não confirmou o término.');
+      if (!valid()) return;
       setEndEdit(null);
       Alert.alert('Término gravado', 'As cobranças depois dessa data saíram da projeção. Vínculos e extrato permanecem.');
       await onUpdated();
     } catch (failure: any) {
-      Alert.alert('Não foi possível gravar o término', failure?.message || 'Tente novamente.');
-    } finally {setBusy(false);}
+      if (valid()) Alert.alert('Não foi possível gravar o término', failure?.message || 'Tente novamente.');
+    } finally {if (valid()) setBusy(false);}
   };
   const askEnd = (card: Card) => {
     const match = /^(\d{2})\/(\d{4})$/.exec(endMonth.trim());
