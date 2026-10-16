@@ -2,7 +2,7 @@
 
 Atualização 1.20.33: um parcelamento concluído conserva `next_installment_number = installment_count + 1`, inclusive 601 após 600/600. Esse sentinela é aceito somente com `status=concluido`; editar observações preserva pagamentos, contador e datas. Não há próxima cobrança e não é permitido reativar esse cadastro sem corrigir explicitamente sua condição. Os cronogramas não projetam cobranças de compromisso concluído.
 
-Em 409, o editor compara origem/local/remoto por identidade da parcela e por campo. Alterações disjuntas podem ser mescladas; valor, data ou cancelamento sobrepostos exigem escolha. Parcela paga/removida bloqueia reaplicação. Recargas repetidas e conflitos consecutivos conservam as decisões ainda pendentes. O token remoto só autoriza o patch conferido. [Validação atual](RECUPERACAO-ANDROID-2026-10-09.md).
+Em 409, o editor compara origem/local/remoto por identidade da parcela e por campo. Alterações disjuntas podem ser mescladas; valor, data ou cancelamento sobrepostos exigem escolha. Parcela paga/removida bloqueia reaplicação. Recargas repetidas e conflitos consecutivos conservam as decisões ainda pendentes. O token remoto só autoriza o patch conferido. [Auditoria atual](AUDITORIA-ADVERSARIAL.md).
 
 ## Gráfico mensal de compromissos
 

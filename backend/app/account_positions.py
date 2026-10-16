@@ -3,12 +3,14 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import unicodedata
 
+from bson import ObjectId
 from bson.decimal128 import Decimal128
 from fastapi import HTTPException
 from app.source_tokens import source_token
 from app.account_profiles import ACCOUNT_CATALOG, ACCOUNT_KEYS, account_profiles, legacy_accounts_by_profile, validate_account_key
 from app.account_profiles import effective_capture_account_key
 from app.transfer_legs import resolved_transfer_legs
+from app.economic_policy import duplicate_of_ledger
 
 
 def account_key_for_legacy(account):
@@ -31,6 +33,16 @@ def _decimal(value):
 
 def _aware(value):
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+def _linked_statement_inside_reference(db, capture, account_id, after_reference):
+    """A capture promoted from a statement leg already inside the reference is not a new movement."""
+    link = str(capture.get("linked_transaction_id") or "")
+    if not ObjectId.is_valid(link):
+        return False
+    linked = db.transactions.find_one({"_id": ObjectId(link)}, {"account_id": 1, "data_evento": 1})
+    when = linked.get("data_evento") if linked and linked.get("account_id") == account_id else None
+    return bool(when) and not after_reference(when)
 
 
 def account_positions(db):
@@ -88,6 +100,8 @@ def account_positions(db):
                             movement_count += 1
                             counted_legacy_ids.add(str(posted["_id"]))
                 elif not after_reference(when): continue
+                elif duplicate_of_ledger(capture, counted_legacy_ids): continue
+                elif legacy and _linked_statement_inside_reference(db, capture, legacy["_id"], after_reference): continue
                 elif effective_capture_account_key(capture, legacy_by_key) == key:
                     amount += value
                     movement_count += 1

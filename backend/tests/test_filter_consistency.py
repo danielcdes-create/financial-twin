@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).parents[1]))
 from bson import ObjectId
 from bson.decimal128 import Decimal128
 from fastapi import HTTPException
+from app.dashboard_window import PROJECTION
 from app.main import _dashboard, cursor_movements, transactions, with_merchant_name, with_merchant_names
 from app.insights import experiment_report
 from app.financial_time import day_start
@@ -49,6 +50,24 @@ def put(db, captured=False, day=date(2026,10,2), category='Alimentação', amoun
     return row
 
 
+def included(row, projection):
+    """Apply a Mongo inclusion projection. Fields left out are absent, as on the server."""
+    projected = {}
+    if row.get('_id') is not None and projection.get('_id', 1):
+        projected['_id'] = row['_id']
+    for key, flag in projection.items():
+        if not flag or key == '_id':
+            continue
+        if '.' in key:
+            head, tail = key.split('.', 1)
+            nested = row.get(head)
+            if isinstance(nested, dict) and tail in nested:
+                projected.setdefault(head, {})[tail] = nested[tail]
+        elif key in row:
+            projected[key] = row[key]
+    return projected
+
+
 def listing(db, **kwargs):
     args={'limit':50,'cursor':None,'search':None,'category':None,'account_id':None,
           'date_from':date(2026,10,1),'date_to':date(2026,10,31),'db':db,**kwargs}
@@ -82,6 +101,29 @@ class FilterConsistencyTests(unittest.TestCase):
         self.assertEqual(listing(db,category='Alimentação',period_basis='economic',spending_only=True)['items'][0]['id'],str(declared['_id']))
         self.assertNotEqual(listing(db,category='Alimentação')['total'],1)
         for name in ('transactions','provisional_transactions'):self.assertEqual(before[name].docs,db[name].docs)
+
+    def test_linked_capture_is_one_economic_expense_on_the_dashboard_and_drilldown(self):
+        db=FilterDB()
+        ledger=put(db,day=date(2026,10,5),amount='-10',category='Alimentação',natureza='COMPRA')
+        put(db,True,day=date(2026,10,5),amount='-10',category='Alimentação',natureza='COMPRA',linked_transaction_id=str(ledger['_id']))
+        put(db,True,day=date(2026,10,6),amount='-4',category='Transporte',natureza='COMPRA')
+        before=copy.deepcopy(dict(db))
+        dashboard=_dashboard('month',date(2026,10,1),date(2026,10,31),db)
+        self.assertEqual(dashboard['expenses'],14)
+        food=next(bucket['amount'] for bucket in dashboard['category_spending'] if bucket['category']=='Alimentação')
+        self.assertEqual(food,10)
+        natures={row['nature']:row['amount'] for row in dashboard['nature_spending']}
+        self.assertEqual(natures['COMPRA'],14)
+        drill=listing(db,category='Alimentação',period_basis='economic',spending_only=True)
+        self.assertEqual((drill['spending_total'],drill['total']),(10,1))
+        self.assertEqual(listing(db)['total'],3)
+        for name in ('transactions','provisional_transactions'):self.assertEqual(before[name].docs,db[name].docs)
+        projected=_dashboard('month',date(2026,10,1),date(2026,10,31),db,snapshot=(
+            [included(row,PROJECTION) for row in db.transactions.docs],
+            [included(row,PROJECTION) for row in db.provisional_transactions.docs if row.get('status')=='confirmed']))
+        self.assertEqual(projected['expenses'],14)
+        self.assertEqual(sum(row['expenses'] for row in projected['monthly_series']),14)
+        self.assertIn('linked_transaction_id', PROJECTION)
 
     def test_no_category_truncation_beyond_eight_or_twelve(self):
         db=FilterDB()

@@ -27,7 +27,7 @@ from app.services.ai.xai.provider import XAITextProvider, XAIVisionProvider, XAI
 from app.schemas_document import DocumentExtraction
 from app.parsers import parse_brl, parse_datetime
 from app.auth import require_session
-from app.economic_policy import eligible_payment, effects
+from app.economic_policy import eligible_payment, effects, captures_not_in_ledger
 from app.economic_period import economic_month, economic_instant, economic_in_period
 from app.financial_time import LOCAL_ZONE, day_start, local_date, today as local_today, utc_instant
 from app.analytics import EXPENSE_REASONS, calculate_financial_totals, decimal_amount
@@ -549,9 +549,9 @@ def dashboard_forecast(db):
 
 def _dashboard(period, date_from, date_to, db, snapshot=None, forecast=None):
     if snapshot is None and isinstance(db,(Database,_SessionDatabase)):snapshot=snapshot_for(db,[(period,date_from,date_to)])
-    txs=list(snapshot[0]) if snapshot is not None else list(db.transactions.find({}, {"valor":1,"fluxo":1,"tipo":1,"natureza":1,"categoria":1,"subcategoria":1,"descricao_original":1,"estabelecimento_original":1,"data_evento":1,"competencia":1,"recorrencia":1,"classification.migration_reason":1}).limit(0))
+    txs=list(snapshot[0]) if snapshot is not None else list(db.transactions.find({}, PROJECTION).limit(0))
     dates=[tx["data_evento"] for tx in txs if tx.get("data_evento")]
-    confirmed_all=list(snapshot[1]) if snapshot is not None else list(db.provisional_transactions.find({"status":"confirmed"},{"valor":1,"natureza":1,"tipo":1,"categoria_sugerida":1,"subcategoria":1,"merchant_raw":1,"data_evento":1,"competencia":1}))
+    confirmed_all=list(snapshot[1]) if snapshot is not None else list(db.provisional_transactions.find({"status":"confirmed"}, PROJECTION))
     confirmed_dates=[item["data_evento"] for item in confirmed_all if item.get("data_evento")]
     if snapshot is not None and len(snapshot)>2:
         dates=[snapshot[2]["legacy"]] if snapshot[2]["legacy"] else []
@@ -568,7 +568,7 @@ def _dashboard(period, date_from, date_to, db, snapshot=None, forecast=None):
         if row.get("competencia"):return economic_in_period(row,date.min if start.year==1 else local_date(start),local_date(end))
         return bool(row.get("data_evento") and start<=normalized_datetime(row["data_evento"])<=end)
     filtered_txs=[tx for tx in txs if economic_selected(tx,range_start,range_end)]
-    confirmed=[item for item in confirmed_all if economic_selected(item,range_start,range_end)]
+    confirmed=captures_not_in_ledger(filtered_txs,[item for item in confirmed_all if economic_selected(item,range_start,range_end)])
     totals=calculate_financial_totals(filtered_txs,confirmed)
     income,expenses,categories=totals["income"],totals["expenses"],totals["categories"]
     nature_totals={nature:Decimal("0") for nature in NATURES}
@@ -585,7 +585,7 @@ def _dashboard(period, date_from, date_to, db, snapshot=None, forecast=None):
             shift=-12 if period=="year" else -{"month":1,"3m":3,"6m":6,"12m":12}.get(period,1)
             previous_start=shift_months(range_start,shift);previous_end=shift_months(range_end,shift)
         previous_txs=[tx for tx in txs if economic_selected(tx,previous_start,previous_end)]
-        previous_confirmed=[item for item in confirmed_all if economic_selected(item,previous_start,previous_end)]
+        previous_confirmed=captures_not_in_ledger(previous_txs,[item for item in confirmed_all if economic_selected(item,previous_start,previous_end)])
         previous_totals=calculate_financial_totals(previous_txs,previous_confirmed)
     forecast=forecast or dashboard_forecast(db)
     pending=forecast["pending"]
@@ -1292,7 +1292,7 @@ def cursor_movements(limit, cursor, search, category, account_id, date_from, dat
         # Bound by category/account/economic window before applying the exact
         # shared policy. Filtering only the first page would corrupt counts.
         legacy=list(db.transactions.find(legacy_query))
-        captures=list(db.provisional_transactions.find(capture_query))
+        captures=captures_not_in_ledger(legacy,list(db.provisional_transactions.find(capture_query)))
         pairs=[(source,item) for source,rows in [('ledger',legacy),('capture',captures)] for item in rows
                if effects(item,source=='capture')['role'] in {'expense','refund'}]
         total=len(pairs)

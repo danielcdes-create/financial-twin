@@ -2,7 +2,7 @@
 
 Contrato atualizado em 1.20.33: o inventário de uso inclui **todos** os compromissos e regras de valor, inclusive pausados, cancelados, concluídos e com cobranças futuras removidas. Prévia e exclusão usam `account_usage`; exclusão e criação/alteração de vínculos disputam a mesma trava de movimentações dentro da transação MongoDB. Uma corrida não pode deixar compromisso ou regra órfã.
 
-Conta encerrada ou arquivada continua válida para manter o vínculo histórico durante edição, observações ou cancelamento. Trocar para outra conta ou criar vínculo exige conta selecionável. O editor conserva a conta histórica na lista e a distingue de novas escolhas. [Regressões e comprovação](RECUPERACAO-ANDROID-2026-10-09.md).
+Conta encerrada ou arquivada continua válida para manter o vínculo histórico durante edição, observações ou cancelamento. Trocar para outra conta ou criar vínculo exige conta selecionável. O editor conserva a conta histórica na lista e a distingue de novas escolhas. [Auditoria atual](AUDITORIA-ADVERSARIAL.md).
 
 Em **Mais > Contas**, adicionar e editar apelido, instituição, tipo, agência e dígito, número e dígito, status, datas opcionais e observações. Campos bancários são textos para preservar zeros iniciais. Carteiras e contas de criptoativos dispensam agência e número. A moeda permanece BRL, conforme o modelo financeiro atual; criptoativos usam equivalente em reais informado pelo usuário.
 

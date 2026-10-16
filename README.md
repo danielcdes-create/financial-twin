@@ -204,7 +204,7 @@ The local mobile `.env` supplies the Tailscale HTTPS URL. No server API key belo
 - `GET /v1/account-positions`, `PUT /v1/account-positions/{key}/balance-reference`, `POST /v1/transfers/reconcile`
 - `GET/POST /v1/commitments`, `PUT /v1/commitments/{id}`, `POST /v1/commitments/{id}/payment`
 
-Use `/docs` on the running backend for request schemas. Personal-data routes always require an authenticated Bearer session. `/health` contains only service status. See [safe editing and audit regressions](docs/AUDIT-C01-C23.md) for version tokens, review acknowledgement and pagination.
+Use `/docs` on the running backend for request schemas. Personal-data routes always require an authenticated Bearer session. `/health` contains only service status. See [the current adversarial audit](docs/AUDITORIA-ADVERSARIAL.md) for version tokens, review acknowledgement and pagination. The editing rule is unchanged: classification and review require the read token, a repeated command with the same id returns the prior result, and a changed payload with that id returns 409.
 
 ## Tests and checks
 

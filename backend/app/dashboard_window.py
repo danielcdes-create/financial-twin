@@ -3,7 +3,7 @@ from datetime import datetime,timezone,timedelta
 from app.financial_time import day_start,today,local_date
 from app.economic_period import economic_instant
 
-PROJECTION={'valor':1,'fluxo':1,'tipo':1,'natureza':1,'categoria':1,'categoria_sugerida':1,'subcategoria':1,'descricao_original':1,'estabelecimento_original':1,'merchant_raw':1,'data_evento':1,'competencia':1,'recorrencia':1,'transfer':1,'classification.migration_reason':1}
+PROJECTION={'valor':1,'fluxo':1,'tipo':1,'natureza':1,'categoria':1,'categoria_sugerida':1,'subcategoria':1,'descricao_original':1,'estabelecimento_original':1,'merchant_raw':1,'data_evento':1,'competencia':1,'recorrencia':1,'transfer':1,'classification.migration_reason':1,'linked_transaction_id':1}
 
 def snapshot_for(db,windows):
     from app.main import period_start,shift_months,normalized_datetime

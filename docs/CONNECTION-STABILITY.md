@@ -6,7 +6,7 @@ Leitura, inclusão e confirmação nativas usam a mesma trava. O envelope `inbox
 
 Antes de consultar `/health`, o App importa os eventos locais para SQLite e confirma a identidade/conteúdo persistidos. A contagem é a união das identidades nativas e SQLite, distinguindo quarentena e etapas de finalização. A origem nativa só sai após ACK durável; erro posterior retoma finalização, sem repetir a escrita financeira. Offline mantém a evidência local visível e preservada. O transporte e a exportação continuam sujeitos à sessão e à privacidade.
 
-Notificações separam aprovação/recusa/estorno do contexto da compra, comerciante e rodapés. Compra aprovada com limite disponível é capturada; mensagem financeira ambígua segue como evidência para revisão. Correspondência automática exige referência bancária igual, provedor e conta duráveis iguais e as validações financeiras; similaridade sugere revisão. Valores/data/comerciante semelhantes não identificam uma compra. [Resultado e limites](RECUPERACAO-ANDROID-2026-10-09.md).
+Notificações separam aprovação/recusa/estorno do contexto da compra, comerciante e rodapés. Compra aprovada com limite disponível é capturada; mensagem financeira ambígua segue como evidência para revisão. Correspondência automática exige referência bancária igual, provedor e conta duráveis iguais e as validações financeiras; similaridade sugere revisão. Valores/data/comerciante semelhantes não identificam uma compra. [Auditoria atual](AUDITORIA-ADVERSARIAL.md).
 
 O backend permanece neste PC, conforme a escolha do usuário. PC, sessão Windows e Tailscale precisam estar ativos; suspensão ou desligamento interrompem o acesso. Não foram alteradas as preferências de bateria/suspensão, nem foi contratado um serviço externo.
 

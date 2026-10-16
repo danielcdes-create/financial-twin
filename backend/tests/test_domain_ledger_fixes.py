@@ -312,6 +312,34 @@ class LedgerDomainFixTests(unittest.TestCase):
         self.assertEqual(get_checklist('2026-08', db)['totals']['expenses'], '0.00')
         self.assertEqual(len(rows_for(db, date(2026, 9, 1), date(2026, 9, 30))), 2)
 
+    def test_linked_purchase_capture_does_not_move_the_balance_twice(self):
+        db = DomainDB(); bank = ObjectId()
+        put(db, 'accounts', {'_id': bank, 'tipo': 'conta_corrente', 'instituicao': 'Itaú'})
+        put(db, 'account_balance_snapshots', {'account_key': 'itau', 'amount': Decimal128('500.00'),
+            'as_of': day_start(date(2026, 9, 30)), 'reference_kind': 'civil_day'})
+        tx = expense(date(2026, 10, 2), '-40.00', account_id=bank)
+        put(db, 'transactions', tx)
+        put(db, 'provisional_transactions', {'_id': ObjectId(), 'status': 'confirmed', 'account_id': bank,
+            'data_evento': day_start(date(2026, 10, 2)), 'valor': Decimal128('-40.00'),
+            'linked_transaction_id': str(tx['_id'])})
+        put(db, 'provisional_transactions', {'_id': ObjectId(), 'status': 'confirmed', 'account_id': bank,
+            'data_evento': day_start(date(2026, 10, 3)), 'valor': Decimal128('-10.00')})
+        row = self.positions(db)['itau']
+        self.assertEqual(row['balance'], 450)
+        self.assertEqual(row['movement_count'], 2)
+        prior = DomainDB()
+        put(prior, 'accounts', {'_id': bank, 'tipo': 'conta_corrente', 'instituicao': 'Itaú'})
+        put(prior, 'account_balance_snapshots', {'account_key': 'itau', 'amount': Decimal128('500.00'),
+            'as_of': day_start(date(2026, 9, 30)), 'reference_kind': 'civil_day'})
+        earlier = expense(date(2026, 9, 15), '-40.00', account_id=bank)
+        put(prior, 'transactions', earlier)
+        put(prior, 'provisional_transactions', {'_id': ObjectId(), 'status': 'confirmed', 'account_id': bank,
+            'data_evento': day_start(date(2026, 10, 2)), 'valor': Decimal128('-40.00'),
+            'linked_transaction_id': str(earlier['_id'])})
+        covered = self.positions(prior)['itau']
+        self.assertEqual(covered['balance'], 500)
+        self.assertEqual(covered['movement_count'], 0)
+
     def test_confirmed_capture_linked_to_the_statement_is_not_counted_twice(self):
         db = DomainDB()
         tx = expense(date(2026, 9, 15), '-40.00')

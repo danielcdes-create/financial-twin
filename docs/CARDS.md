@@ -2,7 +2,7 @@
 
 Atualização 1.20.33: planejamento, compra e projeção compartilham `obligation_policy.py`: obrigações em `futura`, `aberta`, `vencida` e `parcialmente_paga` participam quando têm saldo positivo. Editar uma fatura futura para aberta conserva a dívida nos leitores; identidade e prevenção de dupla contagem continuam obrigatórias. Uma fatura quitada permanece fora dos fluxos em aberto.
 
-Confirmar exclusão exige dono válido antes do diálogo e imediatamente antes do transporte. Recarga após 409 conserva a origem e o rascunho até conferir as diferenças; uma segunda recarga idêntica não autoriza substituir o remoto silenciosamente. Valor usa o parser compartilhado estrito. [Validação atual](RECUPERACAO-ANDROID-2026-10-09.md).
+Confirmar exclusão exige dono válido antes do diálogo e imediatamente antes do transporte. Recarga após 409 conserva a origem e o rascunho até conferir as diferenças; uma segunda recarga idêntica não autoriza substituir o remoto silenciosamente. Valor usa o parser compartilhado estrito. [Auditoria atual](AUDITORIA-ADVERSARIAL.md).
 
 Em **Mais → Cartões**, escolha primeiro o cartão. A tela seguinte mostra somente suas faturas, com competência, vencimento, total, valor pago e saldo em aberto. **Trocar cartão** volta ao seletor.
 

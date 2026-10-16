@@ -26,3 +26,12 @@ def eligible_payment(item, captured=False):
 def effects(item, captured=False):
     value = amount(item.get('valor')) or Decimal('0'); kind = role(item,captured)
     return {'role':kind, 'income':value if kind == 'income' else Decimal('0'), 'expenses':-value if kind in {'expense','refund'} else Decimal('0')}
+
+def duplicate_of_ledger(item, ledger_ids):
+    """A confirmed capture promoted into the ledger is the same economic event."""
+    link = str(item.get('linked_transaction_id') or '')
+    return bool(link) and link in ledger_ids
+
+def captures_not_in_ledger(ledger, captures):
+    identities = {str(row['_id']) for row in ledger if row.get('_id') is not None}
+    return [row for row in captures if not duplicate_of_ledger(row, identities)]

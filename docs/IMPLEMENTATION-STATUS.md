@@ -4,7 +4,7 @@ Atualizado em 01/10/2026. Requisitos: [NT-001](NT-001-CONFIABILIDADE-E-EVOLUCAO.
 
 ## Correções da auditoria adversarial
 
-Os 15 achados foram tratados. Contratos, testes e limites: [correções da auditoria](ADVERSARIAL-FIXES-2026-10-01.md). Android **1.19.8 / versionCode 44** disponível em `/v1/app-update`, com manifesto, assinatura e download integral verificados. A API e a exportação desktop foram atualizadas. Os números abaixo documentam entregas históricas.
+Os 15 achados foram tratados. O julgamento vigente está na [auditoria adversarial](AUDITORIA-ADVERSARIAL.md). Android **1.19.8 / versionCode 44** disponível em `/v1/app-update`, com manifesto, assinatura e download integral verificados. A API e a exportação desktop foram atualizadas. Os números abaixo documentam entregas históricas.
 
 A falha 503 na exclusão foi corrigida no banco ativo: limite de coleções do Atlas, preservação de um banco sintético e reserva antecipada do arquivo de histórico. [Diagnóstico, recuperação e provas](DELETION-STORAGE-2026-10-01.md). A captura real permanece confirmada até nova confirmação do usuário.
 
