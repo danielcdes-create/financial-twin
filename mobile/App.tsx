@@ -1758,26 +1758,41 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
             </>
           )}
           {tab === "Categorias" && (
-            <CategoryManager
-              api={json}
-              money={money}
-              spending={dashboard?.category_spending || []}
-              periodLabel={dashboard?.period_start ? `${dashboard.period_start.split('-').reverse().join('/')} a ${dashboard.period_end.split('-').reverse().join('/')}` : 'histórico completo'}
-              onUpdated={() => refreshAfterMutation("finance")}
-            />
+            <>
+              <Pressable accessibilityRole="button" accessibilityLabel="Voltar a Mais" onPress={() => dispatchLocalBack()} style={{minHeight: 44, justifyContent: "center", paddingVertical: 6}}>
+                <Text style={{color: "#67DFC3", fontWeight: "700"}}>‹ Voltar a Mais</Text>
+              </Pressable>
+              <CategoryManager
+                api={json}
+                money={money}
+                spending={dashboard?.category_spending || []}
+                periodLabel={dashboard?.period_start ? `${dashboard.period_start.split('-').reverse().join('/')} a ${dashboard.period_end.split('-').reverse().join('/')}` : 'histórico completo'}
+                onUpdated={() => refreshAfterMutation("finance")}
+              />
+            </>
           )}
           {tab === "Compromissos" && (
-            <CommitmentManager profiles={accountProfiles}
-              cards={cards}
-              api={json}
-              upload={api.upload}
-              accounts={accounts}
-              money={money}
-              onUpdated={() => refreshAfterMutation("dashboard", "movements")}
-            />
+            <>
+              <Pressable accessibilityRole="button" accessibilityLabel="Voltar a Mais" onPress={() => dispatchLocalBack()} style={{minHeight: 44, justifyContent: "center", paddingVertical: 6}}>
+                <Text style={{color: "#67DFC3", fontWeight: "700"}}>‹ Voltar a Mais</Text>
+              </Pressable>
+              <CommitmentManager profiles={accountProfiles}
+                cards={cards}
+                api={json}
+                upload={api.upload}
+                accounts={accounts}
+                money={money}
+                onUpdated={() => refreshAfterMutation("finance", "accounts", "cards")}
+              />
+            </>
           )}
           {tab === "Cartões" && (
-            <CardManager api={json} cards={cards} money={money} onUpdated={() => refreshAfterMutation("cards", "dashboard")} />
+            <>
+              <Pressable accessibilityRole="button" accessibilityLabel="Voltar a Mais" onPress={() => dispatchLocalBack()} style={{minHeight: 44, justifyContent: "center", paddingVertical: 6}}>
+                <Text style={{color: "#67DFC3", fontWeight: "700"}}>‹ Voltar a Mais</Text>
+              </Pressable>
+              <CardManager api={json} cards={cards} money={money} onUpdated={() => refreshAfterMutation("cards", "dashboard")} />
+            </>
           )}
           {tab === "Capturar" && (
             <CapturePanel api={json} upload={api.upload} kind={captureKind}
@@ -1811,11 +1826,19 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
               onNotifications={() => NotificationCapture.openSettings()} />
           )}
           {tab === "Contas" && (
-            <AccountPositions api={json} money={money} onOpen={() => contentScroll.current?.scrollTo({y: 0, animated: false})}
-              onUpdated={async items => {setAccountProfiles(items); await refreshAfterMutation("account-catalog");}}/>
+            <>
+              <Pressable accessibilityRole="button" accessibilityLabel="Voltar a Mais" onPress={() => dispatchLocalBack()} style={{minHeight: 44, justifyContent: "center", paddingVertical: 6}}>
+                <Text style={{color: "#67DFC3", fontWeight: "700"}}>‹ Voltar a Mais</Text>
+              </Pressable>
+              <AccountPositions api={json} money={money} onOpen={() => contentScroll.current?.scrollTo({y: 0, animated: false})}
+                onUpdated={async items => {setAccountProfiles(items); await refreshAfterMutation("account-catalog");}}/>
+            </>
           )}
           {tab === "Ajustes" && (
             <>
+              <Pressable accessibilityRole="button" accessibilityLabel="Voltar a Mais" onPress={() => dispatchLocalBack()} style={{minHeight: 44, justifyContent: "center", paddingVertical: 6}}>
+                <Text style={{color: "#67DFC3", fontWeight: "700"}}>‹ Voltar a Mais</Text>
+              </Pressable>
               <Text style={s.section}>Conexão</Text>
               <Text style={s.body}>API: {API || "não configurada"}</Text>
               <Text style={s.muted}>
@@ -1823,8 +1846,9 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
                 tailnet. Não use nem armazene a chave xAI neste aplicativo.
               </Text>
               <Button
-                title="Sincronizar agora"
-                onPress={() => Promise.all([refresh("all", true), sync()])}
+                title={manualLoading ? "Sincronizando…" : "Sincronizar agora"}
+                disabled={manualLoading || captureSaving}
+                onPress={() => { void Promise.all([refresh("all", true), sync()]).catch(() => {}); }}
               />
               <Button title="Minha conta e privacidade" secondary onPress={() => router.push('/account')} />
               <Button title="Bloquear agora" secondary onPress={auth.lock} />
@@ -2534,5 +2558,3 @@ const s = StyleSheet.create({
   },
   badgeText: { color: "#fff", fontSize: 9, fontWeight: "700" },
 });
-
-

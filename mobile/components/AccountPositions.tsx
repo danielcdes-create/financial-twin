@@ -181,7 +181,7 @@ export default function AccountPositions({api, money, onUpdated, onOpen}: Props)
       <Text style={s.meta}>Moeda: BRL. Os saldos e lançamentos deste app são acompanhados em reais.</Text>
       {field('Observações (opcional)', 'observacoes', 1000, 'Informações úteis sobre esta conta', true)}
       <Action label={busy ? 'Salvando…' : 'Salvar cadastro'} disabled={busy||profileConflict} onPress={saveProfile}/>
-      <Action label="Voltar sem salvar" secondary disabled={busy} onPress={() => {setDraft(null); setError(''); onOpen?.();}}/>
+      <Action label="Voltar sem salvar" secondary disabled={busy} onPress={back}/>
       <DiscardDraftAction disabled={busy} owner={draft.key || 'new-account'} label="Excluir rascunho da conta" onDiscard={() => {setDraft(null);setProfileConflict(false);setProfileDifferences([]);setError('');onOpen?.();}} />
       {!!draft.key && <View style={s.management}>
         <Text style={s.help}>Encerrar informa a situação no banco. Arquivar retira a conta da lista principal e mantém seu histórico.</Text>

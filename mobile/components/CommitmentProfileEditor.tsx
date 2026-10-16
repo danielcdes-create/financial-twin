@@ -76,7 +76,7 @@ export default function CommitmentProfileEditor({card, api, cardLabelFor = () =>
   const linked = item.linked_purchase || {};
   const identity = identityOf(card);
   const original = originalOf(card);
-  const catalog = useClassificationOptions(api, card.key).options;
+  const {options: catalog, loading: loadingOptions, error: optionsError, stale: optionsStale, retry: retryOptions} = useClassificationOptions(api, card.key);
   const initialDisplayName = String(item.display_name || linked.vendedor || (card.title !== original ? card.title : '') || '');
   const initialNatureza = String(item.natureza || linked.natureza || '');
   const initialCategoria = String(item.categoria || item.category || linked.categoria || '');
@@ -206,6 +206,12 @@ export default function CommitmentProfileEditor({card, api, cardLabelFor = () =>
     <TextInput accessibilityLabel="Nome de exibição" editable={!busy} value={displayName} onChangeText={setDisplayName} placeholderTextColor="#92A4A2" style={s.input}/>
     <Text style={s.label}>Descrição original</Text>
     <Text accessibilityLabel="Descrição original" style={s.readonly}>{original}</Text>
+    {!!optionsError && <View>
+      <Text accessibilityRole="alert" style={s.label}>{optionsError}{optionsStale ? ' As sugestões anteriores podem estar desatualizadas.' : ''}</Text>
+      <Pressable accessibilityRole="button" disabled={busy || loadingOptions} onPress={() => {void retryOptions();}} style={s.choice}>
+        <Text style={s.choiceText}>Tentar carregar sugestões novamente</Text>
+      </Pressable>
+    </View>}
     <ControlledChoice disabled={busy} label="Natureza" value={natureza} options={natures.values} display={natures.labelOf} onChange={setNatureza} allowClear/>
     <ControlledChoice disabled={busy} label="Categoria" value={categoria} options={categories.values} display={categories.labelOf} onChange={value => {setCategoria(value); setSubcategoria('');}} allowClear/>
     <ControlledChoice disabled={busy} label="Subcategoria" value={subcategoria} options={subcategories.values} display={subcategories.labelOf} onChange={setSubcategoria} allowClear/>

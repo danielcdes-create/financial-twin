@@ -141,16 +141,17 @@ export default function SubcategoryManager({ category, api, disabled, onBusyChan
     {editing && <View style={s.card}>
       <Text style={s.name}>Renomear “{editing.name}”</Text>
       <TextInput accessibilityLabel="Novo nome da subcategoria" editable={!locked} maxLength={120} value={editName} onChangeText={setEditName} onSubmitEditing={rename} style={s.input} />
-      <View style={s.actions}><Pressable accessibilityRole="button" disabled={disabled} onPress={() => setEditing(null)} style={s.cancel}><Text style={s.cancelText}>Cancelar</Text></Pressable><Pressable accessibilityRole="button" disabled={locked} onPress={rename} style={[s.add, locked && s.disabled]}><Text style={s.addText}>Salvar</Text></Pressable></View>
+      <View style={s.actions}><Pressable accessibilityRole="button" disabled={disabled} onPress={() => {setEditing(null); setEditName('');}} style={s.cancel}><Text style={s.cancelText}>Cancelar</Text></Pressable><Pressable accessibilityRole="button" disabled={locked} onPress={rename} style={[s.add, locked && s.disabled]}><Text style={s.addText}>Salvar</Text></Pressable></View>
       <DiscardDraftAction disabled={disabled} owner={`${category}:${editing.name}`} label="Excluir rascunho da renomeação" onDiscard={()=>{setEditing(null);setEditName('');}} />
     </View>}
     {deleting && <View style={s.card}>
       <Text style={s.name}>Excluir “{deleting.name}”</Text>
       <Text style={s.help}>{deleting.usage_count} registro(s) precisam de uma subcategoria substituta de {category}.</Text>
-      <TextInput accessibilityLabel="Buscar subcategoria substituta" editable={!locked} value={replacement} onChangeText={setReplacement} placeholder="Buscar substituta" placeholderTextColor="#92A4A2" style={s.input} />
+      <TextInput accessibilityLabel="Buscar subcategoria substituta" editable={!locked} maxLength={120} value={replacement} onChangeText={setReplacement} placeholder="Buscar substituta" placeholderTextColor="#92A4A2" style={s.input} />
       <View style={s.chips}>{suggestions.map(name => <Pressable accessibilityRole="button" disabled={locked} key={name} onPress={() => setReplacement(name)} style={[s.chip, replacement === name && s.chipActive]}><Text style={[s.chipText, replacement === name && s.addText]}>{name}</Text></Pressable>)}</View>
       {items.length < 2 && <Text style={s.help}>Crie outra subcategoria acima para receber estes registros.</Text>}
-      <View style={s.actions}><Pressable accessibilityRole="button" disabled={disabled} onPress={() => setDeleting(null)} style={s.cancel}><Text style={s.cancelText}>Cancelar</Text></Pressable><Pressable accessibilityRole="button" disabled={locked || items.length < 2} onPress={confirmReplacement} style={[s.confirm, (locked || items.length < 2) && s.disabled]}><Text style={s.confirmText}>Substituir e excluir</Text></Pressable></View>
+      <View style={s.actions}><Pressable accessibilityRole="button" disabled={disabled} onPress={() => {setDeleting(null); setReplacement('');}} style={s.cancel}><Text style={s.cancelText}>Cancelar</Text></Pressable><Pressable accessibilityRole="button" disabled={locked || items.length < 2} onPress={confirmReplacement} style={[s.confirm, (locked || items.length < 2) && s.disabled]}><Text style={s.confirmText}>Substituir e excluir</Text></Pressable></View>
+      {!!replacement && <DiscardDraftAction disabled={disabled} owner={`${category}:delete:${deleting.name}`} label="Excluir rascunho da substituição" onDiscard={()=>{setDeleting(null);setReplacement('');}} />}
     </View>}
   </View>;
 }
