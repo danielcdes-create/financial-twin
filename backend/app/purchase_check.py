@@ -69,15 +69,23 @@ class PurchaseCheckInput(PurchaseHorizonInput):
 
 def _goal_date(start: date, target: Decimal, saved: Decimal, monthly: Decimal, payments: list[dict]) -> date | None:
     balance = saved + sum((row['amount'] for row in payments if row['date'] == start), Decimal('0'))
-    if balance >= target:
-        return start
-    events = [(row['date'], row['amount']) for row in payments if row['date'] > start]
-    events += [(advance(start, 'mensal', month), monthly) for month in range(1, 121)]
-    for when, value in sorted(events, key=lambda item: item[0]):
-        balance += value
+    by_day: dict[date, Decimal] = {}
+    for row in payments:
+        if row['date'] > start:
+            by_day[row['date']] = by_day.get(row['date'], Decimal('0')) + row['amount']
+    for month in range(1, 121):
+        when = advance(start, 'mensal', month)
+        by_day[when] = by_day.get(when, Decimal('0')) + monthly
+    # A later installment can spend a reserve that was already enough on the start day.
+    reached = start if balance >= target else None
+    for when in sorted(by_day):
+        balance += by_day[when]
         if balance >= target:
-            return when
-    return None
+            if reached is None:
+                reached = when
+        else:
+            reached = None
+    return reached
 
 
 def assess_purchase(body: PurchaseCheckInput) -> dict:

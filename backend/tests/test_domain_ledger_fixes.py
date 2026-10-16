@@ -312,6 +312,16 @@ class LedgerDomainFixTests(unittest.TestCase):
         self.assertEqual(get_checklist('2026-08', db)['totals']['expenses'], '0.00')
         self.assertEqual(len(rows_for(db, date(2026, 9, 1), date(2026, 9, 30))), 2)
 
+    def test_confirmed_capture_linked_to_the_statement_is_not_counted_twice(self):
+        db = DomainDB()
+        tx = expense(date(2026, 9, 15), '-40.00')
+        put(db, 'transactions', tx)
+        put(db, 'provisional_transactions', {'_id': ObjectId(), 'provisional_id': 'cap', 'status': 'confirmed',
+            'valor': Decimal128('-40.00'), 'data_evento': day_start(date(2026, 9, 15)),
+            'linked_transaction_id': str(tx['_id'])})
+        self.assertEqual(len(rows_for(db, date(2026, 9, 1), date(2026, 9, 30))), 1)
+        self.assertEqual(closure(date(2026, 9, 1), date(2026, 9, 30), db)['expenses'], '40.00')
+
     def test_capture_account_fallback_and_explicit_profile_precedence_in_cash_consumers(self):
         db = DomainDB(); bank, other = ObjectId(), ObjectId()
         put(db, 'accounts', {'_id': bank, 'tipo': 'conta_corrente', 'instituicao': 'Itaú'})

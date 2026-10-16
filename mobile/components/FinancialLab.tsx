@@ -44,7 +44,8 @@ export default function FinancialLab({api:request,onBack}:Props){
   const [selectedScenario,setSelectedScenario]=useState('buy_now');const [experiments,setExperiments]=useState<any[]>([]),[experimentCursor,setExperimentCursor]=useState<string|null>(null),[experimentReport,setExperimentReport]=useState<any>(null);
   const [experimentTitle,setExperimentTitle]=useState(''),[category,setCategory]=useState(''),[categories,setCategories]=useState<string[]>([]),[protocol,setProtocol]=useState(''),[baseStart,setBaseStart]=useState(day(-30)),[baseEnd,setBaseEnd]=useState(day(-1)),[experimentStart,setExperimentStart]=useState(day()),[experimentEnd,setExperimentEnd]=useState(day(29)),[target,setTarget]=useState('10'),[satisfaction,setSatisfaction]=useState('3'),[confounders,setConfounders]=useState('');
   const [createCaseId,setCreateCaseId]=useState(newId),[createExperimentId,setCreateExperimentId]=useState(newId);
-  const back=()=>protectUnsavedBack(Boolean(title||expected||notes||sourceRef||experimentTitle||category||protocol||confounders||opening||purchase||reduced||flowsText||reserve!=='0'||count!=='1'||first!==day()||wait!=='30'||Object.keys(flowChoices).length||Object.keys(flowAccounts).length),onBack);
+  const unsaved=Boolean(title||expected||notes||sourceRef||experimentTitle||category||protocol||confounders||opening||purchase||reduced||flowsText||reserve!=='0'||count!=='1'||first!==day()||wait!=='30'||Object.keys(flowChoices).length||Object.keys(flowAccounts).length);
+  const back=()=>protectUnsavedBack(unsaved,onBack);
   useLocalBack(back,true,10);
   const pendingTasks=useRef(0);
   const closureGeneration=useRef(0);
@@ -64,9 +65,9 @@ export default function FinancialLab({api:request,onBack}:Props){
   const discardForm=()=>{
     if(busy)return;
     setError('');
-    if(section==='Guardião'){setTitle('');setExpected('');setDue(day(7));setNotes('');setCaseKind('missing_refund');setSourceRef('');setRefundRef('');setDossier('');setCreateCaseId(newId());}
-    if(section==='Experimentos'){setExperimentTitle('');setCategory('');setProtocol('');setBaseStart(day(-30));setBaseEnd(day(-1));setExperimentStart(day());setExperimentEnd(day(29));setTarget('10');setSatisfaction('3');setConfounders('');setExperimentReport(null);setCreateExperimentId(newId());}
-    if(section==='Simular'||section==='Liquidez'){setOpening('');setReserve('0');setPurchase('');setReduced('');setCount('1');setFirst(day());setWait('30');setFlowsText('');setFlowChoices({});setFlowAccounts({});setSimulation(null);setLiquidity(null);setSelectedScenario('buy_now');}
+    setTitle('');setExpected('');setDue(day(7));setNotes('');setCaseKind('missing_refund');setSourceRef('');setRefundRef('');setDossier('');setCreateCaseId(newId());
+    setExperimentTitle('');setCategory('');setProtocol('');setBaseStart(day(-30));setBaseEnd(day(-1));setExperimentStart(day());setExperimentEnd(day(29));setTarget('10');setSatisfaction('3');setConfounders('');setExperimentReport(null);setCreateExperimentId(newId());
+    setOpening('');setReserve('0');setPurchase('');setReduced('');setCount('1');setFirst(day());setWait('30');setFlowsText('');setFlowChoices({});setFlowAccounts({});setSimulation(null);setLiquidity(null);setSelectedScenario('buy_now');
   };
   const flows=()=>{
     const manual=flowsText.split('\n').filter(line=>line.trim()).map((line,index)=>{const [date,value,label,account_key]=line.split(';').map(part=>part.trim());if(!date||!value||!label)throw new Error(`Fluxo ${index+1}: use data; valor; descrição; conta.`);return {id:`manual:${index}`,date,amount:decimal(value),label,account_key:account_key||null,certainty:'assumed'}});
@@ -77,6 +78,7 @@ export default function FinancialLab({api:request,onBack}:Props){
     <Button label="‹ Voltar" onPress={back}/><Text style={s.title}>Decisões e evidências</Text>
     <View style={s.tabs}>{(['Fechamento','Guardião','Simular','Liquidez','Experimentos'] as Section[]).map(name=><Pressable accessibilityRole="tab" accessibilityState={{selected:section===name}} aria-selected={section===name} key={name} onPress={()=>select(name)} style={[s.tab,section===name&&s.selected]}><Text style={s.text}>{name}</Text></Pressable>)}</View>
     {busy&&<ActivityIndicator color="#49C5AA"/>}{!!error&&<Text accessibilityRole="alert" style={s.error}>{error}</Text>}
+    {section==='Fechamento'&&unsaved&&<DiscardDraftAction disabled={busy} owner="Fechamento" label="Excluir rascunho" onDiscard={discardForm} message="Os campos preenchidos nas outras seções desta tela serão apagados. Registros já salvos continuam preservados." />}
     {(section==='Fechamento'||section==='Guardião')&&<View><Field label="Período inicial (AAAA-MM-DD)" value={start} onChange={setStart}/><Field label="Período final (AAAA-MM-DD)" value={end} onChange={setEnd}/></View>}
     {section==='Fechamento'&&<>
       <Notice>Confira o significado de cada movimento e as evidências que sustentam seus números.</Notice>

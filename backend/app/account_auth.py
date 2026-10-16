@@ -2,6 +2,7 @@
 import hmac
 import re
 import time
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 from pymongo.errors import DuplicateKeyError
@@ -118,11 +119,19 @@ def account_info(session=Depends(require_session)):
 
 @router.patch('/account')
 def account_update(body: AccountInput, request: Request, session=Depends(require_session)):
-    result = auth_database(request).account.update_one({'_id': OWNER_ID, 'auth_version': session['account']['auth_version']},
-                                  {'$set': {'username': body.username, 'display_name': body.display_name}})
+    account = session['account']
+    version = account['auth_version'] + 1
+    before = public_account(account)
+    after = {'username': body.username, 'display_name': body.display_name}
+    db = auth_database(request)
+    result = db.account.update_one({'_id': OWNER_ID, 'auth_version': account['auth_version']},
+                                  {'$set': {'username': body.username, 'display_name': body.display_name, 'auth_version': version}})
     if result.matched_count != 1:
         raise HTTPException(409, 'A conta mudou. Entre novamente.')
-    return {'username': body.username, 'display_name': body.display_name}
+    db.audit_log.insert_one({'event': 'account_profile_updated', 'actor': 'owner', 'before': before, 'after': after,
+                             'created_at': datetime.now(timezone.utc)})
+    refreshed = {**account, 'auth_version': version, 'username': body.username, 'display_name': body.display_name}
+    return session_response(db, refreshed, 'Este aparelho')
 
 
 @router.post('/password')

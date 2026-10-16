@@ -302,6 +302,8 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
     ]);
   };
   const askRemove = async (card: Card, purpose: 'encerrar' | 'remover' = 'remover') => {
+    const valid = captureScope();
+    if (!valid()) return;
     const closing = purpose === 'encerrar';
     const dialogTitle = closing ? 'Encerrar compromisso' : 'Remover parcelas futuras';
     if (card.source === 'obligation') {
@@ -321,19 +323,22 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
     const kind = card.source === 'managed' && card.payload.kind === 'assinatura' ? 'assinatura' : 'financiamento';
     try {
       const fresh = await api(removalPreviewPath(source, identity));
+      if (!valid()) return;
       const rows = (fresh.rows || []).filter((row: any) => row.editable);
       const message = `${closing ? closureWarning(kind) + '\n' : ''}${futureRemovalLabel(fresh.editable_count || rows.length, card.title, sumAmounts(rows.map((row: any) => row.amount || 0)))}\n${closureWarning(kind)}\nPagamentos já realizados e já vinculados ficam fora desta remoção.`;
       const removePreview = async () => {
+        if (!valid()) return;
         setBusy(true);
         try {
           const saved = await api(`/v1/future-commitments/${source}/${encodeURIComponent(identity)}`, {method: 'DELETE', body: JSON.stringify({request_id: creationId(), preview_token: fresh.preview_token})});
+          if (!valid()) return;
           if (!saved.persisted || saved.identity !== String(identity) || saved.source !== source) throw new Error('O servidor não confirmou esta alteração. Tente novamente.');
           rememberUndo(card.key, source, card.title, [{identity: String(identity), delete_request_id: String(saved.delete_request_id || '')}]);
           Alert.alert('Compromissos futuros excluídos', 'A alteração foi confirmada. O histórico foi preservado.');
           await onUpdated();
         } catch (failure: any) {
-          Alert.alert('Não foi possível concluir a remoção', failure?.message || 'Tente novamente.');
-        } finally {setBusy(false);}
+          if (valid()) Alert.alert('Não foi possível concluir a remoção', failure?.message || 'Tente novamente.');
+        } finally {if (valid()) setBusy(false);}
       };
       if (closing) {
         Alert.alert(dialogTitle, message, [
@@ -342,21 +347,23 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
         ]);
       } else confirmRemoval(message, 'Confirmar remoção', removePreview);
     } catch (failure: any) {
-      Alert.alert('Não foi possível conferir o cronograma', failure?.message || 'Tente novamente.');
+      if (valid()) Alert.alert('Não foi possível conferir o cronograma', failure?.message || 'Tente novamente.');
     }
   };
   const undoImported = async (offer: {source: 'installment' | 'obligation'; identity: string; revision: number; title: string; transactionId?: string; provisionalId?: string}) => {
-    if (busy || !offer.identity || !offer.revision) return;
+    if (busy || !offer.identity || !offer.revision || !captureScope()()) return;
+    const valid = captureScope();
     setBusy(true);
     try {
       const saved = await api(`/v1/future-commitments/${offer.source}/${encodeURIComponent(offer.identity)}/payment-unlink`, {method: 'POST', body: JSON.stringify({request_id: creationId(), expected_revision: offer.revision, ...(offer.transactionId ? {transaction_id: offer.transactionId} : {provisional_id: offer.provisionalId})})});
+      if (!valid()) return;
       if (!saved.persisted) throw new Error('O servidor não confirmou o desfazer.');
       setImportedUndo(null);
       Alert.alert('Vínculo desfeito', 'A cobrança voltou para conciliação. O lançamento do extrato permanece.');
       await onUpdated();
     } catch (error: any) {
-      Alert.alert('Não foi possível desfazer', error.message);
-    } finally {setBusy(false);}
+      if (valid()) Alert.alert('Não foi possível desfazer', error.message);
+    } finally {if (valid()) setBusy(false);}
   };
   const linkImported = async (card: Card, transaction: any, due: string) => {
     const full = String(due || '').slice(0, 10);
@@ -364,6 +371,8 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
       ? {source: 'installment' as const, identity: String(card.payload.id || '')}
       : {source: 'obligation' as const, identity: String((card.payload.items || []).find((part: any) => String(part.due_date || '').slice(0, 10) === full && !part.payment_link)?.id || (card.payload.items || []).find((part: any) => String(part.due_date || '').slice(0, 10) === full)?.id || '')};
     if (!target.identity || !transaction?.source_token) {Alert.alert('Não foi possível vincular', 'Essa parcela não está mais na lista.'); return;}
+    const valid = captureScope();
+    if (!valid()) return;
     setBusy(true);
     try {
       const saved = await api(`/v1/future-commitments/${target.source}/${encodeURIComponent(target.identity)}/payment`, {method: 'POST', body: JSON.stringify({
@@ -371,14 +380,15 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
         ...(full.length === 10 ? {due_date: full} : {competence: full.slice(0, 7)}),
         ...(transaction.source_kind === 'confirmed_capture' ? {provisional_id: transaction.provisional_id} : {transaction_id: transaction.id}),
       })});
+      if (!valid()) return;
       if (!saved?.persisted) throw new Error('O servidor não confirmou o vínculo.');
       setImportedUndo({...target, revision: Number(saved.revision || 0), title: card.title, transactionId: transaction.source_kind === 'confirmed_capture' ? undefined : transaction.id, provisionalId: transaction.source_kind === 'confirmed_capture' ? transaction.provisional_id : undefined});
       setLinkRequest(null);
       Alert.alert('Pagamento vinculado', 'O vínculo foi registrado. O plano importado não foi reescrito. Use Desfazer enquanto o aviso estiver na tela.');
       await onUpdated();
     } catch (error: any) {
-      Alert.alert('Não foi possível vincular', error.message);
-    } finally {setBusy(false);}
+      if (valid()) Alert.alert('Não foi possível vincular', error.message);
+    } finally {if (valid()) setBusy(false);}
   };
   const scheduleOverlay = useScheduleOverlay();
   const scheduleView = (card: Card) => {

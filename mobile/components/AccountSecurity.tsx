@@ -1,11 +1,13 @@
 import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {Platform, Text, View} from 'react-native';
 import {TextInput} from './InteractionControls';
+import {router} from 'expo-router';
 import {api} from '../utils/sessionClient';
 import {AuthButton, authStyles as s, deviceLabel, useAuth} from './AuthProvider';
 import {Alert} from '../utils/appAlert';
 import {useAsyncScope} from '../utils/useAsyncScope';
 import DiscardDraftAction from './DiscardDraftAction';
+import {protectUnsavedBack, useLocalBack} from '../utils/localBack';
 
 type DeviceSession = {id: string; label: string; created_at: number; expires_at: number; current: boolean};
 export default function AccountSecurity() {
@@ -32,8 +34,12 @@ export default function AccountSecurity() {
     running.current=true;const valid=captureScope();
     setBusy(true); setError(''); setNotice('');
     try {await action(valid);} catch (e) {if(valid())setError(e instanceof Error ? e.message : 'Operação indisponível.');}
-    finally {running.current=false;if(valid()){setBusy(false); setCurrent(''); setPassword(''); setConfirmation('');}}
+    finally {running.current=false;if(valid())setBusy(false);}
   };
+  const profileDirty=name!==(auth.account?.display_name||'')||username!==(auth.account?.username||'');
+  const passwordDirty=Boolean(current||password||confirmation);
+  const leave=()=>protectUnsavedBack(profileDirty||passwordDirty,()=>{if(router.canGoBack())router.back();else router.replace('/');});
+  useLocalBack(leave,true,40);
   const exit = (all: boolean) => Alert.alert(all ? 'Sair em todos os aparelhos?' : 'Encerrar esta sessão?',
     'O histórico no servidor e os itens locais pendentes serão preservados. A biometria deste aparelho será removida.',
     [{text: 'Cancelar', style: 'cancel'}, {text: 'Sair', style: 'destructive', onPress: () => run(() => auth.logout(all))}]);
@@ -43,7 +49,7 @@ export default function AccountSecurity() {
     {!!error && <Text accessibilityRole="alert" style={s.error}>{error}</Text>}{!!notice && <Text accessibilityRole="alert" style={s.body}>{notice}</Text>}
     <Text style={s.label}>Nome</Text><TextInput accessibilityLabel="Nome da conta" style={s.input} value={name} onChangeText={setName} maxLength={80}/>
     <Text style={s.label}>Usuário</Text><TextInput accessibilityLabel="Usuário da conta" style={s.input} value={username} onChangeText={setUsername} autoCapitalize="none" autoCorrect={false} maxLength={64}/>
-    <AuthButton title="Salvar perfil" disabled={busy} onPress={() => run(async valid => {const account = await api.json('/v1/auth/account', {method: 'PATCH', body: JSON.stringify({username, display_name: name})}); if(!valid())return; auth.setAccount(account); setUsername(account.username); setName(account.display_name); setNotice('Perfil atualizado.');})}/>
+    <AuthButton title="Salvar perfil" disabled={busy} onPress={() => run(async valid => {const body = await api.json('/v1/auth/account', {method: 'PATCH', body: JSON.stringify({username, display_name: name})}); if(!valid())return; if(body.access_token)await auth.replaceSession(body); else auth.setAccount(body); const saved=body.account||body; setUsername(saved.username); setName(saved.display_name); setNotice('Perfil atualizado.');})}/>
     {(name!==(auth.account?.display_name||'')||username!==(auth.account?.username||''))&&<DiscardDraftAction disabled={busy} owner={auth.account?.username} label="Limpar perfil não salvo" title="Limpar alterações do perfil?" confirmLabel="Limpar" message="Os campos voltarão ao perfil salvo da sua conta." onDiscard={()=>{setName(auth.account?.display_name||'');setUsername(auth.account?.username||'');setError('');setNotice('');}} />}
     <View style={s.privacy}><Text style={s.label}>Desbloqueio por digital ou biometria</Text>
       <Text style={s.hint}>{Platform.OS === 'web' ? 'No navegador, a sessão fica apenas na memória e você entra com sua senha.' : 'A digital ou biometria forte é validada pelo sistema. O app não coleta sua impressão digital. A sessão protegida expira em 12 horas; depois, entre com a senha.'}</Text>
@@ -59,7 +65,7 @@ export default function AccountSecurity() {
         if (password.length < 12 || password !== confirmation) throw new Error('Use pelo menos 12 caracteres e repita a mesma senha.');
         const body = await api.json('/v1/auth/password', {method: 'POST', body: JSON.stringify({current_password: current, new_password: password, device_label: deviceLabel})});
         if(!valid())return;
-        await auth.replaceSession(body); refreshSaved('Senha atualizada. As outras sessões foram encerradas.', valid);
+        await auth.replaceSession(body); if(!valid())return; setCurrent(''); setPassword(''); setConfirmation(''); refreshSaved('Senha atualizada. As outras sessões foram encerradas.', valid);
       })}/>
       {!!(current||password||confirmation)&&<DiscardDraftAction disabled={busy} owner={auth.account?.username} label="Limpar senhas digitadas" title="Limpar senhas digitadas?" confirmLabel="Limpar" message="Os campos da troca de senha serão esvaziados. Sua senha de acesso permanece a mesma." onDiscard={()=>{setCurrent('');setPassword('');setConfirmation('');setError('');setNotice('');}} />}
     </View>

@@ -101,6 +101,31 @@ class SessionTests(unittest.TestCase):
         for path in ['/v1/accounts', '/v1/dashboard', '/v1/reviews', '/v1/transactions', '/v1/auth/account', '/v1/auth/sessions']:
             self.assertEqual(client.get(path).status_code, 401, path)
 
+    def test_profile_update_bumps_version_and_writes_audit(self):
+        from app.account_auth import AccountInput, account_update
+        stored = []
+        class Collection:
+            def update_one(self, query, update, pipeline=None):
+                stored.append(('update', query, update))
+                return SimpleNamespace(matched_count=1)
+            def insert_one(self, document):
+                stored.append(('audit', document))
+        db = SimpleNamespace(account=Collection(), audit_log=Collection())
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(db=db)))
+        session = {'account': {'_id': OWNER_ID, 'kind': 'app_identity', 'auth_version': 2,
+                               'username': 'proprietario', 'display_name': 'Antes', 'password_hash': 'hash'},
+                   'session_id': 'current'}
+        with patch('app.account_auth.session_response', return_value={'access_token': 'renewed', 'account': {'username': 'novo', 'display_name': 'Depois'}}) as renewed:
+            result = account_update(AccountInput(username='novo', display_name='Depois'), request, session)
+        self.assertEqual(result['access_token'], 'renewed')
+        renewed.assert_called_once()
+        self.assertEqual(renewed.call_args.args[1]['auth_version'], 3)
+        self.assertEqual(stored[0][2]['$set']['auth_version'], 3)
+        self.assertEqual(stored[1][1]['event'], 'account_profile_updated')
+        self.assertEqual(stored[1][1]['before']['display_name'], 'Antes')
+        self.assertNotIn('password', stored[1][1]['before'])
+        self.assertNotIn('password', stored[1][1]['after'])
+
     def test_brute_force_window_and_expiry(self):
         limiter = LoginAttempts()
         for _ in range(10): limiter.check('owner', now=1)

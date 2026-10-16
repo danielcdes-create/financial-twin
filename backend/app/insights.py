@@ -49,7 +49,10 @@ def period(start,end):
     return date_filter(start,end)
 def rows_for(db,start,end):
     period(start,end)
-    return [(False,row) for row in economic_rows(db.transactions,start,end)]+[(True,row) for row in economic_rows(db.provisional_transactions,start,end,{'status':'confirmed'})]
+    ledger=list(economic_rows(db.transactions,start,end))
+    linked={str(row['_id']) for row in ledger}
+    captures=[row for row in economic_rows(db.provisional_transactions,start,end,{'status':'confirmed'}) if str(row.get('linked_transaction_id') or '') not in linked]
+    return [(False,row) for row in ledger]+[(True,row) for row in captures]
 def source_id(captured,row):return ('capture:'+row['provisional_id']) if captured else ('ledger:'+str(row['_id']))
 def source(db,reference):
     kind,_,identity=reference.partition(':')
@@ -383,12 +386,13 @@ def update_experiment(identity:str,body:ExperimentUpdate,db=Depends(database)):
 
 @router.get('/experiments/{identity}/report')
 def experiment_report(identity:str,db=Depends(database)):
-    item=db.saving_experiments.find_one({'_id':identity})
-    if not item:raise HTTPException(404,'Experimento não encontrado.')
-    baseline_start=as_date(item['baseline_start']);baseline_end=as_date(item['baseline_end']);start=as_date(item['start']);end=min(as_date(item['end']),today())
-    if item.get('actual_end'):end=min(end,as_date(item['actual_end']))
-    def spending(a,b):
-        return sum((effects(row,captured)['expenses'] for captured,row in rows_for(db,a,b) if matches_category(row.get('categoria_sugerida' if captured else 'categoria'),item['category'])),Decimal('0')) if a<=b else Decimal('0')
-    base=spending(baseline_start,baseline_end);observed=spending(start,end);base_days=(baseline_end-baseline_start).days+1;days=max(0,(end-start).days+1)
-    expected=base/base_days*days;difference=expected-observed
-    return {'experiment':safe(item),'baseline_spending':money(base),'observed_spending':money(observed),'baseline_days':base_days,'observed_days':days,'expected_at_baseline_daily_rate':money(expected),'observed_difference':money(difference),'observed_reduction_pct':str((difference/expected*100).quantize(Decimal('.01'))) if expected>0 else None,'coverage':'not_verified','interpretation':'Diferença observada, não economia causal comprovada. Compare cobertura, viagens, preços, renda e satisfação.','future_days_excluded':max(0,(as_date(item['end'])-end).days)}
+    with mongo_snapshot(db) as (reading,consistency):
+        item=reading.saving_experiments.find_one({'_id':identity})
+        if not item:raise HTTPException(404,'Experimento não encontrado.')
+        baseline_start=as_date(item['baseline_start']);baseline_end=as_date(item['baseline_end']);start=as_date(item['start']);end=min(as_date(item['end']),today())
+        if item.get('actual_end'):end=min(end,as_date(item['actual_end']))
+        def spending(a,b):
+            return sum((effects(row,captured)['expenses'] for captured,row in rows_for(reading,a,b) if matches_category(row.get('categoria_sugerida' if captured else 'categoria'),item['category'])),Decimal('0')) if a<=b else Decimal('0')
+        base=spending(baseline_start,baseline_end);observed=spending(start,end);base_days=(baseline_end-baseline_start).days+1;days=max(0,(end-start).days+1)
+        expected=base/base_days*days;difference=expected-observed
+        return {'experiment':safe(item),'baseline_spending':money(base),'observed_spending':money(observed),'baseline_days':base_days,'observed_days':days,'expected_at_baseline_daily_rate':money(expected),'observed_difference':money(difference),'observed_reduction_pct':str((difference/expected*100).quantize(Decimal('.01'))) if expected>0 else None,'coverage':'not_verified','read_consistency':consistency,'interpretation':'Diferença observada, não economia causal comprovada. Compare cobertura, viagens, preços, renda e satisfação.','future_days_excluded':max(0,(as_date(item['end'])-end).days)}
