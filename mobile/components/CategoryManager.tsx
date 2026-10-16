@@ -1,0 +1,56 @@
+import { ActivityAlert as Alert } from "../utils/appAlert";
+import { isAbort } from '../utils/apiClient';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import {ActivityIndicator, StyleSheet, Text, View} from 'react-native';
+import {Pressable, TextInput} from './InteractionControls';
+import { rankedOptions } from '../utils/classification';
+import SubcategoryManager from './SubcategoryManager';
+import DiscardDraftAction from './DiscardDraftAction';
+import {protectUnsavedBack,useLocalBack} from '../utils/localBack';
+
+type Category={name:string;usage_count:number;transaction_count:number;provisional_count:number;custom:boolean;subcategory_count?:number};
+type Props={api:(path:string,init?:RequestInit)=>Promise<any>;money:(value:number)=>string;spending:{category:string;amount:number}[];periodLabel?:string;onUpdated:()=>Promise<void>};
+
+export default function CategoryManager({api,money,spending,periodLabel='período selecionado',onUpdated}:Props){
+  const [items,setItems]=useState<Category[]>([]),[newName,setNewName]=useState(''),[replacement,setReplacement]=useState('');
+  const [deleting,setDeleting]=useState<Category|null>(null),[loading,setLoading]=useState(false),[saving,setSaving]=useState(false);
+  const [expanded,setExpanded]=useState<string|null>(null);
+  const [loadError,setLoadError]=useState('');
+  const loadGeneration=useRef(0);
+  const lifecycle=useRef(0);
+  useLocalBack(()=>protectUnsavedBack(Boolean(newName||replacement),()=>{setDeleting(null);setExpanded(null);}),Boolean(newName||deleting||expanded),20);
+  useLayoutEffect(()=>{const owner=lifecycle;owner.current++;return()=>{owner.current++;}},[]);
+  const guarded=(callback:()=>Promise<void>)=>{const owner=lifecycle.current;return()=>owner===lifecycle.current?callback():undefined};
+  const load=useCallback(async()=>{const generation=++loadGeneration.current;setLoading(true);setLoadError('');try{const result=await api('/v1/categories');if(generation===loadGeneration.current)setItems(result.details||[])}catch(error:any){if(generation===loadGeneration.current)setLoadError(isAbort(error)?'Atualização interrompida. Tente atualizar a lista.':error.message)}finally{if(generation===loadGeneration.current)setLoading(false)}},[api]);
+  useEffect(()=>{const loads=loadGeneration;const task=setTimeout(()=>load(),0);return()=>{clearTimeout(task);loads.current++;}},[load]);
+  const updated=useCallback(async()=>{await Promise.all([load(),onUpdated()])},[load,onUpdated]);
+  const create=async()=>{
+    const name=newName.trim();if(!name){Alert.alert('Informe o nome','Digite o nome da nova categoria.');return}
+    setSaving(true);let acknowledged=false;const owner=lifecycle.current;
+    try{await api('/v1/categories',{method:'POST',body:JSON.stringify({name})});if(owner!==lifecycle.current)return;acknowledged=true;setNewName('');Alert.alert('Categoria criada','A categoria foi registrada.');void onUpdated().catch(()=>{if(owner===lifecycle.current)setLoadError('A categoria foi criada. Não foi possível atualizar os totais.')});await load()}
+    catch(error:any){if(owner!==lifecycle.current)return;Alert.alert(acknowledged?'Categoria criada':isAbort(error)?'Alteração interrompida':'Não foi possível criar',acknowledged?`A gravação foi confirmada. Não foi possível atualizar a lista: ${error.message}`:isAbort(error)?'A sessão foi suspensa. Confira a lista antes de repetir a alteração.':error.message);if(isAbort(error))await load()}finally{if(owner===lifecycle.current)setSaving(false)}
+  };
+  const remove=async(item:Category,replacementName?:string)=>{
+    const query=new URLSearchParams({name:item.name});if(replacementName)query.set('replacement',replacementName);
+    setSaving(true);let acknowledged=false;const owner=lifecycle.current;
+    try{await api(`/v1/categories?${query}`,{method:'DELETE'});if(owner!==lifecycle.current)return;acknowledged=true;setDeleting(null);setReplacement('');Alert.alert('Categoria removida',replacementName?`${item.usage_count} registro(s) foram movidos para ${replacementName}.`:'A categoria sem uso foi removida.');void onUpdated().catch(()=>{if(owner===lifecycle.current)setLoadError('A categoria foi removida. Não foi possível atualizar os totais.')});await load()}
+    catch(error:any){if(owner!==lifecycle.current)return;Alert.alert(acknowledged?'Categoria removida':isAbort(error)?'Alteração interrompida':'Não foi possível excluir',acknowledged?`A gravação foi confirmada. Não foi possível atualizar a lista: ${error.message}`:isAbort(error)?'A sessão foi suspensa. Confira a lista antes de repetir a alteração.':error.message);if(isAbort(error))await load()}finally{if(owner===lifecycle.current)setSaving(false)}
+  };
+  const askDelete=(item:Category)=>{if(item.usage_count){setDeleting(item);setReplacement('');return}Alert.alert('Excluir categoria?',`A categoria “${item.name}” não possui registros vinculados.`,[{text:'Cancelar',style:'cancel'},{text:'Excluir',style:'destructive',onPress:guarded(()=>remove(item))}])};
+  const confirmReplacement=()=>{if(!deleting)return;const canonical=items.find(item=>item.name.toLocaleLowerCase('pt-BR')===replacement.trim().toLocaleLowerCase('pt-BR'))?.name;if(!canonical||canonical===deleting.name){Alert.alert('Escolha uma substituta','Selecione outra categoria existente nas sugestões.');return}Alert.alert('Substituir e excluir?',`${deleting.usage_count} registro(s) passarão de “${deleting.name}” para “${canonical}”.`,[{text:'Cancelar',style:'cancel'},{text:'Confirmar',style:'destructive',onPress:guarded(()=>remove(deleting,canonical))}])};
+  const suggestions=rankedOptions(replacement,items.filter(item=>item.name!==deleting?.name).map(item=>item.name),8);
+  return <View>
+    <Text style={s.heading}>Gerenciar categorias e subcategorias</Text><Text style={s.help}>Abra as subcategorias para criar, editar ou excluir. Para excluir uma categoria em uso, escolha onde seus registros serão reclassificados.</Text>
+    <Text style={s.help}>Registros: histórico ativo completo. Gastos: {periodLabel}, após estornos e sem transferências próprias.</Text>
+    <View style={s.createRow}><TextInput accessibilityLabel="Nova categoria" value={newName} onChangeText={setNewName} onSubmitEditing={()=>create()} placeholder="Nova categoria" placeholderTextColor="#92A4A2" style={s.input}/><Pressable accessibilityRole="button" disabled={saving} onPress={()=>create()} style={s.add}><Text style={s.addText}>Criar</Text></Pressable></View>
+    {!!newName && <DiscardDraftAction disabled={saving} label="Excluir rascunho da categoria" onDiscard={()=>setNewName('')} />}
+    {deleting&&<View style={s.replaceCard}><Text style={s.replaceTitle}>Excluir “{deleting.name}”</Text><Text style={s.help}>{deleting.usage_count} registro(s) precisam de uma categoria substituta.</Text><TextInput accessibilityLabel="Buscar categoria substituta" value={replacement} onChangeText={setReplacement} placeholder="Buscar categoria substituta" placeholderTextColor="#92A4A2" style={s.input}/><View style={s.chips}>{suggestions.map(name=><Pressable accessibilityRole="button" key={name} onPress={()=>setReplacement(name)} style={[s.chip,replacement===name&&s.chipActive]}><Text numberOfLines={1} style={[s.chipText,replacement===name&&s.chipTextActive]}>{name}</Text></Pressable>)}</View><View style={s.actions}><Pressable accessibilityRole="button" onPress={()=>{setDeleting(null);setReplacement('')}} style={s.cancel}><Text style={s.cancelText}>Cancelar</Text></Pressable><Pressable accessibilityRole="button" disabled={saving} onPress={confirmReplacement} style={s.confirm}><Text style={s.confirmText}>Substituir e excluir</Text></Pressable></View></View>}
+    {loading&&<ActivityIndicator color="#4FD1B5" style={{marginVertical:20}}/>}
+    {!!loadError&&<View accessibilityRole="alert"><Text style={s.help}>{loadError}</Text><Pressable accessibilityRole="button" disabled={loading||saving} onPress={load} style={s.cancel}><Text style={s.cancelText}>Atualizar categorias</Text></Pressable></View>}
+    {items.map(item=><View key={item.name}><View style={s.row}><View style={s.rowText}><Text style={s.name}>{item.name}</Text><Text style={s.meta}>{item.usage_count} registro{item.usage_count===1?'':'s'} · {money(spending.find(value=>value.category===item.name)?.amount||0)}</Text><Pressable accessibilityRole="button" accessibilityLabel={`Subcategorias de ${item.name}`} accessibilityState={{expanded:expanded===item.name}} aria-expanded={expanded===item.name} disabled={saving} onPress={()=>setExpanded(expanded===item.name?null:item.name)} style={{paddingVertical:12,minHeight:44}}><Text style={{color:'#49C5AA',fontSize:12,fontWeight:'700'}}>{expanded===item.name?'Fechar subcategorias':`Subcategorias${item.subcategory_count===undefined?'':` (${item.subcategory_count})`} ›`}</Text></Pressable></View><Pressable accessibilityRole="button" disabled={saving} onPress={()=>askDelete(item)} style={s.delete}><Text style={s.deleteText}>Excluir</Text></Pressable></View>{expanded===item.name&&<SubcategoryManager category={item.name} api={api} disabled={saving} onBusyChange={setSaving} onUpdated={updated}/>}</View>)}
+  </View>;
+}
+
+const s=StyleSheet.create({heading:{fontSize:18,fontWeight:'700',color:'#F4F7F5',marginTop:8},help:{fontSize:12,lineHeight:18,color:'#92A4A2',marginTop:6,marginBottom:12},createRow:{flexDirection:'row',flexWrap:'wrap',gap:8,alignItems:'center',marginBottom:14},input:{flex:1,minWidth:0,flexBasis:150,backgroundColor:'#142326',borderRadius:12,borderWidth:1,borderColor:'#263D40',paddingHorizontal:13,paddingVertical:12,color:'#F5F8F6',fontSize:15},add:{minHeight:44,maxWidth:'100%',backgroundColor:'#49C5AA',borderRadius:12,paddingHorizontal:18,paddingVertical:14},addText:{color:'#061412',fontWeight:'800'},row:{flexDirection:'row',alignItems:'center',gap:10,paddingVertical:14,borderBottomWidth:1,borderColor:'#213235'},rowText:{flex:1,minWidth:0},name:{color:'#E7EFEC',fontSize:15,fontWeight:'700'},meta:{color:'#92A4A2',fontSize:11,marginTop:5},delete:{minHeight:44,justifyContent:'center',paddingHorizontal:10,paddingVertical:8},deleteText:{color:'#FF8C83',fontSize:12,fontWeight:'700'},replaceCard:{backgroundColor:'#183034',borderWidth:1,borderColor:'#315054',borderRadius:14,padding:14,marginBottom:16},replaceTitle:{color:'#F4F7F5',fontSize:16,fontWeight:'800'},chips:{flexDirection:'row',flexWrap:'wrap',gap:6,marginTop:8},chip:{maxWidth:'48%',backgroundColor:'#17282B',borderRadius:12,paddingHorizontal:9,paddingVertical:7},chipActive:{backgroundColor:'#49C5AA'},chipText:{color:'#AFC1BF',fontSize:10},chipTextActive:{color:'#061412',fontWeight:'800'},actions:{flexDirection:'row',flexWrap:'wrap',gap:8,marginTop:14},cancel:{flex:1,borderWidth:1,borderColor:'#315054',borderRadius:10,padding:11,alignItems:'center'},cancelText:{color:'#C5D8D4',fontWeight:'700'},confirm:{flex:2,backgroundColor:'#E97970',borderRadius:10,padding:11,alignItems:'center'},confirmText:{color:'#1B0807',fontWeight:'800'}});
+
+

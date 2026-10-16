@@ -1,0 +1,69 @@
+{
+  "expo": {
+    "name": "Financial Twin",
+    "slug": "financial-twin",
+    "version": "1.20.61",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "package": "com.financialtwin.app",
+      "versionCode": 107
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-sqlite",
+      "./plugins/withNotificationCapture",
+      "expo-router",
+      [
+        "expo-sharing",
+        {
+          "android": {
+            "enabled": true,
+            "singleShareMimeTypes": [
+              "image/*"
+            ]
+          }
+        }
+      ],
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Permitir que o Financial Twin grave sua voz para preencher capturas.",
+          "enableBackgroundRecording": false,
+          "enableBackgroundPlayback": false
+        }
+      ],
+      [
+        "expo-secure-store",
+        {
+          "configureAndroidBackup": false,
+          "faceIDPermission": "Permitir biometria para desbloquear seu financeiro com segurança."
+        }
+      ],
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "Permitir biometria para desbloquear seu financeiro com segurança."
+        }
+      ],
+      "./plugins/withPrivateStorage"
+    ]
+  }
+}
+
+
+
+

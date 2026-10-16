@@ -1,0 +1,41 @@
+const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict'),ts=require('typescript');
+function load(path,requireFn=require){
+ const sandbox={exports:{},require:requireFn,console,Set,Intl,Date,Math};
+ vm.runInNewContext(ts.transpileModule(fs.readFileSync(path,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText,sandbox);
+ return sandbox.exports;
+}
+(async()=>{
+ const time=load('utils/classification.ts');
+ assert.equal(time.financialDateIso('2026-10-01T02:30:00Z'),'2026-09-30');
+ assert.equal(time.financialDateLabel('2026-10-01T02:30:00Z'),'30/09/2026');
+ assert.equal(time.financialDateIso('2026-10-01'),'2026-10-01');
+ assert.equal(time.financialDateIso('2026-10-01T03:00:00Z'),'2026-10-01');
+ assert.equal(time.financialDateLabel('invalid'),'—');
+ let nativeCalls=0;
+ const platform={OS:'web'};
+ const operations=load('utils/userOperation.ts');
+ const dialogs=load('utils/appAlert.ts',name=>name==='./userOperation'?operations:({Platform:platform,Alert:{alert:()=>nativeCalls++}}));
+ let callbacks=0,changes=0;
+ const unsubscribe=dialogs.subscribeDialog(()=>changes++);
+ dialogs.Alert.alert('Discard?', 'Keep original history', [{text:'Cancel',style:'cancel'},{text:'Discard',onPress:()=>callbacks++}]);
+ assert.equal(dialogs.dialogSnapshot().title,'Discard?');
+ dialogs.cancelDialog();assert.equal(callbacks,0);assert.equal(dialogs.dialogSnapshot(),null);
+ dialogs.Alert.alert('Link?', 'Confirm payment', [{text:'Cancel',style:'cancel'},{text:'Link',onPress:()=>callbacks++}]);
+ dialogs.Alert.alert('Error', 'Persistent failure');
+ dialogs.dismissDialog(dialogs.dialogSnapshot().buttons[1]);assert.equal(callbacks,1);
+ assert.equal(dialogs.dialogSnapshot().message,'Persistent failure');
+ dialogs.dismissDialog();assert.equal(dialogs.dialogSnapshot(),null);assert.ok(changes>=6);unsubscribe();
+ platform.OS='android';dialogs.Alert.alert('Activity','No native focus transfer');assert.equal(nativeCalls,0);dialogs.dismissDialog();
+ dialogs.Alert.alert('Native','Explicit compatibility fallback',undefined,{inActivity:false});assert.equal(nativeCalls,1);
+ const create=load('utils/commitmentCreate.ts');let value=null,full=false;
+ const db={getAllAsync:async()=>value?[{state:value}]:[],runAsync:async(sql,...p)=>{if(full)throw new Error('Quota exceeded');value=sql.startsWith('DELETE')?null:p[1];}};
+ const body={creation_id:create.creationId(),amount:10,name:'Original service'};
+ assert.match(body.creation_id,/^[\da-f-]{36}$/);
+ await create.retainCreation(db,body);
+ const afterRestart=load('utils/commitmentCreate.ts');
+ assert.equal(JSON.stringify(await afterRestart.pendingCreation(db)),JSON.stringify(body));
+ full=true;await assert.rejects(create.retainCreation(db,{...body,name:'changed'}));full=false;
+ assert.equal((await create.pendingCreation(db)).name,'Original service');
+ await create.forgetCreation(db);assert.equal(await create.pendingCreation(db),null);
+ console.log('Audit regressions: Brasília boundaries, dialog callbacks/cancel/native, durable creation restart/quota — passed');
+})().catch(error=>{console.error(error);process.exitCode=1});

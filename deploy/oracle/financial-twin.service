@@ -1,0 +1,26 @@
+[Unit]
+Description=Financial Twin API
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=financial-twin
+Group=financial-twin
+WorkingDirectory=/opt/financial-twin
+EnvironmentFile=/etc/financial-twin/fin.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/financial-twin/.venv/bin/python /opt/financial-twin/backend/run_server.py
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=60
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/financial-twin
+
+[Install]
+WantedBy=multi-user.target
