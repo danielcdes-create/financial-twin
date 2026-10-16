@@ -30,13 +30,23 @@ const queue = load('utils/queueFinalization.ts');
 
 assert.equal(presentation.DEFAULT_COMMITMENT_CUTOFF, '2026-10-01');
 presentation.setPresentationClock('2026-12-15');
+assert.equal(presentation.commitmentCutoff(), '2026-12-01');
 assert.equal(presentation.occurrenceState('2026-09-30', false), 'Pago (assumido)');
-assert.equal(presentation.occurrenceState('2026-10-10', false), 'Vencido · sem vínculo');
-assert.equal(presentation.occurrenceState('2026-11-10', false, '2026-10-15'), 'Previsto');
+assert.equal(presentation.occurrenceState('2026-10-10', false), 'Pago (assumido)');
+assert.equal(presentation.occurrenceState('2026-11-10', false, '2026-10-15'), 'Pago (assumido)');
+assert.equal(presentation.occurrenceState('2026-12-10', false), 'Vencido · sem vínculo');
 assert.equal(presentation.occurrenceState('2026-09-30', true), 'Pago vinculado');
-assert.equal(presentation.reconcileCharge('2026-10-10', 'Vencido · sem vínculo', '2026-12-15'), true);
-assert.equal(presentation.reconcileCharge('2026-09-30', 'Pago (assumido)', '2026-12-15'), false);
+assert.equal(presentation.reconcileCharge('2026-12-10', 'Vencido · sem vínculo', '2026-12-15'), true);
+assert.equal(presentation.reconcileCharge('2026-10-10', 'Pago (assumido)', '2026-12-15'), false);
 assert.equal(presentation.reconcileCharge('2026-11-10', 'Previsto', '2026-10-15'), false);
+const partial = presentation.pendingOccurrences('managed', {
+  status: 'ativo', kind: 'assinatura', frequency: 'mensal', renewal_status: 'automatica',
+  next_due_date: '2026-12-10', amount: 40, linked_transactions: [],
+  installment_overrides: {'2026-12-10': {amount: '15.00', due_date: '2026-12-12', cancelled: false}, '2027-01-10': {amount: '40.00', cancelled: true}},
+}, '2026-12-15');
+assert.equal(partial[0].due, '2026-12-12');
+assert.equal(partial[0].amount, 15);
+assert.equal(partial.some(row => row.due === '2027-01-10'), false);
 assert.equal(presentation.obligationShare(100, 3, 1), 33.33);
 assert.equal(presentation.obligationShare(100, 3, 2), 33.33);
 assert.equal(presentation.obligationShare(100, 3, 3), 33.34);
@@ -101,8 +111,8 @@ void (async () => {
   assert.match(refresh, /void Promise\.all/);
   assert.match(refresh, /return Promise\.resolve\(\)/);
   const board = fs.readFileSync('components/CommitmentBoard.tsx', 'utf8');
-  assert.match(board, /opened\.source !== 'managed'/);
   assert.match(board, /Editar parcelas futuras/);
+  assert.match(board, /source="managed"/);
   const intent = fs.readFileSync('app/+native-intent.ts', 'utf8');
   assert.match(intent, /handle-share/);
   assert.doesNotMatch(intent, /journal|pendingIntent|persist/);

@@ -140,7 +140,7 @@ export default function FutureCommitmentEditor(p: Props) {
   };
   return <View style={s.box}>
     {!preview && <View style={s.actions}>
-      {p.source !== 'managed' && <Button label="Editar futuras" accessibilityLabel={`Editar futuras de ${p.name}`} disabled={busy} onPress={() => open('edit')} />}
+      <Button label="Editar futuras" accessibilityLabel={`Editar futuras de ${p.name}`} disabled={busy} onPress={() => open('edit')} />
       <Button label="Remover parcelas futuras" accessibilityLabel={`Remover parcelas futuras de ${p.name}`} disabled={busy} onPress={() => open('delete')} />
     </View>}
     {preview && <>

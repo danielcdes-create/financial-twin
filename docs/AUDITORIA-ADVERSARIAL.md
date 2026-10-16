@@ -18,9 +18,9 @@ Cada superfície recebe um veredito: `held`, `defect fixed`, `still open` ou `ow
 
 | Residual absorvido | Veredito |
 | --- | --- |
-| E1, editar parte das parcelas futuras de um compromisso gerido | owner-blocked. Não implementado. |
-| Comportamento novo de obrigação pontual | owner-blocked. Não implementado. |
-| Corte móvel de pago assumido | owner-blocked. Não implementado. |
+| E1, editar parte das parcelas futuras de um compromisso gerido | defect fixed. O menu abre o editor também no cadastro gerido. A alteração fica em `installment_overrides`, sem regravar o extrato. |
+| Comportamento novo de obrigação pontual | owner-blocked. O `kind obrigacao` da nota v5 já existe. Não houve comportamento além dessa nota. |
+| Corte móvel de pago assumido | defect fixed. O corte é o dia 1 do mês civil, e nunca anterior a 2026-10-01. |
 | Schema ou semântica do ledger, inclusive total de banco diferente de parcela × quantidade | owner-blocked. Não implementado. |
 | SEC02, trocar a chave de debug | owner-blocked. Não implementado. |
 | UI-R01, leitura depois do ACK | held no helper compartilhado. Medição no aparelho: unverified. |
@@ -61,13 +61,13 @@ held. A linha do extrato mostra a natureza, a categoria, a subcategoria e o mét
 
 ## Compromissos e corte
 
-held para a apresentação já entregue. O corte é a data fixa `2026-10-01` nos dois lados. 30/09 sem vínculo é Pago (assumido). 10/10 sem vínculo, com o dia já passado, é Vencido · sem vínculo e entra em A conciliar. 10/11 sem vínculo é Previsto e fica fora de A conciliar. Vínculo continua Pago vinculado. Âncora 31/01, 28/02, 31/03. Obrigação de 100 em 3 parcelas: 33,33 + 33,33 + 33,34. Sugestão automática não casa setembro com o vencimento de outubro. A parcela 1 do extrato não substitui o total do plano. Testes `test_fixed_cutoff_schedule_and_suggestion_window`, `occurrenceState`, `reconcileCharge`, `obligationShare`, `anchoredDue` e `parcelamentoPurchaseSummary`.
+held para a apresentação já entregue, com o corte móvel a partir de 16/10/2026. O piso continua `2026-10-01`. No mês corrente, o corte é o dia 1 desse mês. 30/09 sem vínculo é Pago (assumido). Uma cobrança do mês anterior sem vínculo passa a Pago (assumido) quando o mês vira. Uma cobrança do mês corrente sem vínculo, com o dia já passado, é Vencido · sem vínculo e entra em A conciliar. Uma cobrança futura sem vínculo é Previsto e fica fora de A conciliar. Vínculo continua Pago vinculado. Âncora 31/01, 28/02, 31/03. Obrigação de 100 em 3 parcelas: 33,33 + 33,33 + 33,34. Sugestão automática não casa setembro com o vencimento de outubro. A parcela 1 do extrato não substitui o total do plano. Testes `test_fixed_cutoff_schedule_and_suggestion_window`, `occurrenceState`, `reconcileCharge`, `obligationShare`, `anchoredDue` e `parcelamentoPurchaseSummary`.
 
 | Residual absorvido | Veredito |
 | --- | --- |
-| E1, editar só parte das parcelas futuras de um compromisso gerido | owner-blocked. O menu “Editar parcelas futuras” continua fora de `managed`. Não foi implementado. |
-| Comportamento novo de obrigação pontual | owner-blocked. O `kind obrigacao` já existe. Não houve comportamento novo. |
-| Corte que acompanha o mês | owner-blocked. A constante continua `2026-10-01`. |
+| E1, editar só parte das parcelas futuras de um compromisso gerido | defect fixed. “Editar parcelas futuras” abre no cadastro gerido. Cada parcela guarda valor, vencimento ou cancelamento em `installment_overrides`, pela data-base. |
+| Comportamento novo de obrigação pontual | owner-blocked. O `kind obrigacao` já existe. Não houve comportamento além da nota v5. |
+| Corte que acompanha o mês | defect fixed. `commitment_cutoff` usa o primeiro dia do mês civil, com piso em 2026-10-01. |
 | Sugestão inversa no extrato, gravar Manter/Avaliar/Cortar, tipo editável Conta/Dívida | still open. Continuam fora das notas v2–v5. Não foram inventados. |
 
 ## Captura e fila local
@@ -105,4 +105,4 @@ held no que roda sem aparelho. Atualizar o perfil aumenta `auth_version`, grava 
 
 Os registros datados foram absorvidos por esta nota e apagados. A evidência em `audit_work` permanece. NT-001, o runbook, UI-STABILITY, FUTURE-COMMITMENTS e os contratos de área continuam sendo a regra viva. Onde esta nota e um status antigo discordam, vale o veredito desta nota para o estado do código, e a NT-001 para o invariante.
 
-owner-blocked e não implementados: E1, obrigação pontual nova, corte móvel, mudança de schema ou de semântica do ledger, e SEC02. Checagens que exigem aparelho, ADB ou o ledger ao vivo permanecem unverified.
+owner-blocked e não implementados: obrigação pontual além da nota v5, mudança de schema ou de semântica do ledger, e SEC02. E1 e o corte que acompanha o mês, com piso em 2026-10-01, passaram a valer com o OK de 16/10/2026. Checagens que exigem aparelho, ADB ou o ledger ao vivo permanecem unverified.

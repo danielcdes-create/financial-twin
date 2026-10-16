@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).parents[1]))
 from bson import ObjectId
 from bson.decimal128 import Decimal128
 from app.analytics import calculate_financial_totals
-from app.commitments import COMMITMENT_CUTOFF, automatic_suggestion, presentation_state, schedule, stored_document, CommitmentIn
+from app.commitments import COMMITMENT_CUTOFF, automatic_suggestion, commitment_cutoff, presentation_state, schedule, stored_document, CommitmentIn
 from app.economic_policy import amount, effects, eligible_payment
 from app.financial_time import civil_date, date_filter, local_date
 from app.dashboard_window import PROJECTION
@@ -45,10 +45,14 @@ class AdversarialAuditTests(unittest.TestCase):
 
     def test_fixed_cutoff_schedule_and_suggestion_window(self):
         self.assertEqual(COMMITMENT_CUTOFF, date(2026, 10, 1))
+        self.assertEqual(commitment_cutoff(date(2026, 12, 15)), date(2026, 12, 1))
+        self.assertEqual(commitment_cutoff(date(2026, 9, 2)), date(2026, 10, 1))
         as_of = date(2026, 12, 15)
-        self.assertEqual(presentation_state(date(2026, 9, 30), False, as_of), 'Pago (assumido)')
-        self.assertEqual(presentation_state(date(2026, 10, 10), False, as_of), 'Vencido · sem vínculo')
-        self.assertEqual(presentation_state(date(2026, 11, 10), False, date(2026, 10, 15)), 'Previsto')
+        december = commitment_cutoff(as_of)
+        self.assertEqual(presentation_state(date(2026, 9, 30), False, as_of, december), 'Pago (assumido)')
+        self.assertEqual(presentation_state(date(2026, 10, 10), False, as_of, december), 'Pago (assumido)')
+        self.assertEqual(presentation_state(date(2026, 12, 10), False, as_of, december), 'Vencido · sem vínculo')
+        self.assertEqual(presentation_state(date(2026, 11, 10), False, date(2026, 10, 15), COMMITMENT_CUTOFF), 'Previsto')
         self.assertEqual(presentation_state(date(2026, 9, 30), True, as_of), 'Pago vinculado')
         item = stored_document(CommitmentIn(kind='obrigacao', name='Tributo', purchase_date=date(2026, 10, 1),
             next_due_date=date(2026, 10, 10), cash_due_date=date(2026, 10, 10), obligation_plan='parcelado',
@@ -59,6 +63,13 @@ class AdversarialAuditTests(unittest.TestCase):
         september = date(2026, 9, 10)
         self.assertFalse(automatic_suggestion(september, due, related=True, amount=Decimal('-50'), expected=Decimal('50')))
         self.assertTrue(automatic_suggestion(date(2026, 10, 8), due, related=False, amount=Decimal('-50'), expected=Decimal('50')))
+        partial = schedule({'status': 'ativo', 'kind': 'assinatura', 'frequency': 'mensal', 'renewal_status': 'automatica',
+            'amount': '40', 'next_due_date': date(2026, 12, 10), 'installment_overrides': {
+                '2026-12-10': {'amount': '15.00', 'due_date': '2026-12-12', 'cancelled': False},
+                '2027-01-10': {'amount': '40.00', 'cancelled': True}}}, 3)
+        self.assertEqual(partial[0]['due_date'], '2026-12-12')
+        self.assertEqual(partial[0]['amount'], 15.0)
+        self.assertEqual(partial[1]['due_date'], '2027-02-10')
 
     def test_open_card_bill_stays_in_planning_until_the_balance_is_zero(self):
         self.assertEqual(OPEN_OBLIGATION_STATUSES, ('futura', 'aberta', 'vencida', 'parcialmente_paga'))

@@ -9,10 +9,19 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator, model_serial
 
 
 Frequency = Literal["semanal", "mensal", "trimestral", "semestral", "anual"]
-# Fixed presentation cutoff. Not a stored document and not editable in the app.
-# Development anchor only. From 01/10/2026 an unlinked charge stays pending or overdue.
-# The boundary does not move when the month changes.
+# Development floor. Not a stored document and not editable in the app.
+# Before 01/10/2026 an unlinked charge stays assumed paid. From the next civil month,
+# the boundary is the first day of that month, so the previous month is no longer pending.
 COMMITMENT_CUTOFF = date(2026, 10, 1)
+
+
+def commitment_cutoff(on: date | None = None) -> date:
+    """Assumed-paid boundary for a civil day. It never moves earlier than 2026-10-01."""
+    if on is None:
+        from app.financial_time import today as civil_today
+        on = civil_today()
+    start = date(on.year, on.month, 1)
+    return start if start > COMMITMENT_CUTOFF else COMMITMENT_CUTOFF
 # Automatic suggestions only. Manual search is not limited to this window.
 SUGGESTION_BEFORE_DAYS = 7
 SUGGESTION_AFTER_DAYS = 10
@@ -33,8 +42,10 @@ def automatic_suggestion(paid: date, due: date, *, related: bool, amount: Decima
     return related or very_close or exact_card
 
 
-def presentation_state(due: date, linked: bool, as_of: date, cutoff: date = COMMITMENT_CUTOFF) -> str:
+def presentation_state(due: date, linked: bool, as_of: date, cutoff: date | None = None) -> str:
     """Derive a parcel state. Dates are civil dates in America/Sao_Paulo."""
+    if cutoff is None:
+        cutoff = commitment_cutoff()
     if linked:
         return 'Pago vinculado'
     if due < cutoff:
@@ -44,11 +55,13 @@ def presentation_state(due: date, linked: bool, as_of: date, cutoff: date = COMM
     return 'Previsto'
 
 
-def pending_kind(due: date, linked: bool, as_of: date, cutoff: date = COMMITMENT_CUTOFF) -> str | None:
+def pending_kind(due: date, linked: bool, as_of: date, cutoff: date | None = None) -> str | None:
     """Pendente when the commitment is still charged, the due is on or after the cutoff, and nothing is linked.
 
     Today only chooses the label. Vencida is before today; a_vencer is today or later.
     """
+    if cutoff is None:
+        cutoff = commitment_cutoff()
     if linked or due < cutoff:
         return None
     return 'vencida' if due < as_of else 'a_vencer'
@@ -207,12 +220,35 @@ def schedule(item: dict, count: int = 12, *, offset: int = 0) -> list[dict]:
         if number == total:
             return float(total_amount - base * (total - 1))
         return float(base)
-    return [{"due_date": occurrence(offset).isoformat(),
+    rows = [{"due_date": occurrence(offset).isoformat(),
              "amount": row_amount(first_number + offset),
              "installment_number": first_number + offset if total else None,
              "status": "previsto"} for offset in range(offset, offset + max(0, available))
             if occurrence(offset).isoformat() not in settled_dates
             and (end is None or occurrence(offset) <= end) and (not item.get('future_cutoff') or occurrence(offset) < as_date(item['future_cutoff']))]
+    return apply_installment_overrides(item, rows)
+
+
+def apply_installment_overrides(item: dict, rows: list[dict]) -> list[dict]:
+    """Partial future edits stay on the commitment. The base due date is the key. Cancelled rows leave the projection."""
+    overrides = item.get("installment_overrides") or {}
+    if not isinstance(overrides, dict) or not overrides:
+        return rows
+    output = []
+    for row in rows:
+        patch = overrides.get(row["due_date"])
+        if not isinstance(patch, dict):
+            output.append(row)
+            continue
+        if patch.get("cancelled"):
+            continue
+        updated = dict(row)
+        if patch.get("amount") not in (None, ""):
+            updated["amount"] = float(Decimal(str(patch["amount"])))
+        if patch.get("due_date"):
+            updated["due_date"] = str(patch["due_date"])[:10]
+        output.append(updated)
+    return output
 
 
 def payment_occurrences(item, paid_date):
@@ -294,7 +330,7 @@ def stored_document(body: CommitmentIn, existing: dict | None = None) -> dict:
     value["revision"] = (existing.get("revision") or 1) + 1 if existing else 1
     if body.status=='cancelado':value['cancelled_at']=(existing or {}).get('cancelled_at') or value['updated_at']
     if existing:
-        for field in ("purchase_provisional_id", "purchase_transaction_id", "purchase_fingerprint"):
+        for field in ("purchase_provisional_id", "purchase_transaction_id", "purchase_fingerprint", "installment_overrides"):
             if existing.get(field) and field not in value:
                 value[field] = existing[field]
     return value
@@ -312,10 +348,12 @@ def future_pending_total(item: dict) -> Decimal | None:
     return sum((Decimal(str(part["amount"])) for part in schedule(item, 600)), Decimal("0"))
 
 
-def pending_rows(item: dict, as_of: date, cutoff: date = COMMITMENT_CUTOFF) -> list[dict]:
+def pending_rows(item: dict, as_of: date, cutoff: date | None = None) -> list[dict]:
     """Finite or windowed occurrences that still have to be paid. Nothing is stored."""
     if item.get('status') != 'ativo' or historical_occurrence_conflicts(item):
         return []
+    if cutoff is None:
+        cutoff = commitment_cutoff()
     linked = linked_due_dates(item)
     rows = []
     for part in schedule(item, 600):
@@ -327,7 +365,7 @@ def pending_rows(item: dict, as_of: date, cutoff: date = COMMITMENT_CUTOFF) -> l
     return rows
 
 
-def commitment_restante(item: dict, as_of: date, cutoff: date = COMMITMENT_CUTOFF):
+def commitment_restante(item: dict, as_of: date, cutoff: date | None = None):
     """Sum of pendentes. None means the series has no end date, so the UI shows a dash."""
     if is_open_ended(item):
         return None

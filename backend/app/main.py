@@ -40,7 +40,7 @@ from app.upload_worker import persisted_event, run_upload
 from app.operation_identity import bind_upload, complete_upload
 from app.mutation_identity import durable_mutation
 from app.commitment_estimates import effective_commitments, estimate_account, same_estimate_account, PATTERNS
-from app.commitments import COMMITMENT_CUTOFF, CommitmentIn, advance, as_date, bson_date, future_pending_total, schedule, schedule_from, stored_document, payment_occurrences, occurrence_already_linked, next_occurrence_date, historical_occurrence_conflicts, automatic_suggestion
+from app.commitments import commitment_cutoff, CommitmentIn, advance, as_date, bson_date, future_pending_total, schedule, schedule_from, stored_document, payment_occurrences, occurrence_already_linked, next_occurrence_date, historical_occurrence_conflicts, automatic_suggestion
 from app.parcelamento_link import decorate_purchase_links, ensure_parcelamento_purchase, sync_parcelamento_purchase
 from app.future_commitments import effective_documents, overlay_link_names
 from app.providers.import_provider import ImportFinancialProvider
@@ -2151,7 +2151,7 @@ def list_commitments(limit:int=Query(default=1000,ge=1,le=1000), offset:int=Quer
         next_offset = offset + len(rows)
         return {"items":[commitment_output(x, reading) for x in rows], "total":total, "limit":limit, "offset":offset,
                 "has_more":next_offset < total, "next_offset":next_offset if next_offset < total else None,
-                "commitment_cutoff_date": COMMITMENT_CUTOFF.isoformat(),
+                "commitment_cutoff_date": commitment_cutoff().isoformat(),
                 "read_consistency":consistency}
 
 

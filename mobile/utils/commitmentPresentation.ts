@@ -14,13 +14,17 @@ export function civilToday(now = new Date()): string {
   return new Intl.DateTimeFormat('en-CA', {timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit'}).format(now);
 }
 
-/** Server-owned fixed cutoff. The list response overwrites this; the default matches the server. */
+/** Floor for assumed-paid. The live boundary is this date or the first day of the civil month, whichever is later. The list response can pin it. */
 export const DEFAULT_COMMITMENT_CUTOFF = '2026-10-01';
-let activeCutoff = DEFAULT_COMMITMENT_CUTOFF;
-export function commitmentCutoff(): string { return activeCutoff; }
+let cutoffOverride: string | null = null;
+export function commitmentCutoff(): string {
+  if (cutoffOverride) return cutoffOverride;
+  const monthStart = `${civilToday().slice(0, 7)}-01`;
+  return monthStart > DEFAULT_COMMITMENT_CUTOFF ? monthStart : DEFAULT_COMMITMENT_CUTOFF;
+}
 export function setCommitmentCutoff(value?: string | null) {
   const day = String(value || '').slice(0, 10);
-  if (/^\d{4}-\d{2}-\d{2}$/.test(day)) activeCutoff = day;
+  cutoffOverride = /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : null;
 }
 
 export function occurrenceState(due: string | null | undefined, linked: boolean, asOf = civilToday(), cutoff = commitmentCutoff()): OccurrenceState {
@@ -364,6 +368,14 @@ function linkedDueSet(item: any): Set<string> {
   return new Set((item?.linked_transactions || []).map(linkOccurrenceDue).filter(Boolean));
 }
 
+function managedInstallmentOverride(item: any, baseDue: string): {amount?: number; due?: string; cancelled: boolean} | null {
+  const patch = item?.installment_overrides?.[baseDue];
+  if (!patch || typeof patch !== 'object') return null;
+  const amount = patch.amount == null || patch.amount === '' ? undefined : Number(patch.amount);
+  const due = patch.due_date ? String(patch.due_date).slice(0, 10) : undefined;
+  return {amount: amount != null && Number.isFinite(amount) ? amount : undefined, due: /^\d{4}-\d{2}-\d{2}$/.test(due || '') ? due : undefined, cancelled: Boolean(patch.cancelled)};
+}
+
 function managedCharge(item: any, steps: number): number {
   const total = Number(item.amount || 0);
   const count = Number(item.installment_count || 0);
@@ -423,9 +435,13 @@ export function pendingOccurrences(source: 'managed' | 'installment' | 'obligati
     if (payload.renewal_status === 'manual' && steps > 0) break;
     if (end && due > end) break;
     if (cut && !(due < cut)) break;
-    const state = occurrenceState(due, links.has(due), asOf, cutoff);
+    const patch = managedInstallmentOverride(payload, due);
+    if (patch?.cancelled) continue;
+    const shownDue = patch?.due || due;
+    const state = occurrenceState(shownDue, links.has(due) || links.has(shownDue), asOf, cutoff);
     if (state === 'Previsto' || state === 'Vencido · sem vínculo') {
-      rows.push({key: due, due, amount: managedCharge(payload, steps), kind: pendingKindOf(due, asOf), estimated, state});
+      const amount = patch?.amount != null ? patch.amount : managedCharge(payload, steps);
+      rows.push({key: due, due: shownDue, amount, kind: pendingKindOf(shownDue, asOf), estimated, state});
     }
   }
   return rows;

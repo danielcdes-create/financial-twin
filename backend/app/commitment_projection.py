@@ -6,7 +6,7 @@ from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from app.atomic import mongo_snapshot
 from app.auth import require_session
-from app.commitments import COMMITMENT_CUTOFF, advance, linked_due_dates, schedule_from, historical_occurrence_conflicts
+from app.commitments import commitment_cutoff, advance, linked_due_dates, schedule_from, historical_occurrence_conflicts
 from app.commitment_estimates import effective_commitments
 from app.economic_policy import amount
 from app.financial_time import civil_date, today
@@ -39,7 +39,7 @@ def monthly_projection(db, months=None, as_of: date | None = None):
         due = None
         if part.get('data_vencimento') or part.get('due_date'):
             due = civil_date(part.get('data_vencimento') or part['due_date'])
-            if due < COMMITMENT_CUTOFF:
+            if due < commitment_cutoff():
                 return
             month = due.strftime('%Y-%m')
         else:
@@ -47,7 +47,7 @@ def monthly_projection(db, months=None, as_of: date | None = None):
             if not re.fullmatch(r'[1-9]\d{3}-(0[1-9]|1[0-2])', month):
                 warning(name, 'vencimento ou competência ausente; fora do gráfico')
                 return
-            if month < COMMITMENT_CUTOFF.strftime('%Y-%m'):
+            if month < commitment_cutoff().strftime('%Y-%m'):
                 return
         # A due before today stays in its own month. It is not dropped, and it is not moved forward.
         entry = {
@@ -74,7 +74,7 @@ def monthly_projection(db, months=None, as_of: date | None = None):
             if estimate and estimate.get('requires_review'):
                 warning(name, 'média não confirmada; usando valor de referência')
             # Seek from the cutoff so an unlinked due before today remains pending. The offset still skips older history.
-            seek = COMMITMENT_CUTOFF
+            seek = commitment_cutoff()
             gap = max(0, (first.year - seek.year) * 12 + first.month - seek.month)
             count = (last_limit - seek).days // 7 + 2 if item['frequency'] == 'semanal' else MAX_MONTHS + 2 + gap
             if item['kind'] == 'parcelamento':
@@ -171,7 +171,7 @@ def monthly_projection(db, months=None, as_of: date | None = None):
             'automatic_horizon_capped': months is None and automatic > MAX_MONTHS,
             'warnings': warnings, 'read_consistency': consistency, 'currency': 'BRL',
             'total': str(sum((Decimal(row['total']) for row in rows), Decimal('0'))), 'summary': summary,
-            'commitment_cutoff_date': COMMITMENT_CUTOFF.isoformat()}
+            'commitment_cutoff_date': commitment_cutoff().isoformat()}
 
 
 @router.get('/v1/commitment-projection')

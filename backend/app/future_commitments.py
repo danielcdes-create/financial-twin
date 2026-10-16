@@ -14,7 +14,7 @@ from pymongo.errors import DuplicateKeyError
 from app.auth import require_session
 from app.atomic import mongo_snapshot, mongo_transaction, session_database
 from app.commitment_estimates import effective_commitments
-from app.commitments import COMMITMENT_CUTOFF, as_date, schedule_from
+from app.commitments import commitment_cutoff, as_date, linked_due_dates, schedule_from
 from app.economic_policy import amount, eligible_payment
 from app.financial_time import local_date, today
 from app.source_tokens import require_source_token
@@ -173,8 +173,24 @@ def view(db, source, identity):
     token = digest({'original': original, 'override': override, 'civil_day': today().isoformat()})
     if source == 'managed':
         original = effective_commitments(db, [original])[0]
+        stored_overrides = original.get('installment_overrides') if isinstance(original.get('installment_overrides'), dict) else {}
+        base = dict(original)
+        base.pop('installment_overrides', None)
         token = digest({'original': original, 'civil_day': today().isoformat()})
-        rows = [{'row_id': i, **row, 'editable': True} for i, row in enumerate(schedule_from(original, today(), 600), 1)]
+        linked = linked_due_dates(original)
+        rows = []
+        for index, row in enumerate(schedule_from(base, today(), 600), 1):
+            patch = stored_overrides.get(row['due_date']) if isinstance(stored_overrides.get(row['due_date']), dict) else {}
+            if patch.get('cancelled'):
+                continue
+            base_due = row['due_date']
+            shown_due = str(patch.get('due_date') or base_due)[:10]
+            shown_amount = str(patch.get('amount')) if patch.get('amount') not in (None, '') else str(row['amount'])
+            linked_row = base_due in linked or shown_due in linked
+            rows.append({'row_id': index, 'number': row.get('installment_number'), 'due_date': shown_due,
+                         'occurrence_key': base_due, 'month': shown_due[:7], 'amount': shown_amount,
+                         'status': row.get('status'), 'editable': not linked_row, 'cancelled': False,
+                         'reason': '' if not linked_row else 'Parcela já vinculada: preservada.'})
         return {'source': source, 'identity': identity, 'name': original['name'], 'preview_token': token, 'rows': rows,
                 'editable_count': sum(row['editable'] for row in rows), 'revision': original.get('revision', 1)}
     current = effective_document(db, source, original, override)
@@ -243,7 +259,7 @@ def future_obligations_view(db):
     for original, current in zip(candidates, effective_documents(db, 'obligation', candidates)):
         due_date = due(current)
         # Overdue and still unlinked stays on the list. Editing it remains limited to a due on or after today.
-        if due_date is None or due_date < COMMITMENT_CUTOFF: continue
+        if due_date is None or due_date < commitment_cutoff(): continue
         if not unpaid(db, 'obligation', original, original, linked) or current.get('future_excluded'): continue
         profile = current.get('profile') if isinstance(current.get('profile'), dict) else {}
         items.append({'id': str(original['_id']), 'name': profile.get('display_name') or current.get('descricao') or f'{current.get("tipo", "Obrigação")} · {current.get("competencia", "")}',
@@ -312,15 +328,29 @@ def write(db, source, identity, body, deleting=False):
             now = datetime.now(timezone.utc)
             undo_snapshot = None
             if source == 'managed':
-                if not deleting: raise HTTPException(422, 'Use o formulário Gerenciar para editar este cadastro.')
-                if not reviewed['editable_count']: raise HTTPException(409, 'Não há cobranças futuras que possam ser excluídas.')
-                revision_before = int(original.get('revision') or 1)
-                undo_snapshot = {'kind': 'managed', 'revision_after': revision_before + 1,
-                    'previous_deleted_at': original.get('future_deleted_at'), 'previous_cutoff': _plain_date(original.get('future_cutoff')), 'restored': False}
-                updated = writing.commitments.update_one({'_id': original['_id'], 'revision': original.get('revision', {'$exists': False})},
-                    {'$set': {'future_deleted_at': now, 'future_cutoff': today().isoformat(), 'updated_at': now}, '$inc': {'revision': 1}})
-                if updated is not None and updated.matched_count == 0: raise HTTPException(409, 'O compromisso mudou. Reabra antes de excluir.')
-                affected = reviewed['editable_count']
+                if deleting:
+                    if not reviewed['editable_count']: raise HTTPException(409, 'Não há cobranças futuras que possam ser excluídas.')
+                    revision_before = int(original.get('revision') or 1)
+                    undo_snapshot = {'kind': 'managed', 'revision_after': revision_before + 1,
+                        'previous_deleted_at': original.get('future_deleted_at'), 'previous_cutoff': _plain_date(original.get('future_cutoff')), 'restored': False}
+                    updated = writing.commitments.update_one({'_id': original['_id'], 'revision': original.get('revision', {'$exists': False})},
+                        {'$set': {'future_deleted_at': now, 'future_cutoff': today().isoformat(), 'updated_at': now}, '$inc': {'revision': 1}})
+                    if updated is not None and updated.matched_count == 0: raise HTTPException(409, 'O compromisso mudou. Reabra antes de excluir.')
+                    affected = reviewed['editable_count']
+                else:
+                    available = {row['row_id']: row for row in reviewed['rows']}
+                    edits = body.rows
+                    if not edits or len({row.row_id for row in edits}) != len(edits): raise HTTPException(422, 'Selecione parcelas futuras sem repetir linhas.')
+                    patches = dict(original.get('installment_overrides') or {})
+                    for change in edits:
+                        row = available.get(change.row_id)
+                        if not row or not row['editable'] or not row.get('occurrence_key'): raise HTTPException(409, 'Uma parcela não é futura ou já tem pagamento. Nenhuma alteração foi gravada.')
+                        if change.due_date and change.due_date < today(): raise HTTPException(422, 'O vencimento deve ser hoje ou uma data futura.')
+                        patches[row['occurrence_key']] = {'amount': str(change.amount), 'due_date': change.due_date.isoformat() if change.due_date else row['due_date'], 'cancelled': change.cancelled}
+                    updated = writing.commitments.update_one({'_id': original['_id'], 'revision': original.get('revision', {'$exists': False})},
+                        {'$set': {'installment_overrides': patches, 'updated_at': now}, '$inc': {'revision': 1}})
+                    if updated is not None and updated.matched_count == 0: raise HTTPException(409, 'O compromisso mudou. Reabra antes de salvar.')
+                    affected = len(edits)
             else:
                 available = {row['row_id']: row for row in reviewed['rows']}
                 edits = [FutureChange(row_id=row['row_id'], amount=row['amount'], due_date=row['due_date'], cancelled=True) for row in reviewed['rows'] if row['editable']] if deleting else body.rows

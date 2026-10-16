@@ -492,6 +492,7 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
       </View>}
       {profileEdit === card.key && <CommitmentProfileEditor card={card} api={api} cardLabelFor={cardLabelFor} accountLabelFor={accountLabelFor} cardChoices={cardChoices} accountChoices={accountChoices} onUpdated={onUpdated} onClose={() => setProfileEdit(null)} />}
       {futureEdit === card.key && card.source !== 'managed' && <FutureCommitmentEditor source={card.source === 'installment' ? 'installment' : 'obligation'} identity={card.source === 'installment' ? String(item.id) : String((item.items || []).find((part: {payment_link?: unknown; id?: string}) => !part.payment_link)?.id || item.items?.[0]?.id || '')} name={card.title} api={api} onUpdated={onUpdated} onRemoved={({delete_request_id}) => {const identity = card.source === 'installment' ? String(item.id) : String((item.items || []).find((part: {payment_link?: unknown; id?: string}) => !part.payment_link)?.id || item.items?.[0]?.id || ''); rememberUndo(card.key, card.source === 'installment' ? 'installment' : 'obligation', card.title, [{identity, delete_request_id}]);}} />}
+      {futureEdit === card.key && card.source === 'managed' && <FutureCommitmentEditor source="managed" identity={String(item.commitment_id)} kind={item.kind === 'assinatura' ? 'assinatura' : 'parcelamento'} name={card.title} api={api} onUpdated={onUpdated} />}
       {card.source === 'managed' && linkUndo?.commitmentId === item.commitment_id && <Pressable accessibilityRole="button" accessibilityLabel="Desfazer vínculo" onPress={onUndoLink} style={s.scheduleLink}><Text style={s.scheduleLinkText}>Vinculado · Desfazer</Text></Pressable>}
     </View>;
   };
@@ -557,7 +558,7 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
         ...(canEnd ? [{label: 'Terminar em', accessibilityLabel: `Terminar ${opened.title} em`, onPress: () => {const stored = String(opened.payload.end_date || '').slice(0, 10); setEndMonth(stored.length === 10 ? `${stored.slice(5, 7)}/${stored.slice(0, 4)}` : ''); setEndEdit(opened.key);}}] : []),
         ...(canClose ? [{label: 'Encerrar', accessibilityLabel: `Encerrar ${opened.source === 'managed' ? opened.payload.name : opened.title}`, onPress: () => opened.source === 'managed' ? askClose(opened) : void askRemove(opened, 'encerrar')}] : []),
         {label: 'Remover parcelas futuras', accessibilityLabel: `Remover parcelas futuras de ${opened.title}`, onPress: () => {void askRemove(opened);}},
-        ...(opened.source !== 'managed' ? [{label: 'Editar parcelas futuras', accessibilityLabel: `Editar futuras de ${opened.title}`, onPress: () => setFutureEdit(opened.key)}] : []),
+        {label: 'Editar parcelas futuras', accessibilityLabel: `Editar futuras de ${opened.title}`, onPress: () => setFutureEdit(opened.key)},
       ];
       scheduleOverlay.setPanel({
         title: `Detalhe de ${opened.title}`,

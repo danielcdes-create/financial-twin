@@ -1,5 +1,7 @@
 # Edição e exclusão de compromissos futuros
 
+OK de 16/10/2026. O corte de “Pago (assumido)” deixa de ser só 01/10/2026: é o primeiro dia do mês civil em Brasília, e nunca uma data anterior a 01/10/2026. Novembro torna outubro assumido; setembro continua assumido. Não há tela para editar essa data. Um compromisso gerido também aceita “Editar parcelas futuras”: cada parcela alterada fica em `installment_overrides`, identificada pela data-base da série. Cancelar uma parcela tira só ela da projeção. O extrato e os vínculos já gravados não são reescritos. O formulário inteiro continua editando o cadastro. SEC02, schema do ledger e obrigação pontual além da nota v5 continuam fora.
+
 Atualização 1.20.33: um parcelamento concluído conserva `next_installment_number = installment_count + 1`, inclusive 601 após 600/600. Esse sentinela é aceito somente com `status=concluido`; editar observações preserva pagamentos, contador e datas. Não há próxima cobrança e não é permitido reativar esse cadastro sem corrigir explicitamente sua condição. Os cronogramas não projetam cobranças de compromisso concluído.
 
 Em 409, o editor compara origem/local/remoto por identidade da parcela e por campo. Alterações disjuntas podem ser mescladas; valor, data ou cancelamento sobrepostos exigem escolha. Parcela paga/removida bloqueia reaplicação. Recargas repetidas e conflitos consecutivos conservam as decisões ainda pendentes. O token remoto só autoriza o patch conferido. [Auditoria atual](AUDITORIA-ADVERSARIAL.md).
