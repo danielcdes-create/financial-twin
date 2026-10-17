@@ -1,5 +1,15 @@
 # Cabe na minha vida?
 
+## Síntese da análise — 17/10/2026
+
+**Sua análise** abre com um selo. Ele cruza o caixa, a reserva mínima e o efeito na meta: pressiona o caixa, cabe no caixa e trava ou adia a meta, ou cabe com a reserva protegida. Sem saldo inicial, o selo fica só no esforço e na meta.
+
+A mesma tela traduz o esforço. Com mais de uma parcela, mostra o valor mensal. Com renda e horas preenchidas, mostra os dias úteis de 8 horas, as horas de cada parcela e a renda-hora considerada. O raio-X compara o saldo no fim do período com a compra e sem ela, e aponta o menor fechamento diário depois das entradas quando ele é mais alto que o menor saldo.
+
+Comprar agora destaca a parcela mensal ou o toque na reserva. Esperar 30 dias destaca o fôlego antes da primeira cobrança. A alternativa 20% mais barata mostra a economia total, a economia mensal e as horas de trabalho poupadas.
+
+O cartão compartilhável continua sem salário, saldo, dívida, produto, loja e nome da meta. Passa a incluir a parcela, os dias úteis de 8 horas e, quando a meta sai da janela de dez anos, essa frase, sem o nome da meta. Testes: `mobile/scripts/test-purchase-copy.cjs` e `mobile/scripts/test-purchase-card.cjs`. A análise não cria lançamento. A instalação no aparelho não foi verificada.
+
 ## Lista, renda e parcelas dentro do período — 17/10/2026
 
 Em **Cabe na minha vida?**, cada compromisso ativo do período entra como linhas com nome, data e valor, inclusive o que é pago no cartão e as compras parceladas (`installment_plans` e `parcelamento`). A fatura consolidada (`fatura_cartao` ou `fatura`) não aparece nessa lista. O planejamento geral (`/v1/insights/planning-context`) continua sem repetir a compra do cartão quando a fatura é a saída de caixa, e continua oferecendo a fatura para conferência.
@@ -28,8 +38,8 @@ Funcionalidade implementada em 29/09/2026. Entrada: **Mais → Cabe na minha vid
 2. Se desejado, tocar em **Ler print com xAI**. A imagem só é enviada nesse momento. Conferir e corrigir o preço total, número de parcelas e data do primeiro pagamento.
 3. Informar premissas opcionais: saldo inicial, reserva, renda líquida, horas de trabalho e uma meta com aporte mensal.
 4. Conferir os compromissos previstos. Cada compromisso ativo, inclusive o pago no cartão e as compras parceladas, aparece com nome, data e valor. A fatura consolidada do cartão fica de fora. Obrigações importadas que não são essa fatura começam desmarcadas. **Selecionar Tudo** e **Limpar seleção** controlam a lista inteira, e **Selecionar todo o Compromisso** e **Limpar seleção** controlam cada compromisso individualmente (inclusive **Financiamento**).
-5. Avaliar horas de trabalho, caixa no período de pelo menos número de parcelas + 1 mês (mínimo de 90 dias) e eventual adiamento da meta. Comparar comprar agora, esperar 30 dias e uma alternativa 20% mais barata.
-6. Abrir a prévia do cartão. No Android, compartilhar a imagem pela folha nativa; no desktop, salvar o PNG.
+5. Avaliar o selo no topo, as horas de trabalho, a parcela mensal, o caixa no período de pelo menos número de parcelas + 1 mês (mínimo de 90 dias) e o eventual adiamento da meta. Comparar comprar agora, esperar 30 dias e uma alternativa 20% mais barata.
+6. Abrir a prévia do cartão. No Android, compartilhar a imagem pela folha nativa; no desktop, salvar o PNG. O cartão leva preço, parcelas, horas, dias úteis e adiamento. Salário, saldo, dívida, produto, loja e nome da meta ficam de fora.
 
 ## Invariantes
 
@@ -45,7 +55,7 @@ Funcionalidade implementada em 29/09/2026. Entrada: **Mais → Cabe na minha vid
 - Somente a compra admite horizonte até 3.660 dias, mantendo até 60 parcelas; `/simulate` continua limitado a 90 dias e `/planning-context` a 367 dias. A geração alcança também compromissos semanais antigos; o cálculo indexa eventos por dia para períodos longos.
 - APK 1.19.2 / código 38 contém a tela dinâmica. Sete regressões adicionais cobrem calendário, 12/60 parcelas, adiamento, saldo ausente, limites e contexto somente leitura; com as duas regressões da inicialização Windows, suíte total de 128 testes. Evidências em `../../audit_work/purchase-horizon-2026-09-30/`.
 - Na validação ao vivo, o Windows Proactor parou de aceitar conexões após `WinError 64`, embora o processo continuasse vivo. `run_dev.py` agora passa uma fábrica explícita `SelectorEventLoop` ao Uvicorn no Windows; outros sistemas mantêm `auto`. A fábrica retorna uma instância, conforme o contrato do Uvicorn instalado; não depende de políticas globais. O backend local não usa subprocessos assíncronos. A troca evita o caminho `AcceptEx` afetado ([CPython #93821](https://github.com/python/cpython/issues/93821)); há verificação com 100 resets de conexões de leitura e 20 consultas concorrentes de saúde, sem gravações financeiras.
-- O cartão captura somente sua própria View. A função que prepara seu texto aceita preço, horas e adiamento; salário, saldo, dívida, produto/loja e nome da meta não entram no cartão.
+- O cartão captura somente sua própria View. A função que prepara seu texto aceita preço, parcelas, horas, adiamento e o aviso de meta fora de dez anos. Salário, saldo, dívida, produto/loja e nome da meta não entram no cartão.
 - Mudanças nas premissas invalidam a análise e sua prévia anterior.
 
 ## Contratos de API
