@@ -2,6 +2,18 @@
 
 Julgamento da árvore local de `financial-app` a partir de `431aaf5`, com a correção de contagem dupla desta entrega, commit `cc7f562`. Dados sintéticos. O ledger ao vivo não foi lido, escrito, deduplicado nem reparado. O release privado no disco é Android 1.20.65 / versionCode 111, SHA-256 `6EBA45E048CEA22084FF28EC54A5F807418CCBE7318997A2D7B39D769FC738C7`, commit `da40064`, com o certificado de debug anterior. A instalação física permanece unverified.
 
+## Entrega 17/10/2026 — lista de Cabe na minha vida
+
+Commit do recurso `ef9e218`. O ledger ao vivo não foi lido nem escrito. Nesta passagem passaram `backend/tests/test_purchase_horizon.py`, `backend/tests/test_purchase_check.py` e `mobile/scripts/test-purchase-copy.cjs`. A suíte completa do cliente e a homologação física não foram repetidas.
+
+| Correção | Veredito |
+| --- | --- |
+| Compromisso pago no cartão fora da lista | defect fixed. `purchase-context` devolve cada ocorrência com nome, data e valor. O planejamento geral continua sem repetir a compra quando a fatura entra. |
+| Fatura consolidada na mesma lista | defect fixed. `fatura_cartao` e `fatura` não entram nas linhas nem nas sugestões dessa tela. |
+| Selecionar Todos | defect fixed. Um controle marca as ocorrências de um compromisso; outro marca todos os compromissos listados. A obrigação importada que não é fatura continua desmarcada até o toque. |
+| Restante de R$ 0,00 | defect fixed. Com todas as parcelas dentro do período, o texto diz que o período já inclui todas as parcelas desta compra. O restante só aparece quando é maior que zero. |
+| Menor saldo sem a renda informada | defect fixed. Com renda líquida mensal, a avaliação credita esse valor uma vez por mês civil. Sem renda, o saldo anterior permanece. Nenhum lançamento é criado. |
+
 ## Entrega 17/10/2026 — pré-preenchimento da captura pelo histórico
 
 Commit do recurso `11b9f2f`, empacotado em `da40064`. APK ARM64 de 48072916 bytes, SHA-256 `6EBA45E048CEA22084FF28EC54A5F807418CCBE7318997A2D7B39D769FC738C7`, assinante `FAC61745DC0903786FB9EDE62A962B399F7348F0BB6F899B8332667591033B9C`. O ledger ao vivo não foi lido nem escrito. Nesta passagem passaram 6 testes de plataformas e `mobile/scripts/test-vendor-suggestions.cjs`. A suíte completa do cliente e a homologação física não foram repetidas.
