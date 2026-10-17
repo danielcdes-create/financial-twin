@@ -2,6 +2,17 @@
 
 Julgamento da árvore local de `financial-app` a partir de `431aaf5`, com a correção de contagem dupla desta entrega, commit `cc7f562`. Dados sintéticos. O ledger ao vivo não foi lido, escrito, deduplicado nem reparado. O release privado no disco é Android 1.20.64 / versionCode 110, SHA-256 `BC8B3B7A3DBD74E9F7D511D2AC2FC59F76246C371FF4EA0133B9E00B9E67F5C0`, commit `8ddf172`, com o certificado de debug anterior. A instalação física permanece unverified.
 
+## Entrega 17/10/2026 — pré-preenchimento da captura pelo histórico
+
+Commit `11b9f2f`. O ledger ao vivo não foi lido nem escrito. Nesta passagem passaram 6 testes de plataformas e `mobile/scripts/test-vendor-suggestions.cjs`. A suíte completa do cliente e a homologação física não foram repetidas.
+
+| Correção | Veredito |
+| --- | --- |
+| Descritor de maquininha chega sem vendedor | defect fixed. A ingestão e a leitura consultam capturas confirmadas e o extrato do mesmo fluxo. Correspondência exata, prefixo truncado e plataforma mais prefixo da loja preenchem os campos vazios. |
+| Alias descartado quando o vendedor já existe | defect fixed. Confirmar ou corrigir um descritor com identificação da loja além da plataforma grava o alias no cadastro. Texto só de plataforma não vira alias. |
+| Fila já aberta não herda o histórico | defect fixed. A leitura anexa `historical_defaults`. A revisão preenche só campos vazios e avisa para conferir antes de confirmar. |
+| Chip some por causa do prefixo da maquininha | defect fixed. O prefixo deixa de derrubar o score abaixo de 0,28. Tocar no chip preenche os campos vazios com o perfil daquele vendedor. |
+
 ## Entrega 17/10/2026 — correções P0–P2
 
 Commit das correções `a36867b`, empacotado em `8ddf172`. APK ARM64 de 48063132 bytes, SHA-256 `BC8B3B7A3DBD74E9F7D511D2AC2FC59F76246C371FF4EA0133B9E00B9E67F5C0`, assinante `FAC61745DC0903786FB9EDE62A962B399F7348F0BB6F899B8332667591033B9C`. O ledger ao vivo não foi lido nem escrito. Nesta passagem passaram 6 testes de perfil, 2 de corte, 15 de compromissos e 11 de projeção. A suíte completa do cliente e a instalação física não foram repetidas.
