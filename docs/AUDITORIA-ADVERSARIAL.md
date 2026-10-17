@@ -1,10 +1,10 @@
 # Auditoria adversarial — 15/10/2026
 
-Julgamento da árvore local de `financial-app` a partir de `431aaf5`, com a correção de contagem dupla desta entrega, commit `cc7f562`. Dados sintéticos. O ledger ao vivo não foi lido, escrito, deduplicado nem reparado. O release privado no disco é Android 1.20.67 / versionCode 113, SHA-256 `9C0F69848E950EF1D96DF13A0CABCAB62839F6A507BAF760846564628E040DA5`, commit `27cd105`, com o certificado de debug anterior. A instalação física permanece unverified.
+Julgamento da árvore local de `financial-app` a partir de `431aaf5`, com a correção de contagem dupla desta entrega, commit `cc7f562`. Dados sintéticos. O ledger ao vivo não foi lido, escrito, deduplicado nem reparado. O release privado no disco é Android 1.20.68 / versionCode 114, SHA-256 `7CF20E65021FC28CE5B4E2A055C7F2AC4C38B7FF51A338F894510C4EC8EDE38F`, commit `49253ef`, com o certificado de debug anterior. A instalação física permanece unverified.
 
 ## Entrega 17/10/2026 — selo e esforço em Cabe na minha vida
 
-Commit do recurso `89ddc4a`. O ledger ao vivo não foi lido nem escrito. Nesta passagem passaram `mobile/scripts/test-purchase-copy.cjs`, `mobile/scripts/test-purchase-card.cjs`, `backend/tests/test_purchase_horizon.py` e `backend/tests/test_purchase_check.py`. A suíte completa do cliente e a homologação física não foram repetidas.
+Commit do recurso `89ddc4a`, empacotado em `49253ef`. APK ARM64 de 48087604 bytes, SHA-256 `7CF20E65021FC28CE5B4E2A055C7F2AC4C38B7FF51A338F894510C4EC8EDE38F`, assinante `FAC61745DC0903786FB9EDE62A962B399F7348F0BB6F899B8332667591033B9C`. O ledger ao vivo não foi lido nem escrito. Nesta passagem passaram `mobile/scripts/test-purchase-copy.cjs`, `mobile/scripts/test-purchase-card.cjs`, `backend/tests/test_purchase_horizon.py` e `backend/tests/test_purchase_check.py`. A suíte completa do cliente e a homologação física não foram repetidas.
 
 | Correção | Veredito |
 | --- | --- |
@@ -87,7 +87,7 @@ Cada superfície recebe um veredito: `held`, `defect fixed`, `still open` ou `ow
 | UI-R02, blocos acima do campo ativo | still open. IME físico: unverified. |
 | PS-R01, inbox sem orçamento de retenção | still open. Fila grande e disco baixo: unverified. |
 | PS-R02, share com sessão bloqueada | still open. App frio, bloqueio e biometria: unverified. |
-| Homologação física (instalação, IME, gestos, TalkBack, biometria, câmera, notificação, share) | unverified. Sem ADB. O APK 1.20.67 está no disco; a instalação física não foi feita. |
+| Homologação física (instalação, IME, gestos, TalkBack, biometria, câmera, notificação, share) | unverified. Sem ADB. O APK 1.20.68 está no disco; a instalação física não foi feita. |
 | Sugestão inversa no extrato, gravar Manter/Avaliar/Cortar, tipo editável Conta/Dívida | still open. Não foram inventados. |
 | Duas evidências de voz distintas no aparelho | unverified. |
 | Exceção GHSA do `node-forge` até 01/11/2026 | still open. |
@@ -159,7 +159,7 @@ held no que roda sem aparelho. Atualizar o perfil aumenta `auth_version`, grava 
 | UI-R02, blocos assíncronos acima do campo ativo | still open. Não houve salto reproduzido nesta passagem. IME físico: unverified. |
 | PS-R02, share com sessão bloqueada | still open. `app/+native-intent.ts` só encaminha para `/handle-share` e não guarda a intenção. App frio, bloqueio e biometria: unverified. |
 | SEC02, troca da chave de debug | owner-blocked. Não implementado. `android/app/build.gradle` ainda assina release e debug com `signingConfigs.debug`. |
-| Homologação física: instalação, IME, gestos, TalkBack, biometria, câmera, notificação e share | unverified. Não há aparelho ADB nesta sessão. O APK 1.20.67 está no disco; a instalação física não foi feita. |
+| Homologação física: instalação, IME, gestos, TalkBack, biometria, câmera, notificação e share | unverified. Não há aparelho ADB nesta sessão. O APK 1.20.68 está no disco; a instalação física não foi feita. |
 
 ## O que as auditorias anteriores deixavam aberto
 
