@@ -1,5 +1,17 @@
 # Cabe na minha vida?
 
+## Lista, renda e parcelas dentro do período — 17/10/2026
+
+Em **Cabe na minha vida?**, cada compromisso ativo do período entra como linhas com nome, data e valor, inclusive o que é pago no cartão. A fatura consolidada (`fatura_cartao` ou `fatura`) não aparece nessa lista. O planejamento geral (`/v1/insights/planning-context`) continua sem repetir a compra do cartão quando a fatura é a saída de caixa, e continua oferecendo a fatura para conferência.
+
+A lista tem **Selecionar Todos** para as ocorrências de um compromisso e **Selecionar Todos** para todos os compromissos listados. Cada linha continua podendo ser marcada sozinha. Obrigações importadas que não são fatura de cartão permanecem desmarcadas até o toque.
+
+Se a renda líquida mensal está preenchida, o menor saldo da compra soma essa renda uma vez em cada mês civil do período, junto com o saldo inicial, os compromissos marcados e as parcelas do cenário. Sem renda, o saldo usa só o saldo inicial, os compromissos e as parcelas. A renda não entra no simulador geral de 90 dias.
+
+Quando o período já cobre todas as parcelas do cenário, o texto diz que o período já inclui todas as parcelas desta compra. “Ainda há … em parcelas” só aparece quando o valor posterior é maior que zero. A análise continua sem criar lançamento.
+
+Testes sintéticos: `backend/tests/test_purchase_horizon.py`, `backend/tests/test_purchase_check.py` e `mobile/scripts/test-purchase-copy.cjs`. O ledger ao vivo não foi lido nem escrito. A instalação no aparelho não foi verificada.
+
 ## Correção da leitura de títulos longos — 30/09/2026
 
 Um print real do Galaxy Ring reproduziu `503 invalid_output`: a xAI retornou preço total `1873.14`, 12 parcelas e parcela `156.15`, mas o título completo do anúncio ultrapassou os 120 caracteres aceitos por `product_label`. A resposta inteira era descartada por `string_too_long`, embora os valores financeiros fossem válidos.
@@ -15,7 +27,7 @@ Funcionalidade implementada em 29/09/2026. Entrada: **Mais → Cabe na minha vid
 1. Escolher um print PNG/JPEG ou preencher preço e parcelas manualmente.
 2. Se desejado, tocar em **Ler print com xAI**. A imagem só é enviada nesse momento. Conferir e corrigir o preço total, número de parcelas e data do primeiro pagamento.
 3. Informar premissas opcionais: saldo inicial, reserva, renda líquida, horas de trabalho e uma meta com aporte mensal.
-4. Conferir os compromissos previstos. Obrigações importadas começam desmarcadas para evitar repetição de previsões.
+4. Conferir os compromissos previstos. Cada compromisso ativo, inclusive o pago no cartão, aparece com nome, data e valor. A fatura consolidada do cartão fica de fora. Obrigações importadas que não são essa fatura começam desmarcadas. **Selecionar Todos** marca um compromisso ou todos os compromissos da lista.
 5. Avaliar horas de trabalho, caixa no período de pelo menos número de parcelas + 1 mês (mínimo de 90 dias) e eventual adiamento da meta. Comparar comprar agora, esperar 30 dias e uma alternativa 20% mais barata.
 6. Abrir a prévia do cartão. No Android, compartilhar a imagem pela folha nativa; no desktop, salvar o PNG.
 
@@ -28,7 +40,8 @@ Funcionalidade implementada em 29/09/2026. Entrada: **Mais → Cabe na minha vid
 - Sem saldo inicial explícito, o caixa é insuficiente para concluir capacidade de compra. Horas e meta podem continuar disponíveis.
 - A meta assume que compra e aportes disputam o mesmo dinheiro, sem rendimentos. Aportes mensais seguem a âncora da data inicial; a busca termina em 120 meses. Parcelas do mesmo dia são descontadas antes do aporte.
 - Datas usam o calendário civil de Brasília na interface. Lista e cálculo compartilham `purchase_horizon.py`: número de parcelas + 1 mês de calendário, contado da primeira cobrança, preservando o mínimo de 90 dias. O cenário de espera também tem pelo menos um mês após sua última parcela. Ex.: 12 parcelas com início e primeira cobrança em 30/09/2026 usam até 30/10/2027. A interface mostra as datas exatas.
-- `GET /v1/insights/purchase-context?start=...&installments=...&first_payment=...` usa esse mesmo intervalo para compromissos e obrigações existentes. Alterar parcelas/data (inclusive por print ou voz) recarrega a lista; respostas antigas são descartadas. A análise aguarda o contexto vigente, com erro e nova tentativa disponíveis. Seleções por identidade são preservadas e obrigações novas continuam desmarcadas. Lista em ordem de data, sem criar parcelas ou pagamentos.
+- `GET /v1/insights/purchase-context?start=...&installments=...&first_payment=...` usa esse mesmo intervalo para compromissos e obrigações existentes. O compromisso pago no cartão entra na data de vencimento dele. A obrigação `fatura_cartao` ou `fatura` não entra nessa resposta. Alterar parcelas/data (inclusive por print ou voz) recarrega a lista; respostas antigas são descartadas. A análise aguarda o contexto vigente, com erro e nova tentativa disponíveis. Seleções por identidade são preservadas e obrigações novas, que não são fatura de cartão, continuam desmarcadas. A lista agrupa as ocorrências de cada compromisso, sem criar parcelas ou pagamentos.
+- Com `monthly_net_income`, a avaliação da compra credita essa renda uma vez por mês civil do horizonte, no primeiro dia civil do mês que cai dentro do período. Sem esse campo, o caixa permanece o de antes. `/simulate` não recebe essa renda.
 - Somente a compra admite horizonte até 3.660 dias, mantendo até 60 parcelas; `/simulate` continua limitado a 90 dias e `/planning-context` a 367 dias. A geração alcança também compromissos semanais antigos; o cálculo indexa eventos por dia para períodos longos.
 - APK 1.19.2 / código 38 contém a tela dinâmica. Sete regressões adicionais cobrem calendário, 12/60 parcelas, adiamento, saldo ausente, limites e contexto somente leitura; com as duas regressões da inicialização Windows, suíte total de 128 testes. Evidências em `../../audit_work/purchase-horizon-2026-09-30/`.
 - Na validação ao vivo, o Windows Proactor parou de aceitar conexões após `WinError 64`, embora o processo continuasse vivo. `run_dev.py` agora passa uma fábrica explícita `SelectorEventLoop` ao Uvicorn no Windows; outros sistemas mantêm `auto`. A fábrica retorna uma instância, conforme o contrato do Uvicorn instalado; não depende de políticas globais. O backend local não usa subprocessos assíncronos. A troca evita o caminho `AcceptEx` afetado ([CPython #93821](https://github.com/python/cpython/issues/93821)); há verificação com 100 resets de conexões de leitura e 20 consultas concorrentes de saúde, sem gravações financeiras.

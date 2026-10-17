@@ -99,13 +99,13 @@ Propagação de vendedor começa desativada. Alterar o texto do vendedor remove 
 
 Compra de R$ 10,00 em três parcelas: R$ 3,34 + R$ 3,33 + R$ 3,33. Se o horizonte termina após a primeira, devolver R$ 6,66 como compromisso após o horizonte. Não informar economia só porque parcelas ficaram fora da curva.
 
-Simulação de R$ 300 em três parcelas, saldo inicial R$ 1.000: comprar agora encerra em R$ 700 no horizonte que inclui todas as parcelas; reduzir para 80% encerra em R$ 760. Ao adiar, o saldo pode ficar maior dentro do horizonte porque parte da dívida fica depois; o valor posterior deve continuar visível.
+Simulação de R$ 300 em três parcelas, saldo inicial R$ 1.000, sem renda mensal: comprar agora encerra em R$ 700 no horizonte que inclui todas as parcelas; reduzir para 80% encerra em R$ 760. Ao adiar, o saldo pode ficar maior dentro do horizonte porque parte da dívida fica depois; o valor posterior deve continuar visível. Em Cabe na minha vida, esse restante só é escrito quando é maior que zero. Se todas as parcelas já estão no período, o texto diz que o período já inclui todas as parcelas desta compra. Com renda líquida mensal, a avaliação da compra soma um crédito por mês civil; o simulador geral de 90 dias não recebe esse crédito.
 
 Origem com R$ 100, reserva de R$ 20 e débito futuro de R$ 70 só pode doar R$ 10, mesmo que o destino precise de R$ 30. Receita futura apenas assumida não pode aumentar a capacidade atual de doação. Depois da data da receita, continua sendo cenário condicionado à premissa, não recomendação garantida.
 
 Conta sem referência ou com capturas sem atribuição não entra como saldo verificado na tela de liquidez. Uma API de simulação pode receber saldo manual explícito; a resposta o chama de premissa. Binance não é doadora automática de caixa bancário.
 
-Obrigações importadas aparecem desmarcadas. O usuário confirma ausência de sobreposição com o cronograma manual e escolhe conta. Uma obrigação vencida selecionada assume pagamento hoje e exibe seu vencimento original. Compras de cartão não entram de novo quando o saldo de sua fatura é incluído.
+Obrigações importadas aparecem desmarcadas. O usuário confirma ausência de sobreposição com o cronograma manual e escolhe conta. Uma obrigação vencida selecionada assume pagamento hoje e exibe seu vencimento original. No planejamento geral, compras de cartão não entram de novo quando o saldo de sua fatura é incluído. Em Cabe na minha vida, cada compromisso de cartão entra na própria data e a fatura consolidada fica de fora dessa lista.
 
 ## 8. Comandos e critérios de aceite
 
