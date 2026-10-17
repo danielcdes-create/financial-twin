@@ -2,6 +2,16 @@
 
 Julgamento da árvore local de `financial-app` a partir de `431aaf5`, com a correção de contagem dupla desta entrega, commit `cc7f562`. Dados sintéticos. O ledger ao vivo não foi lido, escrito, deduplicado nem reparado. O release privado no disco é Android 1.20.66 / versionCode 112, SHA-256 `B1254751610714B7F3B801D38A820803E17E09BC65C58C79C67B6CD0CB6F1D6F`, commit `e868558`, com o certificado de debug anterior. A instalação física permanece unverified.
 
+## Entrega 17/10/2026 — seleção e parcelas em Cabe na minha vida
+
+Commit do recurso `7f16fd3`. O ledger ao vivo não foi lido nem escrito. Nesta passagem passaram `backend/tests/test_purchase_horizon.py` e `mobile/scripts/test-purchase-copy.cjs`. A suíte completa do cliente e a homologação física não foram repetidas.
+
+| Correção | Veredito |
+| --- | --- |
+| Compra parcelada fora da lista | defect fixed. `purchase-context` inclui `installment_plans` ativos e compromissos `parcelamento`, com nome, data e valor. Parcela já vinculada não entra de novo. |
+| Selecionar Tudo e Limpar seleção | defect fixed. O topo marca ou limpa todos os compromissos listados. Cada compromisso, inclusive financiamento e compra parcelada, tem **Selecionar todo o Compromisso** e **Limpar seleção**. A obrigação importada que não é fatura continua desmarcada até o toque. |
+| Vencido antes do início da análise | defect fixed. A ocorrência anterior ao início entra no primeiro dia do período e guarda a data original. |
+
 ## Entrega 17/10/2026 — lista de Cabe na minha vida
 
 Commit do recurso `ef9e218`, empacotado em `e868558`. APK ARM64 de 48075140 bytes, SHA-256 `B1254751610714B7F3B801D38A820803E17E09BC65C58C79C67B6CD0CB6F1D6F`, assinante `FAC61745DC0903786FB9EDE62A962B399F7348F0BB6F899B8332667591033B9C`. O ledger ao vivo não foi lido nem escrito. Nesta passagem passaram `backend/tests/test_purchase_horizon.py`, `backend/tests/test_purchase_check.py` e `mobile/scripts/test-purchase-copy.cjs`. A suíte completa do cliente e a homologação física não foram repetidas.
