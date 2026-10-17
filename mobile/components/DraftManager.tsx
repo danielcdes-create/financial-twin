@@ -36,11 +36,32 @@ export default function DraftManager({onBack, onPendingCreation}: {onBack: () =>
     Alert.alert('Excluir rascunho?', `As edições locais de “${draft.title}” serão excluídas. Capturas, arquivos originais e movimentações salvas permanecem disponíveis.`,
       [{text: 'Cancelar', style: 'cancel'}, {text: 'Excluir rascunho', style: 'destructive', onPress: () => {if (valid()) return remove(draft);}}]);
   };
+  const deletableDrafts = drafts.filter(d => !d.pendingCreation);
+  const removeAll = async () => {
+    const valid = captureScope();
+    if (!valid() || running.current || !deletableDrafts.length) return;
+    running.current = true; read.current++; setBusy(true); setLoading(false); setError(''); setNotice('');
+    try {
+      for (const draft of deletableDrafts) {
+        await deleteLocalDraft(db, draft);
+        if (!valid()) return;
+      }
+      setDrafts(current => current.filter(row => row.pendingCreation));
+      setNotice('Todos os rascunhos disponíveis foram excluídos.');
+    } catch (failure: any) {if (valid()) setError(failure.message || 'Não foi possível excluir todos os rascunhos.');}
+    finally {running.current = false; if (valid()) setBusy(false);}
+  };
+  const confirmAll = () => {
+    const valid = captureScope();
+    Alert.alert('Excluir todos os rascunhos?', `${deletableDrafts.length} rascunho(s) locais serão excluídos deste aparelho. Cadastros pendentes de confirmação e lançamentos já salvos serão preservados.`,
+      [{text: 'Cancelar', style: 'cancel'}, {text: 'Excluir todos', style: 'destructive', onPress: () => {if (valid()) return removeAll();}}]);
+  };
   return <View style={s.panel}>
     <Pressable accessibilityRole="button" disabled={busy} onPress={onBack} style={s.action}><Text style={s.link}>‹ Voltar a Mais</Text></Pressable>
     <Text accessibilityRole="header" style={s.heading}>Rascunhos</Text>
     <Text style={s.note}>Digitação, revisões, voz e cópias preservadas neste aparelho. Você pode excluir cada rascunho para recomeçar.</Text>
     <Pressable accessibilityRole="button" disabled={busy || loading} onPress={load} style={s.action}><Text style={s.link}>Atualizar rascunhos</Text></Pressable>
+    {deletableDrafts.length > 1 && <Pressable accessibilityRole="button" disabled={busy || loading} onPress={confirmAll} style={s.action}><Text style={s.danger}>Limpar todos os rascunhos ({deletableDrafts.length})</Text></Pressable>}
     {(loading || busy) && <ActivityIndicator color="#4FD1B5" />}
     {!!error && <Text accessibilityRole="alert" style={s.warning}>{error}</Text>}
     {!!notice && <Text accessibilityRole="alert" style={s.link}>{notice}</Text>}

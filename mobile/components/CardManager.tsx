@@ -7,6 +7,7 @@ import {rebaseDraft} from '../utils/draftConflict';
 import {useAsyncScope} from '../utils/useAsyncScope';
 import DiscardDraftAction from './DiscardDraftAction';
 import {parseMoneyInput} from '../utils/moneyInput';
+import {maskCivilDate, parseCivilDate} from '../utils/formMask';
 import {protectUnsavedBack,useLocalBack} from '../utils/localBack';
 
 type Card = { id: string; instituicao: string; apelido: string; cartao_final: string; bill_count: number; deleted: boolean; token: string; validade?: string | null; dia_vencimento?: number | null; dia_fechamento?: number | null; melhor_dia_compra?: number | null; observacoes?: string | null };
@@ -43,7 +44,7 @@ export default function CardManager({ api, cards, money, onUpdated }: Props) {
   const [bills, setBills] = useState<Bill[]>([]);
   const [showDeleted, setShowDeleted] = useState(false);
   const [loading, setLoading] = useState(false), [saving, setSaving] = useState(false), [error, setError] = useState('');
-  const [editingCard, setEditingCard] = useState<Card | null>(null), [editingBill, setEditingBill] = useState<Bill | null>(null);
+  const [editingCard, setEditingCard] = useState<Card | null>(null), [editingBill, setEditingBill] = useState<Bill | null>(null), [creatingCard, setCreatingCard] = useState(false);
   const [form, setForm] = useState<Record<string, string>>({});
   const [comparisonBase,setComparisonBase]=useState<Record<string,string>>({});
   const [conflict, setConflict] = useState(false), [differences, setDifferences] = useState<string[]>([]);
@@ -68,10 +69,11 @@ export default function CardManager({ api, cards, money, onUpdated }: Props) {
   }, [api, selectedId, showDeleted]);
   useEffect(() => { const counter = generation; const timer = setTimeout(() => load(), 0); return () => { clearTimeout(timer); counter.current++; }; }, [load, cards]);
   const update = (key: string, value: string) => setForm(current => ({ ...current, [key]: value }));
-  const closeForm = () => { setEditingCard(null); setEditingBill(null); setForm({}); setComparisonBase({}); setConflict(false); setDifferences([]); };
-  const formDirty=Boolean(editingCard||editingBill)&&JSON.stringify(form)!==JSON.stringify(editingCard?cardFields(editingCard):billFields(editingBill!));
-  const back=()=>protectUnsavedBack(formDirty,()=>{if(editingCard||editingBill)closeForm();else {setSelected(null);setBills([]);}});
-  useLocalBack(back,Boolean(editingCard||editingBill||selected),20);
+  const blankCardFields = () => ({instituicao: '', apelido: '', cartao_final: '', validade: '', dia_vencimento: '', dia_fechamento: '', melhor_dia_compra: '', observacoes: ''});
+  const closeForm = () => { setCreatingCard(false); setEditingCard(null); setEditingBill(null); setForm({}); setComparisonBase({}); setConflict(false); setDifferences([]); };
+  const formDirty=Boolean(creatingCard||editingCard||editingBill)&&JSON.stringify(form)!==JSON.stringify(creatingCard?blankCardFields():editingCard?cardFields(editingCard):billFields(editingBill!));
+  const back=()=>protectUnsavedBack(formDirty,()=>{if(creatingCard||editingCard||editingBill)closeForm();else {setSelected(null);setBills([]);}});
+  useLocalBack(back,Boolean(creatingCard||editingCard||editingBill||selected),20);
   const mutate = async (path: string, method: string, body: Record<string, unknown>, confirmationValid = captureScope()) => {
     if (running.current || !confirmationValid()) return;
     running.current = true; setSaving(true); setError('');
@@ -108,8 +110,15 @@ export default function CardManager({ api, cards, money, onUpdated }: Props) {
     } catch (failure: any) {if (valid()) setError(failure.message);}
     finally {running.current = false;if (valid()) setSaving(false);}
   };
+  const startCreateCard = () => {
+    setConflict(false);setDifferences([]);setError('');
+    setEditingBill(null); setEditingCard(null); setCreatingCard(true);
+    const blank = blankCardFields();
+    setComparisonBase(blank);
+    setForm(blank);
+  };
   const editCard = (card: Card) => {
-    setConflict(false);setDifferences([]);
+    setConflict(false);setDifferences([]);setCreatingCard(false);
     setEditingBill(null); setEditingCard(card);
     setComparisonBase(cardFields(card));
     setForm(cardFields(card));
@@ -123,7 +132,8 @@ export default function CardManager({ api, cards, money, onUpdated }: Props) {
   };
   const save = () => {
     if (conflict) return;
-    if (editingCard) {
+    if (!creatingCard && !formDirty) { closeForm(); return; }
+    if (creatingCard || editingCard) {
       if (!form.instituicao.trim() || (form.cartao_final && !/^\d{4}$/.test(form.cartao_final))) {
         setError('Informe a instituição e, se preencher o final do cartão, use quatro dígitos.'); return;
       }
@@ -132,16 +142,22 @@ export default function CardManager({ api, cards, money, onUpdated }: Props) {
       if ((validity && !/^(0[1-9]|1[0-2])\/[1-9]\d{3}$/.test(validity)) || dayFields.some(key => form[key].trim() && !/^(?:[1-9]|[12]\d|3[01])$/.test(form[key].trim()))) {
         setError('Use validade MM/AAAA e dias de 1 a 31. Deixe em branco o que não souber.'); return;
       }
-      return mutate(`/v1/card-catalog/${editingCard.id}`, 'PATCH', { ...form, validade: validity ? validity.split('/').reverse().join('-') : null,
-        ...Object.fromEntries(dayFields.map(key => [key, form[key].trim() ? Number(form[key]) : null])), observacoes: form.observacoes.trim() || null, expected_token: editingCard.token });
+      const payload = { ...form, validade: validity ? validity.split('/').reverse().join('-') : null,
+        ...Object.fromEntries(dayFields.map(key => [key, form[key].trim() ? Number(form[key]) : null])), observacoes: form.observacoes.trim() || null };
+      if (creatingCard) return mutate('/v1/card-catalog', 'POST', payload);
+      return mutate(`/v1/card-catalog/${editingCard!.id}`, 'PATCH', { ...payload, expected_token: editingCard!.token });
     } else if (editingBill) {
       const total = parseMoneyInput(form.valor_total);
-      if (total === null || !/^\d{4}-(0[1-9]|1[0-2])$/.test(form.competencia) || !/^\d{4}-\d{2}-\d{2}$/.test(form.data_vencimento)) {
-        setError('Use competência AAAA-MM, vencimento AAAA-MM-DD e valor com até duas casas decimais.'); return;
+      const rawComp = form.competencia.trim();
+      const competencia = /^\d{4}-(0[1-9]|1[0-2])$/.test(rawComp) ? rawComp : (/^(0[1-9]|1[0-2])\/\d{4}$/.test(rawComp) ? rawComp.split('/').reverse().join('-') : '');
+      const rawDue = form.data_vencimento.trim();
+      const data_vencimento = /^\d{4}-\d{2}-\d{2}$/.test(rawDue) ? rawDue : parseCivilDate(rawDue);
+      if (total === null || !competencia || !data_vencimento) {
+        setError('Use competência AAAA-MM (ou MM/AAAA), vencimento dd/mm/aaaa (ou AAAA-MM-DD) e valor com até duas casas decimais.'); return;
       }
       const valid = captureScope();
       Alert.alert('Salvar alterações da fatura?', 'O valor em aberto e o vencimento do compromisso serão atualizados. As compras e os pagamentos registrados serão preservados.', [
-        { text: 'Cancelar', style: 'cancel' }, { text: 'Salvar', onPress: () => mutate(`/v1/card-bills/${editingBill.id}`, 'PATCH', { ...form, valor_total: total, expected_token: editingBill.token }, valid) },
+        { text: 'Cancelar', style: 'cancel' }, { text: 'Salvar', onPress: () => mutate(`/v1/card-bills/${editingBill.id}`, 'PATCH', { ...form, competencia, data_vencimento, valor_total: total, expected_token: editingBill.token }, valid) },
       ]);
     }
   };
@@ -166,15 +182,18 @@ export default function CardManager({ api, cards, money, onUpdated }: Props) {
       <CardDetails card={selected} />
       <View style={s.actions}>{selected.deleted ? <Action label="Restaurar cartão" disabled={locked} onPress={() => restore(selected, 'card')} /> : <><Action label="Editar cartão" disabled={locked} onPress={() => editCard(selected)} /><Action label="Excluir cartão" disabled={locked} danger onPress={() => remove(selected, 'card')} /></>}</View>
     </View> : <><Text style={s.heading}>Escolha um cartão</Text><Text style={s.help}>Selecione o cartão para ver e gerenciar suas faturas.</Text></>}
-    <Action label={showDeleted ? 'Ocultar excluídos' : 'Mostrar excluídos'} disabled={locked} onPress={() => { closeForm(); setShowDeleted(!showDeleted); }} />
-    {(editingCard || editingBill) && <View style={s.form}>
-      <Text style={s.formTitle}>{editingCard ? 'Editar cartão' : `Editar fatura ${monthLabel(editingBill!.competencia)}`}</Text>
+    <View style={s.actions}>
+      {!selected && <Action label="+ Adicionar cartão" disabled={locked} onPress={startCreateCard} />}
+      <Action label={showDeleted ? 'Ocultar excluídos' : 'Mostrar excluídos'} disabled={locked} onPress={() => { closeForm(); setShowDeleted(!showDeleted); }} />
+    </View>
+    {(creatingCard || editingCard || editingBill) && <View style={s.form}>
+      <Text style={s.formTitle}>{creatingCard ? 'Novo cartão' : editingCard ? 'Editar cartão' : `Editar fatura ${monthLabel(editingBill!.competencia)}`}</Text>
       {conflict && <View><Text style={s.help}>O cadastro mudou. Seu texto foi preservado. Carregue a versão atual e confira antes de salvar.</Text>
         {differences.map(field => <Text key={field} style={s.help}>{fieldLabels[field] || field}: origem “{comparisonBase[field] || ''}”; atual “{((editingCard ? cardFields(editingCard) : billFields(editingBill!)) as Record<string, string>)[field] || ''}”; rascunho “{form[field]}”.</Text>)}
         <Action label="Carregar cadastro atual e conferir" disabled={locked} onPress={loadCurrent}/>
         {!!differences.length && <Action label="Conferi as diferenças e quero reaplicar meus campos" disabled={locked} onPress={() => {setComparisonBase(editingCard?cardFields(editingCard):billFields(editingBill!));setConflict(false);setDifferences([]);}}/>}
       </View>}
-      {editingCard ? <>
+      {(creatingCard || editingCard) ? <>
         <Field label="Instituição" value={form.instituicao} onChange={v => update('instituicao', v)} disabled={locked} />
         <Field label="Nome do cartão" value={form.apelido} onChange={v => update('apelido', v)} disabled={locked} limit={80} />
         <Field label="Final do cartão (4 dígitos, opcional)" value={form.cartao_final} onChange={v => update('cartao_final', v)} disabled={locked} numeric limit={4} />
@@ -186,13 +205,13 @@ export default function CardManager({ api, cards, money, onUpdated }: Props) {
         <Text style={s.help}>Todos estes dados são opcionais. Confirme os dias no banco, pois podem variar. O melhor dia é informado por você; a validade é diferente do vencimento da fatura. Faturas e compromissos já cadastrados mantêm suas datas.</Text>
       </> : <>
         <Field label="Competência (AAAA-MM)" value={form.competencia} onChange={v => update('competencia', v)} disabled={locked} limit={7} />
-        <Field label="Vencimento (AAAA-MM-DD)" value={form.data_vencimento} onChange={v => update('data_vencimento', v)} disabled={locked} limit={10} />
+        <Field label="Vencimento (AAAA-MM-DD)" value={form.data_vencimento} onChange={v => update('data_vencimento', /^\d{4}-/.test(v) ? v : maskCivilDate(v))} disabled={locked} limit={10} />
         <Field label="Total da fatura (R$)" value={form.valor_total} onChange={v => update('valor_total', v)} disabled={locked} numeric limit={16} />
         <Field label="Observações" value={form.observacoes} onChange={v => update('observacoes', v)} disabled={locked} limit={1000} />
         <Text style={s.help}>Pago: {money(Number(editingBill!.valor_pago))}. O status acompanha os pagamentos registrados; alterar o total corrige o saldo devido.</Text>
       </>}
       <View style={s.actions}><Action label="Cancelar edição" disabled={locked} onPress={back} /><Pressable accessibilityRole="button" disabled={locked || conflict} onPress={save} style={[s.save, (locked || conflict) && s.disabled]}><Text style={s.saveText}>Salvar alterações</Text></Pressable></View>
-      <DiscardDraftAction disabled={locked} owner={editingCard?.id || editingBill?.id} label={`Excluir rascunho ${editingCard ? 'do cartão' : 'da fatura'}`} onDiscard={()=>{closeForm();setError('');}} />
+      <DiscardDraftAction disabled={locked} owner={creatingCard ? 'new-card' : editingCard?.id || editingBill?.id} label={`Excluir rascunho ${(creatingCard || editingCard) ? 'do cartão' : 'da fatura'}`} onDiscard={()=>{closeForm();setError('');}} />
     </View>}
     {!!error && <View style={s.errorBox}><Text style={s.danger}>{error}</Text><Action label="Atualizar lista" disabled={locked} onPress={() => load()} /></View>}
     {loading && <ActivityIndicator color="#49C5AA" style={s.spinner} />}

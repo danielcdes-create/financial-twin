@@ -10,6 +10,7 @@ import DiscardDraftAction from './DiscardDraftAction';
 import {isAbort} from '../utils/apiClient';
 import {useAsyncScope} from '../utils/useAsyncScope';
 import {parseMoneyInput} from '../utils/moneyInput';
+import {maskCivilDate, parseCivilDate} from '../utils/formMask';
 import {protectUnsavedBack,useLocalBack} from '../utils/localBack';
 
 type Position = AccountProfile & {balance: number | null; balance_reference?: number | null; balance_as_of?: string; balance_reference_date?: string | null; balance_reference_token?:string; movement_count: number;
@@ -93,8 +94,13 @@ export default function AccountPositions({api, money, onUpdated, onOpen}: Props)
     if (!draft || profileConflict) return;
     const payload = profilePayload(draft);
     if (!payload.instituicao.trim()) throw new Error('Informe a instituição.');
-    for (const date of [payload.data_abertura, payload.data_encerramento]) {
-      if (date && !/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('Use AAAA-MM-DD nas datas ou deixe vazio.');
+    for (const key of ['data_abertura', 'data_encerramento'] as const) {
+      const raw = payload[key];
+      if (raw) {
+        const iso = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : parseCivilDate(raw);
+        if (!iso) throw new Error('Use dd/mm/aaaa ou AAAA-MM-DD nas datas, ou deixe vazio.');
+        payload[key] = iso;
+      }
     }
     await api(draft.key ? `/v1/account-profiles/${draft.key}` : '/v1/account-profiles', {
       method: draft.key ? 'PATCH' : 'POST', body: JSON.stringify({...payload,
@@ -131,8 +137,9 @@ export default function AccountPositions({api, money, onUpdated, onOpen}: Props)
   const saveBalance = (key: string) => mutate(async valid => {
     const amount = normalizeAmount(value);
     if (amount === null) throw new Error('Informe um saldo válido, como 1.234,56.');
-    if (referenceDate && !/^\d{4}-\d{2}-\d{2}$/.test(referenceDate)) throw new Error('Use AAAA-MM-DD ou deixe a data vazia.');
-    const payload={amount,...(referenceDate?{as_of_date:referenceDate}:{}),expected_token:balanceToken.current};
+    const refIso = referenceDate ? (/^\d{4}-\d{2}-\d{2}$/.test(referenceDate.trim()) ? referenceDate.trim() : parseCivilDate(referenceDate.trim())) : '';
+    if (referenceDate && !refIso) throw new Error('Use dd/mm/aaaa ou AAAA-MM-DD, ou deixe a data vazia.');
+    const payload={amount,...(refIso?{as_of_date:refIso}:{}),expected_token:balanceToken.current};
     const serialized=JSON.stringify(payload);
     if(balanceRequest.current.payload!==serialized)balanceRequest.current={payload:serialized,id:creationId()};
     await api(`/v1/account-positions/${key}/balance-reference`,{method:'PUT',body:JSON.stringify({...payload,request_id:balanceRequest.current.id})});
@@ -215,6 +222,7 @@ export default function AccountPositions({api, money, onUpdated, onOpen}: Props)
         </Pressable>
         <Text style={s.meta}>{item.tipo === 'criptoativos' ? 'Equivalente em BRL informado por você · ' : ''}
           {item.balance_as_of ? `Referência: ${referenceLabel(item)} · ${item.movement_count} lançamento(s) após a referência` : 'Sem saldo de referência'}</Text>
+        {item.tipo === 'criptoativos' && Boolean(item.balance_reference_date || item.balance_as_of) && (Date.now() - Date.parse(String(item.balance_reference_date || item.balance_as_of))) > 30 * 86400000 && <Text style={s.warning}>Referência de criptoativos com mais de 30 dias. Atualize o saldo equivalente em BRL.</Text>}
         {item.unassigned_capture_count > 0 && <Text style={s.warning}>{item.unassigned_capture_count} captura(s) sem conta indicada podem alterar este saldo.</Text>}
         {item.pending_transfer_count > 0 && <Text style={s.warning}>{item.pending_transfer_count} transferência(s) aguardam conciliação. O saldo inclui essas movimentações informadas.</Text>}
         {item.legacy_account_ambiguous && <Text style={s.warning}>Há mais de uma conta histórica deste banco. Os lançamentos importados não foram somados automaticamente a este saldo.</Text>}
@@ -227,7 +235,7 @@ export default function AccountPositions({api, money, onUpdated, onOpen}: Props)
             Alert.alert('Referência atual carregada', `${current.balance_reference == null ? 'Sem saldo de referência' : money(Number(current.balance_reference))}${current.balance_as_of ? ` · ${referenceLabel(current)}` : ''}. Seu valor digitado foi preservado. Confira antes de salvar.`);
           })}/>}
           <TextInput accessibilityLabel="Saldo conferido em reais" editable={!busy} value={value} onChangeText={setValue} keyboardType="decimal-pad" placeholder="Saldo em R$" placeholderTextColor="#92A4A2" style={s.input}/>
-          <TextInput accessibilityLabel="Data do saldo" editable={!busy} value={referenceDate} onChangeText={setReferenceDate} placeholder="Data do saldo (AAAA-MM-DD), opcional" placeholderTextColor="#92A4A2" style={s.input}/>
+          <TextInput accessibilityLabel="Data do saldo" editable={!busy} value={referenceDate} onChangeText={text => setReferenceDate(/^\d{4}-/.test(text) ? text : maskCivilDate(text))} placeholder="Data do saldo (dd/mm/aaaa ou AAAA-MM-DD), opcional" placeholderTextColor="#92A4A2" style={s.input}/>
           <Text style={s.meta}>Deixe a data vazia para usar o saldo de agora. Uma data anterior permite conferir os lançamentos posteriores.</Text>
           <Action label="Salvar saldo conferido" disabled={busy || balanceConflict} onPress={() => saveBalance(item.key)}/>
           <Action label="Cancelar" secondary disabled={busy} onPress={back}/>

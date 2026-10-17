@@ -7,7 +7,8 @@ import {Pressable, TextInput} from './InteractionControls';
 import ControlledChoice from './ControlledChoice';
 import {useAsyncScope, useScopedRequest} from '../utils/useAsyncScope';
 import DiscardDraftAction from './DiscardDraftAction';
-import {requireMoneyInput} from '../utils/moneyInput';
+import {requireMoneyInput, parseMoneyInput} from '../utils/moneyInput';
+import {parseCivilDate} from '../utils/formMask';
 import {protectUnsavedBack,useLocalBack} from '../utils/localBack';
 
 type Props={api:(path:string,init?:RequestInit)=>Promise<any>;onBack:()=>void};
@@ -69,8 +70,10 @@ export default function FinancialLab({api:request,onBack}:Props){
     setExperimentTitle('');setCategory('');setProtocol('');setBaseStart(day(-30));setBaseEnd(day(-1));setExperimentStart(day());setExperimentEnd(day(29));setTarget('10');setSatisfaction('3');setConfounders('');setExperimentReport(null);setCreateExperimentId(newId());
     setOpening('');setReserve('0');setPurchase('');setReduced('');setCount('1');setFirst(day());setWait('30');setFlowsText('');setFlowChoices({});setFlowAccounts({});setSimulation(null);setLiquidity(null);setSelectedScenario('buy_now');
   };
+  const normDate=(v:string)=>{const t=v.trim();return parseCivilDate(t)||t;};
+  const flowFormatError=flowsText.split('\n').map((line,idx)=>{if(!line.trim())return '';const [d,val,lbl]=line.split(';').map(p=>p.trim());const iso=d?normDate(d):'';if(!d||!val||!lbl||!/^\d{4}-\d{2}-\d{2}$/.test(iso)||parseMoneyInput(val,{signed:true})===null)return `Linha ${idx+1} inválida: use data; valor; descrição; conta.`;return '';}).find(Boolean)||'';
   const flows=()=>{
-    const manual=flowsText.split('\n').filter(line=>line.trim()).map((line,index)=>{const [date,value,label,account_key]=line.split(';').map(part=>part.trim());if(!date||!value||!label)throw new Error(`Fluxo ${index+1}: use data; valor; descrição; conta.`);return {id:`manual:${index}`,date,amount:decimal(value),label,account_key:account_key||null,certainty:'assumed'}});
+    const manual=flowsText.split('\n').filter(line=>line.trim()).map((line,index)=>{const [date,value,label,account_key]=line.split(';').map(part=>part.trim());if(!date||!value||!label)throw new Error(`Fluxo ${index+1}: use data; valor; descrição; conta.`);return {id:`manual:${index}`,date:normDate(date),amount:decimal(value),label,account_key:account_key||null,certainty:'assumed'}});
     const imported=[...(context?.flows||[]),...(context?.suggested_flows||[])].filter((f:any)=>flowChoices[f.id]??!f.id.startsWith('obligation:')).map((f:any)=>({id:f.id,source_ref:f.source_ref,date:f.date,amount:f.amount,label:f.label,certainty:f.certainty,account_key:flowAccounts[f.id]||f.account_key||null}));
     return [...imported,...manual];
   };
@@ -110,6 +113,7 @@ export default function FinancialLab({api:request,onBack}:Props){
       {[...(context?.flows||[]),...(context?.suggested_flows||[])].map((flow:any)=>{const included=flowChoices[flow.id]??!flow.id.startsWith('obligation:');return <View style={s.card} key={flow.id}><Text style={s.text}>{flow.label} · {flow.date} · {currency(flow.amount)}</Text>{flow.overdue&&<Notice>Vencida em {flow.original_due_date}; pagamento assumido para hoje.</Notice>}<Button label={included?'Incluído — remover do cenário':'Incluir após conferir que não duplica outra previsão'} onPress={()=>setFlowChoices(current=>({...current,[flow.id]:!included}))}/>{included&&<ControlledChoice disabled={busy} label="Conta de pagamento (obrigatória para liquidez)" value={flowAccounts[flow.id]||flow.account_key||''} onChange={value=>setFlowAccounts(current=>({...current,[flow.id]:value}))} options={(context?.accounts||[]).map((a:any)=>a.key)} display={key=>accountLabel((context?.accounts||[]).find((a:any)=>a.key===key),key)}/>}</View>})}
       <Field label="Reserva mínima por conta / reserva do cenário (R$)" value={reserve} onChange={setReserve}/>
       <Field label="Outros fluxos: data; valor com sinal; descrição; conta (um por linha)" value={flowsText} onChange={setFlowsText} multiline/>
+      {!!flowFormatError&&<Text accessibilityRole="alert" style={s.error}>{flowFormatError}</Text>}
       <Notice>Exemplo: 2026-10-05; -120,00; Conta de luz; itau. Use positivo para entrada. Somente previsões marcadas como incluídas serão somadas.</Notice>
     </>}
     {section==='Simular'&&<>
@@ -130,7 +134,8 @@ export default function FinancialLab({api:request,onBack}:Props){
       <Field label="Linha de base: início" value={baseStart} onChange={setBaseStart}/><Field label="Linha de base: fim" value={baseEnd} onChange={setBaseEnd}/><Field label="Experimento: início" value={experimentStart} onChange={setExperimentStart}/><Field label="Experimento: fim" value={experimentEnd} onChange={setExperimentEnd}/><Field label="Redução desejada (%)" value={target} onChange={setTarget}/>
       <Button label="Iniciar experimento" disabled={busy} onPress={()=>run(async()=>{await send('/experiments',{request_id:createExperimentId,title:experimentTitle,category,protocol,baseline_start:baseStart,baseline_end:baseEnd,start:experimentStart,end:experimentEnd,target_reduction_pct:decimal(target)});setCreateExperimentId(newId());await refreshSaved(loadExperiments)})}/>
       <DiscardDraftAction disabled={busy} owner={section} label="Excluir rascunho do experimento" onDiscard={discardForm} />
-      <Field label="Satisfação com a mudança (1–5)" value={satisfaction} onChange={setSatisfaction}/><Field label="Viagens, mudanças de renda e outros fatores" value={confounders} onChange={setConfounders} multiline/>
+      <Field label="Satisfação com a mudança (1–5)" value={satisfaction} onChange={setSatisfaction}/>
+      <View style={s.tabs}>{['1','2','3','4','5'].map(n=><Pressable key={n} accessibilityRole="button" accessibilityLabel={`Nota ${n}`} disabled={busy} onPress={()=>setSatisfaction(n)} style={[s.tab,satisfaction===n&&s.selected]}><Text style={s.text}>{n}</Text></Pressable>)}</View><Field label="Viagens, mudanças de renda e outros fatores" value={confounders} onChange={setConfounders} multiline/>
       {experiments.map(item=><View key={item.id} style={s.card}><Text style={s.heading}>{item.title}</Text><Text style={s.text}>{statusLabel(item.status)} · {item.category}</Text><Button label="Acompanhar resultado" disabled={busy} onPress={()=>run(async()=>setExperimentReport(await api(`/v1/insights/experiments/${item.id}/report`)))}/>{item.status==='active'&&<><Button label="Concluir e registrar avaliação" disabled={busy} onPress={()=>run(async()=>{await send(`/experiments/${item.id}`,{revision:item.revision,status:'completed',satisfaction:Number(satisfaction),confounders},'PATCH');await refreshSaved(loadExperiments)})}/><Button label="Cancelar experimento" disabled={busy} onPress={()=>run(async()=>{await send(`/experiments/${item.id}`,{revision:item.revision,status:'cancelled',confounders},'PATCH');await refreshSaved(loadExperiments)})}/></>}</View>)}
       {experimentCursor&&<Button label="Carregar mais experimentos" disabled={busy} onPress={()=>run(async()=>{const result=await api(`/v1/insights/experiments?cursor=${encodeURIComponent(experimentCursor)}`);setExperiments(current=>[...current,...result.items]);setExperimentCursor(result.next_cursor)})}/>}
       {experimentReport&&<View style={s.card}><Text style={s.heading}>Comparação até hoje</Text><Text style={s.text}>Base: {currency(experimentReport.baseline_spending)} / {experimentReport.baseline_days} dias</Text><Text style={s.text}>Observado: {currency(experimentReport.observed_spending)} / {experimentReport.observed_days} dias</Text><Text style={s.text}>Diferença comparada à taxa diária da base: {currency(experimentReport.observed_difference)}</Text><Notice>{experimentReport.interpretation}</Notice></View>}

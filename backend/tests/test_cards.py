@@ -11,7 +11,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
-from app.cards import (BillEdit, CardEdit, VersionIn, catalog, bills, edit_card, edit_bill,
+from app.cards import (CardCreate, create_card, BillEdit, CardEdit, VersionIn, catalog, bills, edit_card, edit_bill,
                        delete_card, restore_card, delete_bill, restore_bill)
 from app.financial_time import day_start
 from app.account_profiles import account_profiles
@@ -206,4 +206,25 @@ class CardTests(unittest.TestCase):
             BillEdit(expected_token='a'*64, competencia='2026-10', data_vencimento='2026-02-30', valor_total='1')
 
 
-if __name__ == '__main__': unittest.main()
+
+    def test_manual_card_creation_adds_active_card_to_catalog(self):
+        created = create_card(CardCreate(
+            instituicao="Cooperativa",
+            apelido="Cartao Manual",
+            cartao_final="9876",
+            validade="2031-08",
+            dia_vencimento=15,
+            dia_fechamento=5,
+            melhor_dia_compra=6,
+            observacoes="Criado sem fatura previa",
+        ), self.db)["item"]
+        self.assertEqual(created["instituicao"], "Cooperativa")
+        self.assertEqual(created["apelido"], "Cartao Manual")
+        self.assertEqual(created["cartao_final"], "9876")
+        self.assertEqual(created["bill_count"], 0)
+        self.assertFalse(created["deleted"])
+        items = catalog(False, self.db)["items"]
+        self.assertTrue(any(item["id"] == created["id"] and item["apelido"] == "Cartao Manual" for item in items))
+
+
+if __name__ == "__main__": unittest.main()

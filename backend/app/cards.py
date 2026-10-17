@@ -35,6 +35,19 @@ class VersionIn(BaseModel):
     request_id:UUID|None=None
 
 
+class CardCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    request_id: UUID | None = None
+    instituicao: str = Field(min_length=1, max_length=100)
+    apelido: str = Field(default="", max_length=80)
+    cartao_final: str = Field(default="", pattern=r"^(?:\d{4})?$")
+    validade: str | None = Field(default=None, pattern=r"^[1-9]\d{3}-(0[1-9]|1[0-2])$")
+    dia_vencimento: int | None = Field(default=None, ge=1, le=31, strict=True)
+    dia_fechamento: int | None = Field(default=None, ge=1, le=31, strict=True)
+    melhor_dia_compra: int | None = Field(default=None, ge=1, le=31, strict=True)
+    observacoes: str | None = Field(default=None, max_length=1000)
+
+
 class CardEdit(VersionIn):
     instituicao: str = Field(min_length=1, max_length=100)
     apelido: str = Field(default="", max_length=80)
@@ -151,6 +164,31 @@ def bills(card_id: str, include_deleted: bool = False, db=Depends(database)):
             linked.setdefault(row["origem_id"], []).append(row)
         items = [bill_item(row, metas.get(f'bill-profile:{row["_id"]}', {}), linked.get(row["_id"], [])) for row in rows]
         return {"card": card_item(card, meta), "items": [item for item in items if include_deleted or not item["deleted"]]}
+
+
+@router.post("/v1/card-catalog", status_code=201)
+@durable_mutation('card_create', ())
+def create_card(body: CardCreate, db=Depends(database)):
+    with mongo_transaction(db) as session:
+        writing = session_database(db, session)
+        lock_movement_insert(writing)
+        now = datetime.now(timezone.utc)
+        card_doc = {
+            "_id": ObjectId(),
+            "tipo": "cartao_credito",
+            "instituicao": body.instituicao,
+            "cartao_final": body.cartao_final,
+            "status": "ativa",
+            "source": "mobile_manual",
+            "created_at": now,
+            "updated_at": now,
+        }
+        writing.accounts.insert_one(card_doc)
+        values = body.model_dump(exclude={"request_id"}, exclude_unset=True)
+        store(writing, "card", card_doc["_id"], None, values=values, deleted=False)
+        item = card_item(card_doc, metadata(writing, "card", card_doc["_id"]))
+        item["bill_count"] = 0
+        return {"item": item}
 
 
 @router.patch("/v1/card-catalog/{card_id}")

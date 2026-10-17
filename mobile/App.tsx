@@ -207,6 +207,7 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
   const [connectionFailed,setConnectionFailed]=useState(false);
   const [queueCount, setQueueCount] = useState(0);
   const [deadLetters, setDeadLetters] = useState<QueueRow[]>([]);
+  const [deadLetterFilter, setDeadLetterFilter] = useState<'all' | 'files' | 'notifications'>('all');
   const [loading, setLoading] = useState(false);
   const [manualLoading, setManualLoading] = useState(false);
   const [dashboard, setDashboard] = useState<any>(null);
@@ -720,7 +721,8 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
   const discardLocalItems = (rows: QueueRow[]) => {
     const valid = captureScope();if (!valid() || !rows.length) return;
     const many = rows.length > 1;
-    Alert.alert(many ? `Excluir ${rows.length} itens com falha?` : 'Excluir este item da fila?', 'Ele sai só da fila deste aparelho. Lançamentos já salvos no extrato não mudam.', [
+    const summary = many ? `\nItens: ${rows.slice(0, 5).map(r => r.filename || r.event_id).join(', ')}${rows.length > 5 ? '…' : ''}` : '';
+    Alert.alert(many ? `Excluir ${rows.length} itens com falha?` : 'Excluir este item da fila?', `Ele sai só da fila deste aparelho. Lançamentos já salvos no extrato não mudam.${summary}`, [
       {text: 'Cancelar', style: 'cancel'}, {text: 'Excluir', style: 'destructive', onPress: async () => {
         if (!valid()) return;
         const problems: string[] = [];
@@ -1868,9 +1870,16 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
               {!!deadLetters.length && <View>
                 <Text style={s.section}>Arquivos ou eventos com falha: {deadLetters.length}</Text>
                 <Text style={s.muted}>São tentativas que falharam neste aparelho. Excluir tira o item da fila local. Lançamentos já salvos no extrato não mudam.</Text>
+                {deadLetters.length > 1 && <View style={{flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginVertical: 8}}>
+                  {([['all', 'Todos'], ['files', 'Arquivos'], ['notifications', 'Notificações']] as const).map(([key, label]) => (
+                    <Pressable key={key} accessibilityRole="button" accessibilityState={{selected: deadLetterFilter === key}} onPress={() => setDeadLetterFilter(key)} style={[s.periodChip, deadLetterFilter === key && s.periodChipActive]}>
+                      <Text style={[s.periodChipText, deadLetterFilter === key && s.periodChipTextActive]}>{label}</Text>
+                    </Pressable>
+                  ))}
+                </View>}
                 <Button title="Limpar falhas" secondary disabled={captureSaving} onPress={() => discardLocalItems(deadLetters)} />
                 <Button title="Conferir arquivos já importados" secondary disabled={captureSaving} onPress={() => runCaptureTask(async () => {await reconcileLocalFiles(true);})} />
-                {deadLetters.map(row => <View key={row.event_id} style={{paddingVertical:8}}>
+                {deadLetters.filter(row => deadLetterFilter === 'all' ? true : deadLetterFilter === 'notifications' ? row.kind === 'native_event' : row.kind !== 'native_event').map(row => <View key={row.event_id} style={{paddingVertical:8}}>
                   <Text style={s.muted}>{row.filename || row.event_id} · {queueFailureLabel(row)}</Text>
                   {canReviewAsStatement(row) && <Button title="Revisar como fatura / extrato" secondary disabled={captureSaving} onPress={() => runCaptureTask(() => retryLocalItem(row, true))} />}
                   <Button title="Tentar este item novamente" secondary disabled={captureSaving} onPress={() => runCaptureTask(() => retryLocalItem(row))} />

@@ -39,7 +39,7 @@ export default function PurchaseCheck({api:request,upload:uploadRequest,onBack,s
   const [product,setProduct]=useState(''),[price,setPrice]=useState(''),[installments,setInstallments]=useState('1'),[first,setFirst]=useState(() => civilDateLabel(civilTodayIso()));
   const [opening,setOpening]=useState(''),[reserve,setReserve]=useState('0'),[income,setIncome]=useState(''),[hours,setHours]=useState('');
   const [goalName,setGoalName]=useState(''),[goalTarget,setGoalTarget]=useState(''),[goalSaved,setGoalSaved]=useState('0'),[goalMonthly,setGoalMonthly]=useState('');
-  const [result,setResult]=useState<any>(null),[shareVisible,setShareVisible]=useState(false);
+  const [result,setResult]=useState<any>(null),[shareVisible,setShareVisible]=useState(false),[copiedSummary,setCopiedSummary]=useState(false),[pickingImage,setPickingImage]=useState(false);
   const [contextRetry,setContextRetry]=useState(0);
   const start=civilTodayIso(), count=Number(installments), firstIso=captureDateIso(first)||'';
   const back=()=>protectUnsavedBack(Boolean(image||product||price||opening||income||hours||goalName||goalTarget||goalMonthly||reserve!=='0'||goalSaved!=='0'||installments!=='1'||firstIso!==start||Object.keys(selected).length),onBack);
@@ -64,9 +64,12 @@ export default function PurchaseCheck({api:request,upload:uploadRequest,onBack,s
   const edit=(setter:(text:string)=>void)=>(text:string)=>{inputRevision.current++;setter(text);setResult(null);setShareVisible(false)};
   const run=async(task:(valid:()=>boolean)=>Promise<void>)=>{const valid=captureScope();setBusy(true);setError('');try{await task(valid)}catch(e:any){if(valid())setError(e?.message||'Não foi possível concluir a análise.')}finally{if(valid())setBusy(false)}};
   const pick=()=>run(async(valid)=>{
-    const chosen=await withDevicePrompt(() => ImagePicker.launchImageLibraryAsync({mediaTypes:['images'],quality:0.85}));
-    if(!valid()||chosen.canceled)return;
-    const asset=chosen.assets[0];inputRevision.current++;setImage({uri:asset.uri,mimeType:asset.mimeType,fileName:asset.fileName,fileSize:asset.fileSize});setScan(null);setResult(null);setShareVisible(false);
+    setPickingImage(true);
+    try {
+      const chosen=await withDevicePrompt(() => ImagePicker.launchImageLibraryAsync({mediaTypes:['images'],quality:0.85}));
+      if(!valid()||chosen.canceled)return;
+      const asset=chosen.assets[0];inputRevision.current++;setImage({uri:asset.uri,mimeType:asset.mimeType,fileName:asset.fileName,fileSize:asset.fileSize});setScan(null);setResult(null);setShareVisible(false);
+    } finally { if(valid())setPickingImage(false); }
   });
   const readImage=()=>run(async()=>{
     if(!image)throw new Error('Escolha um print primeiro.');
@@ -124,7 +127,8 @@ export default function PurchaseCheck({api:request,upload:uploadRequest,onBack,s
     {!!error&&<Text accessibilityRole="alert" style={s.error}>{error}</Text>}{busy&&<ActivityIndicator color="#136D67"/>}
     <View style={s.card}><Text style={s.heading}>1 · Preço e parcelas</Text>
       <VoiceCapture api={api} upload={upload} context="purchase" onApply={applyVoice} disabled={busy} light/>
-      <Action label="Escolher print da galeria" disabled={busy} onPress={pick}/>
+      <Action label={pickingImage ? "Preparando imagem…" : "Escolher print da galeria"} disabled={busy} onPress={pick}/>
+      {pickingImage&&<Text style={s.note}>Preparando o print selecionado…</Text>}
       {image&&<><Image source={{uri:image.uri}} resizeMode="contain" style={s.preview}/><Text style={s.note}>O print será enviado à extração xAI apenas se você tocar em “Ler print”. Confira se não contém dados pessoais que queira ocultar.</Text><Action label="Ler print com xAI" disabled={busy} onPress={readImage}/></>}
       {scan?.ambiguity&&<Text style={s.note}>A conferir: {scan.ambiguity}</Text>}
       {scan?.installment_amount&&<Text style={s.note}>Parcela identificada: {money(scan.installment_amount)}. Confira o preço total abaixo.</Text>}
@@ -163,6 +167,8 @@ export default function PurchaseCheck({api:request,upload:uploadRequest,onBack,s
       {copy.notes.map((note,index)=><Text key={index} style={s.note}>{note}</Text>)}
       <Text style={s.note}>Previsão baseada nas premissas acima. Nenhuma compra ou obrigação foi criada.</Text>
       <Action label={shareVisible?'Ocultar cartão':'Prévia do cartão compartilhável'} disabled={busy} onPress={()=>setShareVisible(!shareVisible)}/>
+      <Action label={copiedSummary?'Ocultar resumo em texto':'Copiar resumo em texto'} disabled={busy} onPress={()=>{const summaryText=[copy.price,copy.installments,copy.hours,copy.goalHeadline,copy.window].filter(Boolean).join(' · ');try{if(typeof navigator!=='undefined'&&navigator.clipboard?.writeText)void navigator.clipboard.writeText(summaryText);}catch{}setCopiedSummary(v=>!v);}}/>
+      {copiedSummary&&<Text selectable style={s.note}>{[copy.price,copy.installments,copy.hours,copy.goalHeadline,copy.window].filter(Boolean).join(' · ')}</Text>}
     </View>}
     {result&&shareVisible&&<><View ref={cardRef} collapsable={false} style={s.shareCard}><Text style={s.shareBrand}>FINANCIAL TWIN</Text><Text style={s.shareTitle}>Quanto custa na minha vida?</Text>{lines.map((line,index)=><Text key={index} style={index===0?s.sharePrice:index===lines.length-1?s.shareFoot:s.shareFact}>{line}</Text>)}</View><Text style={s.note}>O cartão mostra preço, horas e eventual adiamento. Ele não inclui salário, saldo, dívida, estabelecimento ou nome da meta.</Text><Action label={Platform.OS==='web'?'Salvar cartão como imagem':'Compartilhar cartão como imagem'} disabled={busy} onPress={share}/></>}
   </View></FormBusy.Provider>;

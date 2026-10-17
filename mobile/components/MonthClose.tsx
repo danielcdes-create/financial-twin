@@ -20,7 +20,8 @@ const previousMonth = () => {
 };
 const shiftMonth = (month: string, offset: number) => { const [year, number] = month.split('-').map(Number); const next = new Date(Date.UTC(year, number - 1 + offset, 1)); return `${next.getUTCFullYear()}-${String(next.getUTCMonth() + 1).padStart(2, '0')}`; };
 const dateLabel = (value: string) => value.split('-').reverse().join('/');
-const decimal = (raw: string) => requireMoneyInput(raw, {signed:true});
+const cleanPastedMoney = (raw: string) => raw.replace(/[\u00A0\s]+/g, '').replace(/^([+-]?)R\$/i, '$1');
+const decimal = (raw: string) => requireMoneyInput(cleanPastedMoney(raw), {signed:true});
 const newId = () => 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => { const n = Math.floor(Math.random() * 16); return (c === 'x' ? n : (n & 3) | 8).toString(16); });
 
 function Action({ label, onPress, disabled = false, primary = false, accessibilityLabel }: { label: string; onPress: () => void; disabled?: boolean; primary?: boolean; accessibilityLabel?: string }) {
@@ -53,7 +54,7 @@ export default function MonthClose({ api, money, onBack, onNavigate }: Props) {
   const back=()=>protectUnsavedBack(dirty,()=>{if(editingItem||balanceEditing||customGroup)resetForms();else onBack();});
   useLocalBack(back,true,10);
   const selectMonth = (value: string) => {
-    if (running.current) return;
+    if (running.current || loading || saving) return;
     if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(value) || Number(value.slice(0, 4)) < 1900 || Number(value.slice(0, 4)) > 2200) {
       setError('Use mês AAAA-MM, com ano entre 1900 e 2200.'); return;
     }

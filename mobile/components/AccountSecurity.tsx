@@ -9,7 +9,8 @@ import {useAsyncScope} from '../utils/useAsyncScope';
 import DiscardDraftAction from './DiscardDraftAction';
 import {protectUnsavedBack, useLocalBack} from '../utils/localBack';
 
-type DeviceSession = {id: string; label: string; created_at: number; expires_at: number; current: boolean};
+type DeviceSession = {id: string; label: string; created_at: number; last_seen_at?: number; expires_at: number; current: boolean};
+const passwordStrength = (pwd: string) => { if (!pwd) return ''; if (pwd.length < 12) return `Curta (${pwd.length}/12 caracteres mínimos)`; let classes = 0; if (/[a-z]/.test(pwd)) classes++; if (/[A-Z]/.test(pwd)) classes++; if (/\d/.test(pwd)) classes++; if (/[^a-zA-Z\d]/.test(pwd)) classes++; return classes >= 3 && pwd.length >= 14 ? 'Forte' : classes >= 2 ? 'Boa' : 'Atende ao mínimo (adicione números ou símbolos para reforçar)'; };
 export default function AccountSecurity() {
   const auth = useAuth();
   const [name, setName] = useState(auth.account?.display_name || '');
@@ -60,6 +61,7 @@ export default function AccountSecurity() {
     <View style={s.privacy}><Text style={s.label}>Trocar senha</Text><Text style={s.hint}>A troca encerra as outras sessões imediatamente.</Text>
       <Text style={s.label}>Senha atual</Text><TextInput accessibilityLabel="Senha atual" style={s.input} value={current} onChangeText={setCurrent} secureTextEntry autoCapitalize="none" autoCorrect={false} autoComplete="current-password" maxLength={256}/>
       <Text style={s.label}>Nova senha · mínimo de 12 caracteres</Text><TextInput accessibilityLabel="Nova senha" style={s.input} value={password} onChangeText={setPassword} secureTextEntry autoCapitalize="none" autoCorrect={false} autoComplete="new-password" maxLength={256}/>
+      {!!password && <Text style={s.hint}>Força da senha: {passwordStrength(password)}</Text>}
       <Text style={s.label}>Repita a nova senha</Text><TextInput accessibilityLabel="Repita a nova senha" style={s.input} value={confirmation} onChangeText={setConfirmation} secureTextEntry autoCapitalize="none" autoCorrect={false} autoComplete="new-password" maxLength={256}/>
       <AuthButton title="Atualizar senha" disabled={busy} onPress={() => run(async valid => {
         if (password.length < 12 || password !== confirmation) throw new Error('Use pelo menos 12 caracteres e repita a mesma senha.');
@@ -72,7 +74,7 @@ export default function AccountSecurity() {
     <View style={s.privacy}><Text style={s.label}>Sessões ativas</Text><Text style={s.hint}>Os nomes identificam o tipo de aparelho; não coletamos sua localização.</Text>
       <AuthButton secondary title="Atualizar sessões" disabled={busy} onPress={() => run(load)}/>
       {sessions.map(item => <View key={item.id} style={{gap: 8, paddingVertical: 10}}><Text style={s.body}>{item.label}{item.current ? ' · esta sessão' : ''}</Text>
-        <Text style={s.hint}>Entrada: {new Date(item.created_at * 1000).toLocaleString('pt-BR')}</Text>
+        <Text style={s.hint}>Entrada: {new Date(item.created_at * 1000).toLocaleString('pt-BR')}{item.last_seen_at ? ` · Última atividade: ${new Date(item.last_seen_at * 1000).toLocaleString('pt-BR')}` : ''}</Text>
         {!item.current && <AuthButton secondary title="Encerrar sessão" disabled={busy} onPress={() => run(async valid => {await api.json('/v1/auth/sessions/' + item.id, {method: 'DELETE'}); refreshSaved('Sessão encerrada.', valid);})}/>}
       </View>)}
       <AuthButton secondary title="Sair deste aparelho" disabled={busy} onPress={() => exit(false)}/>

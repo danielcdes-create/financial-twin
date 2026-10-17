@@ -96,7 +96,7 @@ def create_session_token(identity: str, version: int, session_id: str, now: int 
 def session_response(db, account, label: str):
     now = int(time.time())
     identity = secrets.token_urlsafe(32)
-    item = {'id': session_hash(identity), 'label': label, 'created_at': now, 'expires_at': now + SESSION_SECONDS}
+    item = {'id': session_hash(identity), 'label': label, 'created_at': now, 'last_seen_at': now, 'expires_at': now + SESSION_SECONDS}
     # Filter stale sessions, append atomically, cap independently of concurrent logins.
     result = db.account.update_one({'_id': OWNER_ID, 'kind': 'app_identity', 'auth_version': account['auth_version'],
                                     'password_hash': account['password_hash']}, [
@@ -139,4 +139,13 @@ def require_session(request: Request, authorization: str | None = Header(default
     if (not account or account.get('auth_version') != claims['ver']
             or not any(item['id'] == identity and item['expires_at'] > now for item in account.get('sessions', []))):
         raise HTTPException(401, 'Sessão encerrada. Entre novamente.')
+    for s_item in account.get('sessions', []):
+        if s_item.get('id') == identity:
+            if now - int(s_item.get('last_seen_at') or 0) >= 60:
+                s_item['last_seen_at'] = now
+                try:
+                    auth_database(request).account.update_one({'_id': OWNER_ID}, {'$set': {'sessions': account['sessions']}})
+                except Exception:
+                    pass
+            break
     return {'account': account, 'session_id': identity}
