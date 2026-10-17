@@ -9,7 +9,7 @@ from pymongo.errors import DuplicateKeyError
 from pymongo.errors import OperationFailure
 import logging
 from app.matching import classify, score_evidence, automatic_eligible
-from app.platforms import platform_identity
+from app.platforms import apply_historical_capture_defaults, platform_identity
 from app.taxonomy import infer_classification, taxonomy_overrides
 from app.account_profiles import validate_account_key
 from fastapi import HTTPException
@@ -286,6 +286,7 @@ class TransactionService:
         platform=self.db.merchants.find_one({"external_key":detected_platform[0]},{"nome_padrao":1},**kwargs) if detected_platform else None
         if platform: draft["platform_id"]=platform["_id"]
         if merchant_entity and (not platform or merchant_entity["_id"]!=platform["_id"]): draft.update({"merchant_id":merchant_entity["_id"],"merchant_name":merchant_entity.get("nome_padrao")})
+        if not own_transfer: apply_historical_capture_defaults(session_database(self.db,session),draft)
         if installment_count: mark_installment_draft(draft,installment_count,amount_decimal)
         self.provisional.insert_one(draft,**kwargs)
         if (best and level=="MEDIUM") or receipt_mismatch:

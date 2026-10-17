@@ -57,7 +57,7 @@ function load(file) {
   return module.exports;
 }
 
-const {rankedOptions, suggestionQuery} = load('utils/classification.ts');
+const {applyVendorDefaults, rankedOptions, suggestionQuery} = load('utils/classification.ts');
 const vendors = ['Alfa Distante', 'Beta Distante', 'Gama Distante', 'Delta Distante', 'Epsilon Distante', 'Padaria Distante', 'Lanche Norte'];
 const captured = {merchant_raw: "LANCHE NORTE'S", plataforma_sugerida: 'Entrega Sintetica'};
 assert.equal(suggestionQuery('vendedor', 'Pada', captured), 'Pada');
@@ -69,6 +69,13 @@ assert.deepEqual(rankedOptions(suggestionQuery('vendedor', '', {merchant_raw: "L
 assert.deepEqual(rankedOptions(suggestionQuery('vendedor', 'Pada', captured), vendors), ['Padaria Distante']);
 assert.equal(rankedOptions('', vendors)[0], 'Alfa Distante');
 assert.ok(!rankedOptions('', vendors).includes('Padaria Distante'));
+assert.deepEqual(rankedOptions(suggestionQuery('vendedor', '', {merchant_raw: 'CAPPTA LAN'}), vendors), ['Lanche Norte']);
+const vendorFilled = applyVendorDefaults('Lanche Norte', {vendedor: '', plataforma: '', categoria_sugerida: '', subcategoria: '', localidade: ''}, {vendor_defaults: {'Lanche Norte': {plataforma: 'Cappta', categoria: 'Alimentação', subcategoria: 'Lanches', localidade: 'Betim'}}});
+assert.equal(vendorFilled.vendedor, 'Lanche Norte');
+assert.equal(vendorFilled.plataforma, 'Cappta');
+assert.equal(vendorFilled.categoria_sugerida, 'Alimentação');
+assert.equal(vendorFilled.subcategoria, 'Lanches');
+assert.equal(vendorFilled.localidade, 'Betim');
 
 const Provisional = load('components/ProvisionalReview.tsx').default;
 const Provider = load('components/ChoiceOverlay.tsx').ChoiceOverlayProvider;

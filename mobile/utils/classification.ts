@@ -1,5 +1,7 @@
 const normalized=(value:string)=>value.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLocaleLowerCase('pt-BR').replace(/[^a-z0-9]+/g,' ').trim();
 
+const PLATFORM_PREFIX_TOKENS=new Set(['ifd','ifood','99food','99foods','rappi','sem','parar','cappta','pag','pagseguro','mp','mercadopago','picpay','stone','cielo','rede','getnet','sumup','ton']);
+
 const bigrams=(value:string)=>{
   const text=` ${normalized(value)} `;
   return Array.from({length:Math.max(0,text.length-1)},(_,index)=>text.slice(index,index+2));
@@ -18,6 +20,16 @@ const similarity=(query:string,candidate:string)=>{
   if(left===right)return 1;
   if(right.startsWith(left)||left.startsWith(right))return .94;
   if(right.includes(left)||left.includes(right))return .86;
+  const leftTokens=left.split(' ').filter(Boolean);
+  const storeTokens=leftTokens.length>1?leftTokens.filter((token,index)=>index>0||!PLATFORM_PREFIX_TOKENS.has(token)):leftTokens;
+  const storeLeft=storeTokens.join(' ');
+  if(storeLeft&&storeLeft!==left&&storeLeft.length>=3){
+    if(right===storeLeft)return .96;
+    if(right.startsWith(storeLeft)||storeLeft.startsWith(right))return .91;
+    if(right.includes(storeLeft))return .84;
+  }
+  const rightTokens=right.split(' ').filter(Boolean);
+  if(storeTokens.some(token=>token.length>=3&&rightTokens.some(target=>target.startsWith(token)||(target.length>=3&&token.startsWith(target)))))return .78;
   const compactRight=right.replace(/ /g,'');
   const chunkScore=Math.max(0,...left.split(' ').map(chunk=>editSimilarity(chunk,compactRight)));
   if(chunkScore>=.7)return .82+chunkScore*.14;
@@ -34,12 +46,42 @@ export const rankedOptions=(query:string,values:string[],limit=6)=>values
   .map(item=>item.value);
 
 // Typed text wins. An empty review field ranks from the captured name instead of the alphabetical head.
-export const suggestionQuery=(field:string,typed:string,captured?:{merchant_raw?:string;plataforma_sugerida?:string}|null)=>{
+export const suggestionQuery=(field:string,typed:string,captured?:{merchant_raw?:string;vendedor_sugerido?:string;plataforma_sugerida?:string}|null)=>{
   const written=String(typed??'');
   if(written.trim())return written;
-  if(field==='vendedor')return String(captured?.merchant_raw||'').trim();
-  if(field==='plataforma')return String(captured?.plataforma_sugerida||'').trim();
+  if(field==='vendedor')return String(captured?.vendedor_sugerido||captured?.merchant_raw||'').trim();
+  if(field==='plataforma')return String(captured?.plataforma_sugerida||captured?.merchant_raw||'').trim();
   return '';
+};
+
+export const applyVendorDefaults=(
+  vendorName:string,
+  currentDraft:Record<string,string>,
+  options?:Record<string,any>|null,
+  categoryField:'categoria_sugerida'|'categoria'='categoria_sugerida',
+):Record<string,string>=>{
+  const next={...currentDraft,vendedor:vendorName};
+  const vendorMap=options?.vendor_defaults;
+  if(!vendorMap||typeof vendorMap!=='object')return next;
+  const targetKey=normalized(vendorName);
+  const defaults=vendorMap[vendorName]||Object.entries(vendorMap).find(([key])=>normalized(key)===targetKey)?.[1];
+  if(!defaults||typeof defaults!=='object')return next;
+  if(!String(next.plataforma||'').trim()&&defaults.plataforma)next.plataforma=String(defaults.plataforma);
+  const currentCat=String(next[categoryField]||'').trim();
+  if(!currentCat&&defaults.categoria){
+    next[categoryField]=String(defaults.categoria);
+    if(!String(next.subcategoria||'').trim()&&defaults.subcategoria)next.subcategoria=String(defaults.subcategoria);
+  }else if(currentCat===defaults.categoria&&!String(next.subcategoria||'').trim()&&defaults.subcategoria){
+    next.subcategoria=String(defaults.subcategoria);
+  }
+  if(!String(next.natureza||'').trim()&&defaults.natureza)next.natureza=String(defaults.natureza);
+  if(!String(next.tipo||'').trim()&&defaults.tipo)next.tipo=String(defaults.tipo);
+  if(!String(next.metodo_pagamento||'').trim()&&defaults.metodo_pagamento)next.metodo_pagamento=String(defaults.metodo_pagamento);
+  if(!String(next.localidade||'').trim()&&defaults.localidade)next.localidade=String(defaults.localidade);
+  if('account_profile_id' in next&&!String(next.account_profile_id||'').trim()&&defaults.account_profile_id){
+    next.account_profile_id=String(defaults.account_profile_id);
+  }
+  return next;
 };
 
 export const closestOption=(query:string,values:string[],minimum=.72)=>{

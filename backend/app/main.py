@@ -44,7 +44,7 @@ from app.commitments import commitment_cutoff, CommitmentIn, advance, as_date, b
 from app.parcelamento_link import decorate_purchase_links, ensure_parcelamento_purchase, sync_parcelamento_purchase
 from app.future_commitments import effective_documents, overlay_link_names
 from app.providers.import_provider import ImportFinancialProvider
-from app.platforms import PLATFORMS, platform_identity
+from app.platforms import PLATFORMS, _merchant_catalog, apply_historical_capture_defaults, build_vendor_defaults, has_vendor_tokens_beyond_platform, historical_capture_profile, platform_identity
 from app.taxonomy import NATURES, NATURE_LABELS, CURATED_SUBCATEGORIES, category_subcategories, infer_classification, taxonomy_overrides, normalized as taxonomy_key
 from app.account_positions import account_key_for_legacy, account_positions, validate_account_key, reconcile_capture_transfer
 from app.account_profiles import (AccountProfileCreate, AccountProfileUpdate, AccountProfileDelete,
@@ -230,6 +230,43 @@ def json_safe(value):
     if isinstance(value, dict): return {k:json_safe(v) for k,v in value.items() if k != "_id"} | ({"id":str(value["_id"])} if "_id" in value else {})
     return value
 
+def _attach_historical_capture_defaults(document:dict[str,Any], result:dict[str,Any], db, catalog_cache=None):
+    hist=historical_capture_profile(db,document,catalog_cache=catalog_cache)
+    if not hist: return
+    defaults:dict[str,Any]={}
+    if not result.get("vendedor") and hist.get("vendedor"):
+        defaults["vendedor"]=hist["vendedor"]
+        result.setdefault("vendedor_sugerido",hist["vendedor"])
+    if not result.get("plataforma") and hist.get("plataforma"):
+        defaults["plataforma"]=hist["plataforma"]
+        result.setdefault("plataforma_sugerida",hist["plataforma"])
+    for field in ("categoria_sugerida","subcategoria","natureza","tipo","metodo_pagamento","localidade","account_profile_id"):
+        if not result.get(field) and hist.get(field):
+            defaults[field]=hist[field]
+    if defaults.get("categoria_sugerida") and not result.get("categoria_inferida"):
+        result["categoria_inferida"]=defaults["categoria_sugerida"]
+    if defaults:
+        result["historical_defaults"]=defaults
+        result["historical_match_count"]=hist.get("match_count",0)
+
+def _sync_merchant_alias(db, merchant:dict[str,Any], raw_source:str|None, supplier_name:str, platform_active:bool, platform_name:str|None, previous_merchant_id, now:datetime):
+    use_raw=bool(raw_source) and (not platform_active or has_vendor_tokens_beyond_platform(raw_source,platform_name))
+    raw=(raw_source if use_raw else supplier_name) or supplier_name
+    normalized=re.sub(r"\s+"," ",re.sub(r"[^A-Z0-9 ]"," ",str(raw).upper())).strip()
+    if not normalized: return
+    if previous_merchant_id and previous_merchant_id!=merchant.get("_id"):
+        prev_doc=db.merchants.find_one({"_id":previous_merchant_id})
+        if prev_doc and isinstance(prev_doc.get("aliases"),list):
+            filtered=[a for a in prev_doc["aliases"] if a.get("normalizado")!=normalized]
+            if len(filtered)!=len(prev_doc["aliases"]):
+                db.merchants.update_one({"_id":previous_merchant_id},{"$set":{"aliases":filtered,"updated_at":now}})
+    existing_doc=db.merchants.find_one({"_id":merchant["_id"]}) or merchant
+    aliases=list(existing_doc.get("aliases") or [])
+    if not any(a.get("normalizado")==normalized for a in aliases):
+        aliases.append({"valor":raw,"normalizado":normalized,"status":"confirmado","source_record_ids":[]})
+        merchant["aliases"]=aliases
+        db.merchants.update_one({"_id":merchant["_id"]},{"$set":{"aliases":aliases,"updated_at":now}})
+
 def with_merchant_name(document:dict[str,Any], db):
     result=json_safe(document)
     if document.get('provisional_id'): result['categoria']=document.get('categoria_sugerida')
@@ -251,6 +288,8 @@ def with_merchant_name(document:dict[str,Any], db):
     suggestion=infer_classification(document,taxonomy_overrides(db))
     for field,value in suggestion.items():
         if not result.get(field): result['categoria_inferida' if field=='categoria' and document.get('provisional_id') else f"{field}_sugerida"]=value
+    if document.get("provisional_id") and document.get("status") in {"provisional","enriched"}:
+        _attach_historical_capture_defaults(document,result,db)
     return result
 
 def with_merchant_names(documents:list[dict[str,Any]], db):
@@ -259,6 +298,7 @@ def with_merchant_names(documents:list[dict[str,Any]], db):
     merchants={str(item["_id"]):item.get("nome_padrao") for item in db.merchants.find({"_id":{"$in":list(merchant_ids)}},{"nome_padrao":1})} if merchant_ids else {}
     results=[]
     overrides=taxonomy_overrides(db)
+    catalog_cache=_merchant_catalog(db) if any(item.get("provisional_id") and item.get("status") in {"provisional","enriched"} for item in documents) else None
     for document in documents:
         result=json_safe(document)
         if document.get('provisional_id'): result['categoria']=document.get('categoria_sugerida')
@@ -276,6 +316,8 @@ def with_merchant_names(documents:list[dict[str,Any]], db):
             result["plataforma_sugerida"]=detected[1]
         for field,value in infer_classification(document,overrides).items():
             if not result.get(field): result['categoria_inferida' if field=='categoria' and document.get('provisional_id') else f"{field}_sugerida"]=value
+        if document.get("provisional_id") and document.get("status") in {"provisional","enriched"}:
+            _attach_historical_capture_defaults(document,result,db,catalog_cache=catalog_cache)
         results.append(result)
     return results
 
@@ -857,6 +899,7 @@ def build_classification_options(db):
     result["metodo_pagamento_labels"]=PAYMENT_METHOD_LABELS
     result["categoria_subcategorias"]=category_subcategories(db)
     result["subcategoria"]=sorted({name for names in result["categoria_subcategorias"].values() for name in names},key=str.casefold)
+    result["vendor_defaults"]=build_vendor_defaults(db)
     return result
 
 class TransactionClassificationUpdate(BaseModel):
@@ -1072,13 +1115,17 @@ def _update_transaction_classification(transaction_id:str, update:TransactionCla
     if recurrence_changed: set_values["recorrencia"]=recurrence
     created_merchant_id=None
     if merchant_changed:
+        raw_source=item.get("estabelecimento_original") or item.get("descricao_original")
+        platform_active=bool(item.get("platform_id") or platform_name or platform_identity(raw_source))
         if not merchant:
             merchant_id=ObjectId()
-            raw=supplier_name if item.get("platform_id") or platform_name or platform_identity(item.get("estabelecimento_original") or item.get("descricao_original")) else item.get("estabelecimento_original") or item.get("descricao_original") or supplier_name
+            use_raw=bool(raw_source) and (not platform_active or has_vendor_tokens_beyond_platform(raw_source,platform_name))
+            raw=(raw_source if use_raw else supplier_name) or supplier_name
             normalized=re.sub(r"\s+"," ",re.sub(r"[^A-Z0-9 ]"," ",str(raw).upper())).strip()
             merchant={"_id":merchant_id,"external_key":f"merchant-user-{uuid4()}","schema_version":2,"created_at":now,"updated_at":now,"tipo_entidade":"marca","nome_padrao":supplier_name,"aliases":[{"valor":raw,"normalizado":normalized,"status":"confirmado","source_record_ids":[]}]}
             db.merchants.insert_one(merchant)
             created_merchant_id=merchant_id
+        _sync_merchant_alias(db,merchant,raw_source,supplier_name,platform_active,platform_name,item.get("merchant_id"),now)
         supplier_name=merchant["nome_padrao"]
         set_values["merchant_id"]=merchant["_id"]
         if "vendedor" in item: set_values["vendedor"]=supplier_name
@@ -1439,6 +1486,7 @@ def reparse_provisional(provisional_id:str,body:ReparseIn,db=Depends(database)):
             platform=find_or_create_platform(writing,detected_platform[1],now);changes['platform_id']=platform['_id']
         if merchant_entity and (not detected_platform or merchant_entity['_id']!=changes.get('platform_id')):
             changes.update({'merchant_id':merchant_entity['_id'],'merchant_name':merchant_entity['nome_padrao']})
+        apply_historical_capture_defaults(writing,changes,base_item=current)
         before={key:json_safe(item.get(key)) for key in changes if key!='updated_at'}
         writing.provisional_transactions.update_one({'_id':item['_id']},{'$set':changes})
         writing.raw_events.update_one({'_id':event['_id']},{'$set':{'parsed_payload':parsed,'parser_version':enriched.get('parser_version'),'updated_at':now}})
@@ -1588,12 +1636,16 @@ def _atomic_update_provisional(provisional_id:str, update:ProvisionalUpdate, db=
     previous_vendor=with_merchant_name(item,db).get("vendedor")
     previous_platform=with_merchant_name(item,db).get('plataforma') if platform_name is not None else None
     if supplier and supplier!=with_merchant_name(item,db).get("vendedor"):
-        raw=supplier if platform_name or item.get("platform_id") or platform_identity(item.get("merchant_raw")) else item.get("merchant_raw") or supplier
+        raw_source=item.get("merchant_raw")
+        platform_active=bool(platform_name or item.get("platform_id") or platform_identity(raw_source))
+        use_raw=bool(raw_source) and (not platform_active or has_vendor_tokens_beyond_platform(raw_source,platform_name))
+        raw=(raw_source if use_raw else supplier) or supplier
         normalized=re.sub(r"\s+"," ",re.sub(r"[^A-Z0-9 ]"," ",str(raw).upper())).strip()
         merchant=find_canonical_merchant(db,supplier)
         if not merchant:
             merchant={"_id":ObjectId(),"external_key":f"merchant-user-{uuid4()}","schema_version":2,"created_at":now,"updated_at":now,"tipo_entidade":"marca","nome_padrao":supplier,"aliases":[{"valor":raw,"normalizado":normalized,"status":"confirmado","source_record_ids":[]}]}
             db.merchants.insert_one(merchant)
+        _sync_merchant_alias(db,merchant,raw_source,supplier,platform_active,platform_name,item.get("merchant_id"),now)
         changed.update({"merchant_id":merchant["_id"],"merchant_name":merchant["nome_padrao"]})
         before["vendedor"]=previous_vendor
     if platform_name:
@@ -1664,12 +1716,15 @@ def _atomic_decide_provisional(provisional_id:str, decision:ProvisionalAction, d
     if item.get("status") not in {"provisional","enriched"}: raise HTTPException(409,"A captura já foi decidida. Recarregue.")
     if decision.expected_revision is None and item.get('revision') is not None:raise HTTPException(428,'Reabra a captura para obter a revisão atual.')
     if decision.expected_revision is not None and decision.expected_revision!=item.get("revision",1): raise HTTPException(409,"A captura mudou. Recarregue.")
-    if decision.action=="confirm": validate_confirmed_provisional(item,db)
+    extra_set:dict[str,Any]={}
+    if decision.action=="confirm":
+        apply_historical_capture_defaults(db,extra_set,base_item=item)
+        validate_confirmed_provisional({**item,**extra_set},db)
     if decision.action=='cancel':
         reasons=movement_blockers(db,'capture',provisional_id,item)
         if reasons:raise HTTPException(409,' '.join(reasons)+' Revise os vínculos antes de descartar.')
     now=datetime.now(timezone.utc);new_status="confirmed" if decision.action=="confirm" else "cancelled"
-    db.provisional_transactions.update_one({"_id":item["_id"]},{"$set":{"revision":item.get("revision",1)+1,"status":new_status,"updated_at":now,**({"confirmed_at":now} if new_status=="confirmed" else {"cancelled_at":now})}})
+    db.provisional_transactions.update_one({"_id":item["_id"]},{"$set":{**extra_set,"revision":item.get("revision",1)+1,"status":new_status,"updated_at":now,**({"confirmed_at":now} if new_status=="confirmed" else {"cancelled_at":now})}})
     db.raw_events.update_one({"event_id":item.get("event_id")},{"$set":{"processing_status":new_status,"linked_transaction_id":item["_id"] if new_status=="confirmed" else None}})
     db.audit_log.insert_one({"event":"provisional_transaction_decision","provisional_id":provisional_id,"action":decision.action,"before":json_safe(item),"after":{"status":new_status},"created_at":now})
     resolved_review_count=resolve_pending_reviews_for_provisional(db, provisional_id, now, new_status)

@@ -3,7 +3,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { rebaseDraft } from '../utils/draftConflict';
 import {StyleSheet, Text, View} from 'react-native';
 import {Pressable, TextInput} from './InteractionControls';
-import { financialDateLabel, rankedOptions } from '../utils/classification';
+import { applyVendorDefaults, financialDateLabel, rankedOptions } from '../utils/classification';
 import {creationId} from '../utils/commitmentCreate';
 import ControlledChoice from './ControlledChoice';
 import {useAsyncScope} from '../utils/useAsyncScope';
@@ -149,7 +149,7 @@ export default function TransactionEditor({item:initialItem,api,money,onSaved,on
         {field==='localidade'&&<Text style={s.hint}>Use a cidade da compra, nunca a sede da plataforma.</Text>}
         {field==='recorrencia_tipo'&&<Text style={s.hint}>Classifica o padrão do lançamento sem alterar sua categoria.</Text>}
         {field==='recorrencia_periodicidade'&&<Text style={s.hint}>Em lançamentos eventuais, será salva como “não aplicável”.</Text>}
-        {matches.length>0&&<View style={s.suggestions}>{matches.map(value=><Pressable accessibilityRole="button" key={value} onPress={()=>{setDraft(current=>({...current,[field]:value}));setFocusedField(null)}} style={[s.chip,draft[field]===value&&s.chipActive]}><Text numberOfLines={1} style={[s.chipText,draft[field]===value&&s.chipTextActive]}>{optionLabel(value,(options.natureza_labels||{}) as any)}</Text></Pressable>)}</View>}
+        {matches.length>0&&<View style={s.suggestions}>{matches.map(value=><Pressable accessibilityRole="button" key={value} onPress={()=>{setDraft(current=>field==='vendedor'?applyVendorDefaults(value,current,options,'categoria'):({...current,[field]:value}));setFocusedField(null)}} style={[s.chip,draft[field]===value&&s.chipActive]}><Text numberOfLines={1} style={[s.chipText,draft[field]===value&&s.chipTextActive]}>{optionLabel(value,(options.natureza_labels||{}) as any)}</Text></Pressable>)}</View>}
         {field==='vendedor'&&previewLoading&&<Text style={s.previewStatus}>Buscando registros semelhantes…</Text>}
         {field==='vendedor'&&!previewLoading&&matchPreview?.total>0&&<View style={s.matchBox}><Text style={s.matchTitle}>{matchPreview.total} correspondência{matchPreview.total===1?'':'s'} com confiança alta</Text><Text style={s.matchText}>Registros sem vendedor serão atualizados. Ao salvar e validar com o lote ativado, essas movimentações também serão validadas; capturas ainda exigem confirmação.</Text>{(matchPreview.samples||[]).slice(0,3).map((sample:any)=><Text key={`${sample.kind}-${sample.id}`} numberOfLines={1} style={s.matchSample}>• {sample.description} · {Math.round(sample.score*100)}%</Text>)}<Pressable accessibilityRole="checkbox" accessibilityState={{checked:applySimilarSupplier}} aria-checked={applySimilarSupplier} onPress={()=>setApplySimilarSupplier(value=>!value)} style={[s.bulkToggle,applySimilarSupplier&&s.bulkToggleActive]}><Text style={[s.bulkToggleText,applySimilarSupplier&&s.bulkToggleTextActive]}>{applySimilarSupplier?'✓ ':''}Atualizar e validar o lote de vendedores</Text></Pressable></View>}
       </View>;

@@ -90,5 +90,51 @@ class PlatformTests(unittest.TestCase):
         self.assertNotIn("vendedor",transaction)
         self.assertNotIn("merchant_id",db.transactions.docs[0])
 
+    def test_historical_capture_prefills_vendor_platform_category_and_details(self):
+        from app.platforms import build_vendor_defaults
+        stamp=datetime(2026,10,16,16,1,32,tzinfo=timezone.utc)
+        vendor_id=ObjectId();platform_id=ObjectId()
+        db=FakeDB(
+            merchants=MerchantCollection([
+                {"_id":vendor_id,"nome_padrao":"Lanche Bem","aliases":[{"valor":"LANCHE BEM","normalizado":"LANCHE BEM","status":"confirmado","source_record_ids":[]}]},
+                {"_id":platform_id,"external_key":"merchant-cappta","nome_padrao":"Cappta","aliases":[]},
+            ]),
+            provisional_transactions=Collection([
+                {"_id":ObjectId(),"provisional_id":"hist-1","status":"confirmed","revision":2,
+                 "merchant_raw":"CAPPTA LAN","merchant_id":vendor_id,"merchant_name":"Lanche Bem",
+                 "platform_id":platform_id,"valor":Decimal128("-6.40"),"fluxo":"saida","tipo":"compra",
+                 "natureza":"COMPRA","categoria_sugerida":"Alimentação","subcategoria":"Lanches",
+                 "metodo_pagamento":"cartao_debito","localidade":"Betim","data_evento":stamp},
+            ]),
+        )
+        # 1. Existing unconfirmed capture receives historical_defaults on read
+        pending={"_id":ObjectId(),"provisional_id":"prov-existing","status":"provisional","revision":1,
+                 "merchant_raw":"CAPPTA LAN","valor":Decimal128("-6.40"),"fluxo":"saida","tipo":"compra","data_evento":stamp}
+        enriched=with_merchant_name(pending,db)
+        self.assertEqual(enriched["historical_defaults"]["vendedor"],"Lanche Bem")
+        self.assertEqual(enriched["historical_defaults"]["plataforma"],"Cappta")
+        self.assertEqual(enriched["historical_defaults"]["categoria_sugerida"],"Alimentação")
+        self.assertEqual(enriched["historical_defaults"]["subcategoria"],"Lanches")
+        self.assertEqual(enriched["historical_defaults"]["natureza"],"COMPRA")
+        self.assertEqual(enriched["historical_defaults"]["metodo_pagamento"],"cartao_debito")
+        self.assertEqual(enriched["historical_defaults"]["localidade"],"Betim")
+        # 2. Newly ingested capture is pre-filled directly in provisional_transactions
+        res=TransactionService(db).process(event("cappta-new","android_notification",stamp,"CAPPTA LAN"))
+        self.assertEqual(res["status"],"provisional")
+        created=next(d for d in db.provisional_transactions.docs if d["provisional_id"]==res["provisional_id"])
+        self.assertEqual(created["merchant_id"],vendor_id)
+        self.assertEqual(created["merchant_name"],"Lanche Bem")
+        self.assertEqual(created["platform_id"],platform_id)
+        self.assertEqual(created["categoria_sugerida"],"Alimentação")
+        self.assertEqual(created["subcategoria"],"Lanches")
+        self.assertEqual(created["natureza"],"COMPRA")
+        self.assertEqual(created["metodo_pagamento"],"cartao_debito")
+        self.assertEqual(created["localidade"],"Betim")
+        # 3. Classification options expose vendor_defaults for interactive chip selection
+        vdefs=build_vendor_defaults(db)
+        self.assertEqual(vdefs["Lanche Bem"]["plataforma"],"Cappta")
+        self.assertEqual(vdefs["Lanche Bem"]["categoria"],"Alimentação")
+        self.assertEqual(vdefs["Lanche Bem"]["subcategoria"],"Lanches")
+
 
 if __name__ == "__main__": unittest.main()
