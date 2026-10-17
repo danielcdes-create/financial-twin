@@ -1178,7 +1178,7 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
         <View>
           <Text style={s.brand}>FINANCEIRO</Text>
           <Text style={s.title}>
-            {tab === "Movimentações" ? "Extrato" : tab}
+            {({Movimentações: "Extrato", Comprar: "Cabe na minha vida?", Decisões: "Decisões e evidências", Fechamento: "Fechamento do mês"} as Record<string, string>)[tab] || tab}
           </Text>
         </View>
         <View style={s.connection}>
@@ -1887,12 +1887,12 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
                 </View>)}
               </View>}
               <Text style={s.muted}>
-                Capture de notificações:{" "}
+                Captura de notificações:{" "}
                 {NotificationCapture.available
                   ? NotificationCapture.isEnabled()
                     ? "ativada"
                     : "desativada"
-                  : "Android build necessário"}
+                  : "disponível no aplicativo Android"}
               </Text>
               <Text style={s.muted}>
                 {Platform.OS === 'web' ? 'Itens permanecem no armazenamento local do navegador até receber confirmação do servidor.' : 'Itens permanecem no SQLite do aparelho até receber confirmação do servidor.'}

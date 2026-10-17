@@ -173,19 +173,39 @@ def purchase_context(start:date,first_payment:date,installments:int=Query(defaul
     except ValueError as exc:raise HTTPException(422,str(exc)) from exc
     return {**_planning_context(start,date.fromisoformat(horizon['end']),db),'horizon':horizon}
 
+_OBLIGATION_LABELS = {
+    'fatura_cartao': 'Fatura do cartão',
+    'fatura': 'Fatura do cartão',
+    'financiamento': 'Financiamento',
+    'emprestimo': 'Empréstimo',
+    'imposto': 'Imposto / tributo',
+    'boleto': 'Boleto',
+    'obrigacao': 'Obrigação',
+}
+
+def _obligation_display_label(obligation: dict, due: date) -> str:
+    raw_type = str(obligation.get('tipo') or 'Obrigação').strip()
+    kind_label = _OBLIGATION_LABELS.get(raw_type.lower(), raw_type.replace('_', ' ').capitalize())
+    comp = str(obligation.get('competencia') or '').strip()
+    if len(comp) == 7 and comp[4] == '-':
+        period_label = f'{comp[5:7]}/{comp[0:4]}'
+    else:
+        period_label = due.strftime('%d/%m/%Y')
+    return f'{kind_label} · {period_label}'
+
 def _planning_context(start:date,end:date,db):
     flows=[];excluded=[];suggestions=[]
     with mongo_snapshot(db) as (reading,consistency):
         positions=account_positions(reading)
         account_keys={p['legacy_account_id']:p['key'] for p in positions if p.get('legacy_account_id')}
-        excluded.extend({'ref':'profile:'+p['key'],'reason':'Conta encerrada ou arquivada não é oferecida para novas movimentações.'} for p in positions if p.get('archived') or p.get('status')=='encerrada')
+        excluded.extend({'ref':'profile:'+p['key'],'label':p.get('apelido') or p.get('instituicao') or p['key'],'reason':'Conta encerrada ou arquivada não é oferecida para novas movimentações.'} for p in positions if p.get('archived') or p.get('status')=='encerrada')
         positions=[p for p in positions if not p.get('archived') and p.get('status')!='encerrada']
         for commitment in effective_commitments(reading, reading.commitments.find({'status':'ativo'})):
             if historical_occurrence_conflicts(commitment):
-                excluded.append({'ref':'commitment:'+commitment['commitment_id'],'reason':'Pagamento histórico contradiz a próxima ocorrência. Confira o histórico e a agenda antes de projetar caixa.'})
+                excluded.append({'ref':'commitment:'+commitment['commitment_id'],'label':commitment.get('name') or 'Compromisso','reason':'Pagamento histórico contradiz a próxima ocorrência. Confira o histórico e a agenda antes de projetar caixa.'})
                 continue
             if commitment.get('payment_method')=='cartao':
-                excluded.append({'ref':'commitment:'+commitment['commitment_id'],'reason':'Informe o vencimento da fatura para prever caixa; não duplicar compra e fatura.'});continue
+                excluded.append({'ref':'commitment:'+commitment['commitment_id'],'label':commitment.get('name') or 'Compromisso','reason':'Informe o vencimento da fatura para prever caixa; não duplicar compra e fatura.'});continue
             reference=str(commitment.get('account_id') or '')
             key=reference.removeprefix('profile:') if reference.startswith('profile:') else account_keys.get(reference)
             # Old weekly subscriptions can need more than 600 occurrences to
@@ -205,7 +225,7 @@ def _planning_context(start:date,end:date,db):
             due=as_date(obligation['data_vencimento']);value=amount(obligation.get('saldo_aberto'))
             if not value or value<=0 or due>end:continue
             identity='obligation:'+str(obligation['_id'])
-            suggestions.append({'id':identity,'source_ref':identity,'date':max(start,due).isoformat(),'original_due_date':due.isoformat(),'overdue':due<start,'amount':money(-value),'label':f'{obligation.get("tipo","Obrigação")} · {obligation.get("competencia",due.isoformat())}','account_key':None,'certainty':'assumed'})
+            suggestions.append({'id':identity,'source_ref':identity,'date':max(start,due).isoformat(),'original_due_date':due.isoformat(),'overdue':due<start,'amount':money(-value),'label':_obligation_display_label(obligation,due),'account_key':None,'certainty':'assumed'})
         return {'accounts':positions,'flows':flows,'suggested_flows':suggestions,'excluded_sources':excluded,'unmapped_obligations':len(suggestions),'gaps':['Obrigações importadas só entram após seleção e conferência de sobreposição com compromissos. Faturas entram pelo saldo da obrigação, sem somar novamente as compras.','Fluxos previstos não comprovam pagamentos.'],'read_consistency':consistency,'opening_balance_verified':False}
 
 @router.post('/simulate')

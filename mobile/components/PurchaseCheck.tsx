@@ -8,7 +8,7 @@ import { purchaseImageFormData, type PurchaseImage } from '../utils/purchaseImag
 import { purchaseCardLines } from '../utils/purchaseCard';
 import { captureDateIso } from '../utils/captureDate';
 import {maskCivilDate} from '../utils/formMask';
-import {civilDateLabel, purchaseGapSentence, purchaseResultCopy} from '../utils/purchaseCopy';
+import {civilDateLabel, formatPurchaseFlowLabel, purchaseHorizonSubtitle, purchaseResultCopy, summarizePlanningContext} from '../utils/purchaseCopy';
 import VoiceCapture from './VoiceCapture';
 import { withDevicePrompt } from '../utils/devicePrompt';
 import {useAsyncScope, useScopedRequest} from '../utils/useAsyncScope';
@@ -121,6 +121,7 @@ export default function PurchaseCheck({api:request,upload:uploadRequest,onBack,s
   });
   const copy=result?purchaseResultCopy(result,money,goalName):null;
   const lines=result?purchaseCardLines({price:result.price,workHours:result.work_hours,delayDays:result.goal?.delay_days??null}):[];
+  const contextCopy=visibleContext?summarizePlanningContext(visibleContext,{includeProfiles:false}):null;
   return <FormBusy.Provider value={busy}><View style={s.container}>
     <Action label="‹ Voltar" onPress={back}/><Text style={s.title}>Cabe na minha vida?</Text>
     <Text style={s.note}>Confira o impacto antes de comprar. Um print ajuda a preencher os dados; a análise só usa o preço que você confirmar.</Text>
@@ -152,7 +153,7 @@ export default function PurchaseCheck({api:request,upload:uploadRequest,onBack,s
       {!validWindow&&<Text style={s.note}>Informe de 1 a 60 parcelas e o primeiro pagamento, de hoje em diante, como dd/mm/aaaa.</Text>}
       {!ready&&<Text style={s.note}>Conecte ao servidor para carregar os compromissos.</Text>}
       {!!contextError&&<><Text accessibilityRole="alert" style={s.error}>{contextError}</Text><Action label="Tentar carregar compromissos novamente" disabled={busy} onPress={()=>{setContext(null);setContextRetry(value=>value+1)}}/></>}
-      {visibleContext&&<><Text style={s.label}>De {civilDateLabel(visibleContext.horizon.start)} a {civilDateLabel(visibleContext.horizon.end)} · pelo menos {visibleContext.horizon.minimum_months} meses</Text><Text style={s.note}>{(visibleContext.flows||[]).length} previsões e {(visibleContext.suggested_flows||[]).length} obrigações importadas disponíveis. Obrigações importadas começam desmarcadas; inclua apenas após conferir que não repetem outra previsão.</Text>{visibleContext.gaps?.map((gap:string,index:number)=><Text key={`gap:${index}`} style={s.note}>{purchaseGapSentence(gap)}</Text>)}{visibleContext.excluded_sources?.map((item:any,index:number)=><Text key={`excluded:${index}`} style={s.note}>{purchaseGapSentence(String(item.reason || ''))}</Text>)}{[...(visibleContext.flows||[]),...(visibleContext.suggested_flows||[])].sort((a:any,b:any)=>a.date.localeCompare(b.date)||a.label.localeCompare(b.label)).map((row:any)=>{const included=selected[row.id]??!row.id.startsWith('obligation:');const due=civilDateLabel(row.date);return <Pressable accessibilityRole="checkbox" accessibilityLabel={`${row.label}, ${due}`} aria-checked={included} accessibilityState={{checked:included}} key={row.id} style={s.flow} onPress={()=>{inputRevision.current++;setSelected(previous=>({...previous,[row.id]:!included}));setResult(null);setShareVisible(false)}}><Text style={s.label}>{included?'☑':'☐'} {row.label}</Text><Text style={s.note}>{due} · {money(row.amount)}</Text></Pressable>})}</>}
+      {visibleContext&&contextCopy&&<><Text style={s.label}>{purchaseHorizonSubtitle(visibleContext.horizon)}</Text><Text style={s.note}>{contextCopy.summary}</Text>{contextCopy.notices.map((notice:string,index:number)=><Text key={`notice:${index}`} style={s.note}>{notice}</Text>)}{[...(visibleContext.flows||[]),...(visibleContext.suggested_flows||[])].sort((a:any,b:any)=>a.date.localeCompare(b.date)||a.label.localeCompare(b.label)).map((row:any)=>{const included=selected[row.id]??!row.id.startsWith('obligation:');const due=civilDateLabel(row.date);const displayLabel=formatPurchaseFlowLabel(row.label);return <Pressable accessibilityRole="checkbox" accessibilityLabel={`${displayLabel}, ${due}`} aria-checked={included} accessibilityState={{checked:included}} key={row.id} style={s.flow} onPress={()=>{inputRevision.current++;setSelected(previous=>({...previous,[row.id]:!included}));setResult(null);setShareVisible(false)}}><Text style={s.label}>{included?'☑':'☐'} {displayLabel}</Text><Text style={s.note}>{due} · {money(row.amount)}</Text></Pressable>})}</>}
     </View>
     <Action label="Ver impacto da compra" disabled={busy||!price||!ready||!validWindow||!visibleContext} onPress={assess}/>
     <DiscardDraftAction disabled={busy} light label="Excluir rascunho da análise" onDiscard={discardForm} message="Os dados preenchidos, o print selecionado e a análise desta compra serão removidos da tela. Seus registros salvos continuam preservados." />

@@ -18,6 +18,7 @@ type Position = AccountProfile & {balance: number | null; balance_reference?: nu
 type Props = {api: (path: string, init?: RequestInit) => Promise<any>; money: (value: number) => string;
   onUpdated?: (items: Position[]) => void | Promise<void>; onOpen?: () => void};
 const normalizeAmount = (value: string) => parseMoneyInput(value, {signed:true});
+const accountFieldLabels: Record<string, string> = {apelido: 'Apelido', instituicao: 'Instituição', tipo: 'Tipo de conta', agencia: 'Agência', agencia_digito: 'Dígito da agência', numero: 'Número da conta', numero_digito: 'Dígito da conta', status: 'Status', data_abertura: 'Data de abertura', data_encerramento: 'Data de encerramento', observacoes: 'Observações'};
 const referenceLabel = (item: Position) => item.balance_reference_date
   ? `${item.balance_reference_date.split('-').reverse().join('/')} (saldo conferido no dia)`
   : item.balance_as_of ? new Date(item.balance_as_of).toLocaleString('pt-BR') : '';
@@ -170,7 +171,7 @@ export default function AccountPositions({api, money, onUpdated, onOpen}: Props)
           if(!current)throw new Error('O cadastro não está mais disponível. Seu rascunho permanece nesta tela.');
           const rebased=rebaseDraft(profilePayload(profileBase.current),profilePayload(current),profilePayload(draft));
           profileBase.current=current;setProfileCurrent(current);setDraft({...current,...rebased.draft});setProfileDifferences(rebased.conflicts);setProfileConflict(rebased.conflicts.length>0);
-        })}/>{profileDifferences.map(field=><Text key={field} style={s.warning}>{field}: atual “{String((profileCurrent as any)[field]??'vazio')}”; seu rascunho “{String((draft as any)[field]??'vazio')}”.</Text>)}
+        })}/>{profileDifferences.map(field=><Text key={field} style={s.warning}>{accountFieldLabels[field]||field}: atual “{String((profileCurrent as any)[field]??'vazio')}”; seu rascunho “{String((draft as any)[field]??'vazio')}”.</Text>)}
         {profileDifferences.length>0&&<Action label="Conferi as diferenças e quero reaplicar meus campos" secondary disabled={busy} onPress={()=>{setProfileConflict(false);setProfileDifferences([])}}/>}</View>}
       {field('Apelido (opcional)', 'apelido', 80, 'Ex.: Itaú principal')}
       {field('Instituição', 'instituicao', 100, 'Banco, corretora ou carteira')}
