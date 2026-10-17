@@ -11,7 +11,9 @@ export function setPresentationClock(value: string | null) {
 
 export function civilToday(now = new Date()): string {
   if (presentationClock) return presentationClock;
-  return new Intl.DateTimeFormat('en-CA', {timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit'}).format(now);
+  const parts = new Intl.DateTimeFormat('en-CA', {timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit'}).formatToParts(now);
+  const map = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return `${map.year}-${map.month}-${map.day}`;
 }
 
 /** Floor for assumed-paid. The live boundary is this date or the first day of the civil month, whichever is later. The list response can pin it. */
@@ -361,11 +363,19 @@ export function shortDueLabel(due: string): string {
 }
 
 function linkOccurrenceDue(link: any): string {
-  return civilStamp(link?.due_date || link?.occurrence_due_date);
+  return civilStamp(link?.due_date || link?.occurrence_due_date || link?.base_due_date);
 }
 
 function linkedDueSet(item: any): Set<string> {
-  return new Set((item?.linked_transactions || []).map(linkOccurrenceDue).filter(Boolean));
+  const found = new Set<string>();
+  for (const link of item?.linked_transactions || []) {
+    if (link?.settled_next === false && link?.occurrence_key) continue;
+    for (const key of ['due_date', 'occurrence_due_date', 'base_due_date']) {
+      const stamp = civilStamp(link?.[key]);
+      if (stamp) found.add(stamp);
+    }
+  }
+  return found;
 }
 
 function managedInstallmentOverride(item: any, baseDue: string): {amount?: number; due?: string; cancelled: boolean} | null {

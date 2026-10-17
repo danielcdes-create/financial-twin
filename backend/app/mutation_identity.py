@@ -41,6 +41,11 @@ def durable_mutation(kind, target_names, body_name='body'):
                     writing.batch_commands.insert_one({'_id':identity,'kind':kind,'target':target,'digest':digest,
                         'status':'completed','result':result,'created_at':datetime.now(timezone.utc)})
                     return result
+            except HTTPException as exc:
+                pending_review = getattr(exc, '_batch_command_needs_review', None)
+                if pending_review is not None:
+                    db.batch_commands.update_one({'_id': pending_review['_id']}, {'$set': pending_review}) if db.batch_commands.find_one({'_id': pending_review['_id']}) else db.batch_commands.insert_one(pending_review)
+                raise
             except (DuplicateKeyError,OperationFailure) as exc:
                 if isinstance(exc,OperationFailure) and not (exc.code in {11000,112} or exc.has_error_label('TransientTransactionError') or exc.has_error_label('UnknownTransactionCommitResult')):
                     raise

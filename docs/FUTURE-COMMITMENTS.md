@@ -140,16 +140,14 @@ Vale um plano de cada vez. À vista entra no mês da data à vista, com o total.
 
 No filtro e no gráfico, Obrigação pontual cai em Dívidas, junto do financiamento importado. Não entra em Assinaturas.
 
-### 2. O assumido é só o passado de desenvolvimento
+### 2. Corte de “Pago (assumido)” (atualizado pelo OK de 16/10/2026)
 
-“Pago (assumido)” existe porque o app ainda estava em desenvolvimento e o passado anterior a outubro de 2026 não tem vínculo. Não é uma regra que anda com o calendário. Novembro não transforma outubro em pago.
-
-O corte fixo passa a ser 01/10/2026, devolvido na leitura, sem tela para editar. Antes dessa data, sem vínculo, a parcela é “Pago (assumido)”. Dessa data em diante, ou há vínculo, ou a parcela fica “Previsto” ou “Vencido · sem vínculo”.
+“Pago (assumido)” tem piso histórico em `01/10/2026` (`COMMITMENT_CUTOFF = 2026-10-01`) e, a partir do OK de `16/10/2026`, acompanha o primeiro dia do mês civil corrente em Brasília (`commitment_cutoff(on) = max(2026-10-01, date(on.year, on.month, 1))`), devolvido na leitura sem tela para editar. Antes dessa data de corte, sem vínculo, a parcela é “Pago (assumido)”. Da data de corte em diante, ou há vínculo, ou a parcela fica “Previsto” ou “Vencido · sem vínculo”.
 
 - 30/09/2026 sem vínculo: “Pago (assumido)”;
-- 10/10/2026 sem vínculo, com o dia já passado: “Vencido · sem vínculo”;
-- 10/11/2026 sem vínculo: “Previsto”;
-- em dezembro de 2026, 10/10 sem vínculo continua atrasado, não assumido;
+- 10/10/2026 sem vínculo, em outubro/2026 após o dia 10: “Vencido · sem vínculo”;
+- 10/10/2026 sem vínculo, a partir de novembro/2026: “Pago (assumido)”;
+- 10/11/2026 sem vínculo, em outubro/2026: “Previsto”;
 - o que já tem lançamento continua “Pago · extrato”.
 
 ### 3. Terminar em, no detalhe

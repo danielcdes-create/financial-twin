@@ -70,9 +70,10 @@ def pending_kind(due: date, linked: bool, as_of: date, cutoff: date | None = Non
 def linked_due_dates(item: dict) -> set[str]:
     found = set()
     for link in item.get('linked_transactions') or []:
-        raw = link.get('due_date') or link.get('occurrence_due_date')
-        if raw:
-            found.add(str(raw)[:10])
+        for key in ('due_date', 'occurrence_due_date', 'base_due_date'):
+            raw = link.get(key)
+            if raw:
+                found.add(str(raw)[:10])
     return found
 
 
@@ -189,7 +190,18 @@ def bson_date(value: date | None) -> datetime | None:
     return datetime(value.year, value.month, value.day, tzinfo=timezone.utc) if value else None
 
 
-def schedule(item: dict, count: int = 12, *, offset: int = 0) -> list[dict]:
+def _settled_occurrence_dates(item: dict) -> set[str]:
+    found = set()
+    for link in item.get("linked_transactions", []) or []:
+        if link.get("settled_next") is False and link.get("occurrence_key"):
+            continue
+        for key in ("due_date", "occurrence_due_date", "base_due_date"):
+            if link.get(key):
+                found.add(str(link[key])[:10])
+    return found
+
+
+def schedule(item: dict, count: int = 12, *, offset: int = 0, include_base: bool = False) -> list[dict]:
     if item.get("status") != "ativo" or historical_occurrence_conflicts(item):
         return []
     start = as_date(item["next_due_date"])
@@ -210,8 +222,7 @@ def schedule(item: dict, count: int = 12, *, offset: int = 0) -> list[dict]:
     if item.get("renewal_status") == "manual" or (item.get("kind") == "obrigacao" and not total):
         available = min(available, 1 - offset)
     end = as_date(item["end_date"]) if item.get("end_date") else None
-    settled_dates = {str(link.get("due_date"))[:10] for link in item.get("linked_transactions", [])
-                     if link.get("due_date") and link.get("settled_next")}
+    settled_dates = _settled_occurrence_dates(item)
     def row_amount(number):
         if item.get("kind") != "obrigacao" or not total:
             return float(item["amount"])
@@ -221,32 +232,41 @@ def schedule(item: dict, count: int = 12, *, offset: int = 0) -> list[dict]:
             return float(total_amount - base * (total - 1))
         return float(base)
     rows = [{"due_date": occurrence(offset).isoformat(),
+             **({"base_due_date": occurrence(offset).isoformat()} if include_base else {}),
              "amount": row_amount(first_number + offset),
              "installment_number": first_number + offset if total else None,
              "status": "previsto"} for offset in range(offset, offset + max(0, available))
             if occurrence(offset).isoformat() not in settled_dates
             and (end is None or occurrence(offset) <= end) and (not item.get('future_cutoff') or occurrence(offset) < as_date(item['future_cutoff']))]
-    return apply_installment_overrides(item, rows)
+    return apply_installment_overrides(item, rows, include_base=include_base)
 
 
-def apply_installment_overrides(item: dict, rows: list[dict]) -> list[dict]:
+def apply_installment_overrides(item: dict, rows: list[dict], *, include_base: bool = False) -> list[dict]:
     """Partial future edits stay on the commitment. The base due date is the key. Cancelled rows leave the projection."""
     overrides = item.get("installment_overrides") or {}
+    settled_dates = _settled_occurrence_dates(item)
     if not isinstance(overrides, dict) or not overrides:
-        return rows
+        return [row for row in rows if row["due_date"] not in settled_dates]
     output = []
     for row in rows:
-        patch = overrides.get(row["due_date"])
+        base_due = row.get("base_due_date") or row["due_date"]
+        patch = overrides.get(base_due)
         if not isinstance(patch, dict):
-            output.append(row)
+            if row["due_date"] in settled_dates:
+                continue
+            output.append({**row, "base_due_date": base_due} if include_base else row)
             continue
         if patch.get("cancelled"):
             continue
         updated = dict(row)
+        if include_base:
+            updated["base_due_date"] = base_due
         if patch.get("amount") not in (None, ""):
             updated["amount"] = float(Decimal(str(patch["amount"])))
         if patch.get("due_date"):
             updated["due_date"] = str(patch["due_date"])[:10]
+        if updated["due_date"] in settled_dates or base_due in settled_dates:
+            continue
         output.append(updated)
     return output
 

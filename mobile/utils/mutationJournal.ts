@@ -2,7 +2,7 @@ export type MutationDb = {getAllAsync:<T>(sql:string,...params:any[])=>Promise<T
 export type MutationCommand = {command_key:string;path:string;body:string;result:string|null;updated_at:string};
 const newId=()=> 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{const value=Math.random()*16|0;return(c==='x'?value:(value&3)|8).toString(16)});
 export const journaledMutation=(path:string,method:string)=>
-  /^\/v1\/(?:transactions\/[^/]+\/(?:classification|review)|reviews\/[^/]+\/decision|(?:card-catalog|card-bills|account-profiles)\/[^/]+(?:\/restore)?|month-close\/\d{4}-\d{2}(?:\/.*)?|commitments\/[^/]+(?:\/payment)?)$/.test(path) && ['POST','PUT','PATCH','DELETE'].includes(method);
+  /^\/v1\/(?:transactions\/[^/]+\/(?:classification|review)|reviews\/[^/]+\/decision|card-catalog(?:\/[^/]+(?:\/restore)?)?|(?:card-bills|account-profiles)\/[^/]+(?:\/restore)?|month-close\/\d{4}-\d{2}(?:\/.*)?|commitments\/[^/]+(?:\/(?:payment|payment-unlink|payment-swap))?|commitment-profile(?:\/from-statement)?|future-commitments\/(?:managed|installment|obligation)\/[^/]+(?:\/(?:undo|payment|payment-unlink))?)$/.test(path) && ['POST','PUT','PATCH','DELETE'].includes(method);
 export async function pendingMutations(db:MutationDb,baseUrl:string){
   const rows=await db.getAllAsync<MutationCommand>('SELECT * FROM review_commands');
   return rows.filter(row=>row.command_key.startsWith('mutation:')&&!row.result&&JSON.parse(row.body).baseUrl===baseUrl);

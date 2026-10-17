@@ -204,7 +204,7 @@ async def private_response_headers(request: Request, call_next):
 
 @app.middleware("http")
 async def invalidate_reference_data(request: Request, call_next):
-    mutates = request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path != "/v1/capture-batches/file-status" and request.url.path.startswith(("/v1/future-commitments", "/v1/commitments", "/v1/capture-batches", "/v1/movements", "/v1/transactions", "/v1/categories", "/v1/provisional", "/v1/merchants", "/v1/reviews", "/v1/events", "/v1/import", "/v1/documents"))
+    mutates = request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path != "/v1/capture-batches/file-status" and request.url.path.startswith(("/v1/future-commitments", "/v1/commitment-profile", "/v1/commitments", "/v1/capture-batches", "/v1/movements", "/v1/transactions", "/v1/categories", "/v1/provisional", "/v1/merchants", "/v1/reviews", "/v1/events", "/v1/import", "/v1/documents"))
     if mutates: classification_cache.invalidate()
     try:
         return await call_next(request)
@@ -929,7 +929,11 @@ def attempt_classification_command(db,command_id):
     try: return run_classification_command(db,command_id)
     except HTTPException as exc:
         if 400<=exc.status_code<500:
-            db.batch_commands.update_one({"_id":command_id,"status":"pending"},{"$set":{"status":"needs_review","last_error":str(exc.detail)[:500]}})
+            last_error=str(exc.detail)[:500]
+            db.batch_commands.update_one({"_id":command_id,"status":"pending"},{"$set":{"status":"needs_review","last_error":last_error}})
+            saved=db.batch_commands.find_one({"_id":command_id})
+            if saved:
+                exc._batch_command_needs_review={**saved,"status":"needs_review","last_error":last_error}
         raise
 
 
@@ -1077,6 +1081,8 @@ def _update_transaction_classification(transaction_id:str, update:TransactionCla
             created_merchant_id=merchant_id
         supplier_name=merchant["nome_padrao"]
         set_values["merchant_id"]=merchant["_id"]
+        if "vendedor" in item: set_values["vendedor"]=supplier_name
+        if "merchant_name" in item: set_values["merchant_name"]=supplier_name
     platform_changed=clear_platform
     platform_before=with_merchant_name(item,db).get('plataforma') if platform_name is not None else None
     unset_values={}
@@ -1088,9 +1094,13 @@ def _update_transaction_classification(transaction_id:str, update:TransactionCla
         platform=find_or_create_platform(db,platform_name,now)
         platform_changed=item.get("platform_id")!=platform["_id"]
         if platform_changed: set_values["platform_id"]=platform["_id"]
+        if "plataforma" in item: set_values["plataforma"]=platform["nome_padrao"]
         if current_merchant and not supplier_name and canonical_key(current_merchant.get("nome_padrao",""))==canonical_key(platform["nome_padrao"]): clear_supplier=True
     if clear_supplier and item.get("merchant_id"):
         unset_values["merchant_id"]=""
+    if clear_supplier:
+        for key in ("vendedor","merchant_name"):
+            if key in item: unset_values[key]=""
     if not validate_review and item.get("revisado_em"): unset_values["revisado_em"]=""
     try: db.transactions.update_one({"_id":object_id},{"$set":set_values,**({"$unset":unset_values} if unset_values else {})})
     except WriteError as exc:
@@ -2616,7 +2626,7 @@ def _atomic_link_commitment_payment(commitment_id:str,body:CommitmentPaymentLink
         raise HTTPException(status_code=422,detail="Selecione uma despesa realizada, não um pagamento de fatura ou transferência.")
     now=datetime.now(timezone.utc)
     paid_date=local_date(tx["data_evento"])
-    occurrence=schedule(item,1)
+    occurrence=schedule(item,1,include_base=True)
     options=payment_occurrences(item,paid_date)
     if not body.historical_only and len(options)>1 and body.occurrence_due_date is None:
         raise HTTPException(422,"O pagamento pode corresponder a mais de uma ocorrência. Escolha explicitamente o vencimento liquidado.")
@@ -2632,6 +2642,8 @@ def _atomic_link_commitment_payment(commitment_id:str,body:CommitmentPaymentLink
     link={link_key:source_id,"source_kind":source_kind,"due_date":selected,"paid_date":paid_date.isoformat(),"original_description":tx.get("descricao_original") or tx.get("merchant_raw") or "","expected_amount":expected_occurrence_amount,"actual_amount":str(abs(amount)),"linked_at":now,"settled_next":settles_next}
     if selected:
         link["occurrence_key"]="due:"+selected
+        if settles_next and occurrence[0].get("base_due_date") and occurrence[0]["base_due_date"]!=selected:
+            link["base_due_date"]=occurrence[0]["base_due_date"]
         if settles_next and occurrence[0].get("installment_number") is not None:link["installment_number"]=occurrence[0]["installment_number"]
     else:link["occurrence_requires_review"]=True
     if item.get("frequency")=="mensal": link["period_key"]=(selected or paid_date.isoformat())[:7]
@@ -2639,8 +2651,9 @@ def _atomic_link_commitment_payment(commitment_id:str,body:CommitmentPaymentLink
     next_number=(item.get("next_installment_number") or 0)+1
     updates={"updated_at":now,"schedule_anchor_day":item.get("schedule_anchor_day") or as_date(item["next_due_date"]).day,"schedule_anchor_end":item.get("schedule_anchor_end",False)}
     if settles_next:
-        next_occurrences=schedule(item,2)
-        updates["next_due_date"]=bson_date(as_date(next_occurrences[1]["due_date"])) if len(next_occurrences)>1 else item["next_due_date"]
+        next_occurrences=schedule(item,2,include_base=True)
+        next_base_due=next_occurrences[1].get("base_due_date") or next_occurrences[1]["due_date"] if len(next_occurrences)>1 else None
+        updates["next_due_date"]=bson_date(as_date(next_base_due)) if next_base_due else item["next_due_date"]
         if item["kind"]=="parcelamento":
             updates["next_installment_number"]=next_number
             if next_number>item["installment_count"]: updates["status"]="concluido"
@@ -2911,9 +2924,9 @@ def _atomic_delete_category(name:str=Query(min_length=1,max_length=120),replacem
         if prov_rows:
             prov_ids=[row["_id"] for row in prov_rows if "_id" in row]
             if prov_ids:
-                db.provisional_transactions.update_many({"_id":{"$in":prov_ids},"status":{"$in":["provisional","enriched","confirmed"]}},{"$set":{"categoria_sugerida":canonical_replacement,"updated_at":now},"$unset":{"subcategoria":""}})
+                db.provisional_transactions.update_many({"_id":{"$in":prov_ids},"status":{"$in":["provisional","enriched","confirmed"]}},{"$set":{"categoria_sugerida":canonical_replacement,"updated_at":now},"$unset":{"subcategoria":""},"$inc":{"revision":1}})
             else:
-                db.provisional_transactions.update_many({"categoria_sugerida":canonical_name,"status":{"$in":["provisional","enriched","confirmed"]}},{"$set":{"categoria_sugerida":canonical_replacement,"updated_at":now},"$unset":{"subcategoria":""}})
+                db.provisional_transactions.update_many({"categoria_sugerida":canonical_name,"status":{"$in":["provisional","enriched","confirmed"]}},{"$set":{"categoria_sugerida":canonical_replacement,"updated_at":now},"$unset":{"subcategoria":""},"$inc":{"revision":1}})
         for row in comm_rows:
             updates={"category":canonical_replacement,"updated_at":now}
             if "categoria" in row: updates["categoria"]=canonical_replacement

@@ -375,7 +375,7 @@ def write(db, source, identity, body, deleting=False):
                     if changed is not None and changed.matched_count == 0: raise HTTPException(409, 'O cronograma mudou. Reabra antes de salvar.')
                 else: writing.future_schedule_overrides.insert_one({'_id': key, **replacement})
                 affected = len(edits)
-            result = {'persisted': True, 'source': source, 'identity': identity, 'affected_count': affected, 'duplicate_request': False,
+            result = {'persisted': True, 'request_id': str(body.request_id), 'source': source, 'identity': identity, 'affected_count': affected, 'duplicate_request': False,
                       **({'delete_request_id': str(body.request_id)} if deleting else {})}
             writing.audit_log.insert_one({'event': 'future_commitment_deleted' if deleting else 'future_commitment_edited',
                 'source': source, 'identity': identity, 'original': original, 'before_view': reviewed, 'review': body.model_dump(mode='json'), 'created_at': now})
@@ -437,7 +437,7 @@ def undo_future(db, source, identity, body: FutureUndo):
                     writing.future_schedule_overrides.update_one({'_id': key, 'revision': snapshot['revision_after']},
                         {'$set': replacement, **({} if previous.get('label') else {'$unset': {'label': ''}})})
             restored = {**snapshot, 'restored': True}
-            result = {'restored': True, 'source': source, 'identity': identity, 'duplicate_request': False}
+            result = {'persisted': True, 'request_id': str(body.request_id), 'restored': True, 'source': source, 'identity': identity, 'duplicate_request': False}
             writing.future_commitment_commands.update_one({'_id': str(body.delete_request_id)}, {'$set': {'undo_snapshot': restored}})
             writing.future_commitment_commands.insert_one({'_id': str(body.request_id), 'request_digest': request_digest, 'result': result, 'created_at': now})
             writing.audit_log.insert_one({'event': 'future_commitment_delete_undone', 'source': source, 'identity': identity,
@@ -534,7 +534,7 @@ def link_imported_payment(db, source, identity, body: ImportedPaymentLink):
             if profile:
                 from app.commitment_profile import paint_movement
                 paint_movement(writing, movement, profile)
-            result = {'persisted': True, 'source': source, 'identity': identity, 'revision': revision, 'payment': _public_link(link), 'duplicate_request': False}
+            result = {'persisted': True, 'request_id': str(body.request_id), 'source': source, 'identity': identity, 'revision': revision, 'payment': _public_link(link), 'duplicate_request': False}
             writing.audit_log.insert_one({'event': 'imported_payment_linked', 'source': source, 'identity': identity, link_key: source_id,
                 'due_date': stamp, 'created_at': now})
             writing.future_commitment_commands.insert_one({'_id': str(body.request_id), 'request_digest': request_digest, 'result': result, 'created_at': now})
@@ -567,7 +567,7 @@ def unlink_imported_payment(db, source, identity, body: ImportedPaymentUnlink):
             changed = writing.future_schedule_overrides.update_one({'_id': key, 'revision': stored.get('revision', 0)},
                 {'$set': {'payment_links': links, 'revision': revision, 'updated_at': now}})
             if changed is not None and getattr(changed, 'matched_count', 1) == 0: raise HTTPException(409, 'O compromisso mudou. Reabra antes de desvincular.')
-            result = {'persisted': True, 'source': source, 'identity': identity, 'revision': revision, 'duplicate_request': False}
+            result = {'persisted': True, 'request_id': str(body.request_id), 'source': source, 'identity': identity, 'revision': revision, 'duplicate_request': False}
             writing.audit_log.insert_one({'event': 'imported_payment_unlinked', 'source': source, 'identity': identity, link_key: source_id, 'created_at': now})
             writing.future_commitment_commands.insert_one({'_id': str(body.request_id), 'request_digest': request_digest, 'result': result, 'created_at': now})
             return result

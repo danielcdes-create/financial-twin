@@ -11,7 +11,7 @@ import CommitmentProjection from './CommitmentProjection';
 import CommitmentBoard from './CommitmentBoard';
 import StatementSearch, {paymentDifference} from './StatementSearch';
 import {loadCommitmentLists} from '../utils/commitmentLists';
-import {anchoredDue, setCommitmentCutoff} from '../utils/commitmentPresentation';
+import {anchoredDue, civilToday, setCommitmentCutoff} from '../utils/commitmentPresentation';
 import {rebaseDraft} from '../utils/draftConflict';
 import DiscardDraftAction from './DiscardDraftAction';
 import {parseMoneyInput} from '../utils/moneyInput';
@@ -21,7 +21,7 @@ import {protectUnsavedBack,useLocalBack} from '../utils/localBack';
 type Api = (path:string, init?:RequestInit)=>Promise<any>;
 type Choice = { value:string; label:string };
 const FormLocked=createContext(false);
-const today=()=>new Intl.DateTimeFormat('en-CA',{timeZone:'America/Sao_Paulo',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+const today=()=>civilToday(new Date());
 const dateLabel=financialDateLabel;
 const blank=()=>({kind:'assinatura',name:'',purchase_date:formatCivilDate(today()),next_due_date:formatCivilDate(today()),cash_due_date:formatCivilDate(today()),installment_start:formatCivilDate(today()),obligation_plan:'a_vista',amount:'',frequency:'mensal',installment_count:'',next_installment_number:'',payment_method:'cartao',billing_platform:'',card_id:'',account_id:'',renewal_status:'automatica',remaining_charges:'',end_date:'',status:'ativo',category:'',notes:''});
 function firstParcelDate(item:any){

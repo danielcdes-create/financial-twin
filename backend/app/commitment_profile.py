@@ -18,6 +18,7 @@ from app.auth import require_session
 from pymongo.errors import DuplicateKeyError
 
 from app.atomic import mongo_transaction, session_database
+from app.movement_insert_lock import lock_movement_insert
 from app.commitments import as_date
 from app.economic_policy import amount
 from app import future_commitments
@@ -94,6 +95,14 @@ def _same(left, right) -> bool:
 def _tx(db, identity):
     if not identity:
         return None
+    text = str(identity)
+    if ObjectId.is_valid(text):
+        found = db.transactions.find_one({'_id': ObjectId(text)})
+        if found is not None:
+            return found
+    found = db.transactions.find_one({'_id': identity})
+    if found is not None:
+        return found
     for document in db.transactions.find({}):
         if _same(document.get('_id'), identity):
             return document
@@ -140,14 +149,19 @@ def _paint(document, profile: dict, cleared: set[str] | tuple[str, ...] = ()) ->
         elif source in cleared_set and source not in {'display_name', 'account_id'}:
             if source == 'subcategoria':
                 if document.get('subcategoria') not in (None, ''):
-                    changes['subcategoria'] = ''
+                    unsets['subcategoria'] = ''
             elif document.get(target) is not None:
                 unsets[target] = ''
     if changes.get('categoria') and changes['categoria'] != previous_category and _blank(profile.get('subcategoria')):
         if document.get('subcategoria') not in (None, ''):
-            changes['subcategoria'] = ''
+            unsets['subcategoria'] = ''
     if changes.get('vendedor'):
         changes['merchant_name'] = changes['vendedor']
+        if document.get('merchant_id') is not None:
+            unsets['merchant_id'] = ''
+    if changes.get('plataforma') or 'plataforma' in unsets:
+        if document.get('platform_id') is not None:
+            unsets['platform_id'] = ''
     return changes, unsets
 
 
@@ -251,11 +265,34 @@ def _statement_ids(part) -> list:
     return found
 
 
+def _open_statement_ids(part) -> list:
+    if part.get('payment_link') or part.get('transaction_id') or part.get('bill_id'):
+        return []
+    if part.get('status') in {'paga', 'liquidada', 'cancelada'}:
+        return []
+    return [part['open_statement_id']] if part.get('open_statement_id') else []
+
+
+def _is_settled_or_protected_statement(db, document) -> bool:
+    tx_id = str(document.get('_id'))
+    if (not isinstance(db, dict) or 'refund_claims' in db) and hasattr(db, 'refund_claims'):
+        if db.refund_claims.find_one({'_id': f'ledger:{tx_id}'}):
+            return True
+    if (not isinstance(db, dict) or 'reconciliations' in db) and hasattr(db, 'reconciliations'):
+        if db.reconciliations.find_one({'transaction_id': document.get('_id')}) or db.reconciliations.find_one({'transaction_id': tx_id}):
+            return True
+    for commitment in db.commitments.find({}):
+        for link in commitment.get('linked_transactions') or []:
+            if _same(link.get('transaction_id'), tx_id) and (link.get('paid_date') or link.get('settled_next')):
+                return True
+    return False
+
+
 def _apply_amount_to_statement(db, identities, new_amount: Decimal | None, due: date | None):
     touched = []
     for identity in identities:
         document = _tx(db, identity)
-        if not document:
+        if not document or _is_settled_or_protected_statement(db, document):
             continue
         changes = {}
         if new_amount is not None:
@@ -390,6 +427,7 @@ def apply_commitment_profile(db, body: ProfileWrite):
     try:
         with mongo_transaction(db) as session:
             writing = session_database(db, session)
+            lock_movement_insert(writing)
             previous = writing.commitment_profile_commands.find_one({'_id': str(body.request_id)})
             if previous:
                 if previous.get('request_digest') != request_digest:
@@ -459,9 +497,8 @@ def apply_commitment_profile(db, body: ProfileWrite):
                     sets['amount'] = Decimal128(body.amount)
                 if body.due_date is not None:
                     sets['next_due_date'] = body.due_date.isoformat() if isinstance(document.get('next_due_date'), str) else _stamp(body.due_date)
-                    if not document.get('next_due_date') or as_date(document['next_due_date']) != body.due_date:
-                        sets['schedule_anchor_day'] = body.due_date.day
-                        sets['schedule_anchor_end'] = body.due_date.day == calendar.monthrange(body.due_date.year, body.due_date.month)[1]
+                    sets['schedule_anchor_day'] = body.due_date.day
+                    sets['schedule_anchor_end'] = body.due_date.day == calendar.monthrange(body.due_date.year, body.due_date.month)[1]
                 update_doc = {'$set': sets, '$inc': {'revision': 1}}
                 if unsets:
                     update_doc['$unset'] = unsets
@@ -469,6 +506,8 @@ def apply_commitment_profile(db, body: ProfileWrite):
                 if body.scope and document.get('kind') == 'parcelamento' and (body.amount is not None or body.due_date is not None):
                     opens = []
                     for link in document.get('linked_transactions') or []:
+                        if link.get('paid_date') or link.get('settled_next'):
+                            continue
                         due = str(link.get('due_date') or '')[:10]
                         if due and due >= future_commitments.today().isoformat() and link.get('transaction_id'):
                             opens.append(link)
@@ -485,7 +524,7 @@ def apply_commitment_profile(db, body: ProfileWrite):
                     for row in chosen:
                         _patch_row(writing, 'installment', body.identity, row['row_id'], body.amount, body.due_date)
                         part = plan['installments'][row['row_id'] - 1]
-                        amount_ids.extend(_apply_amount_to_statement(writing, _statement_ids(part), body.amount, body.due_date))
+                        amount_ids.extend(_apply_amount_to_statement(writing, _open_statement_ids(part), body.amount, body.due_date))
             else:
                 documents = [row for row in writing.obligations.find({}) if obligation_series_key(row) == body.identity]
                 opens = _series_rows(writing, body.identity)
@@ -495,8 +534,8 @@ def apply_commitment_profile(db, body: ProfileWrite):
                     chosen = opens if body.scope == 'future' else opens[:1]
                     for document in chosen:
                         _patch_row(writing, 'obligation', str(document['_id']), 1, body.amount, body.due_date)
-                        amount_ids.extend(_apply_amount_to_statement(writing, _statement_ids(document), body.amount, body.due_date))
-            result = {'persisted': True, 'source': body.source, 'identity': body.identity, 'linked': linked, 'amount_rows': amount_ids, 'duplicate_request': False}
+                        amount_ids.extend(_apply_amount_to_statement(writing, _open_statement_ids(document), body.amount, body.due_date))
+            result = {'persisted': True, 'request_id': str(body.request_id), 'source': body.source, 'identity': body.identity, 'linked': linked, 'amount_rows': amount_ids, 'duplicate_request': False}
             writing.audit_log.insert_one({'event': 'commitment_profile_synced', 'source': body.source, 'identity': body.identity,
                 'linked': linked, 'amount_rows': amount_ids, 'created_at': datetime.now(timezone.utc)})
             writing.commitment_profile_commands.insert_one({'_id': str(body.request_id), 'request_digest': request_digest, 'result': result, 'created_at': datetime.now(timezone.utc)})
@@ -528,7 +567,7 @@ def sync_statement_metadata(db, body: StatementProfileWrite):
     """Metadata typed on one statement row. Amount and date of that row stay put."""
     targets = _targets_for_transaction(db, body.transaction_id)
     if not targets:
-        return {'persisted': True, 'updated': 0, 'linked': []}
+        return {'persisted': True, 'request_id': str(body.request_id), 'updated': 0, 'linked': []}
     provided = _provided_fields(body)
     fields = {}
     for key in ('vendedor', 'natureza', 'categoria', 'subcategoria', 'plataforma', 'metodo_pagamento'):
