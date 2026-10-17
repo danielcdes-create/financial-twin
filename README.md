@@ -82,7 +82,9 @@ No computador atual, a tarefa do Windows **Financial Twin Backend** inicia `scri
 
 O Android recebe prints pela opção de compartilhar imagem de outros apps. A leitura pela xAI depende de um toque explícito e todos os campos permanecem editáveis. Nenhuma análise cria lançamento financeiro. Contratos, premissas, testes e recuperação: [PURCHASE-CHECK.md](docs/PURCHASE-CHECK.md).
 
-Release privado atual: **1.20.63 / versionCode 109**, [APK ARM64](mobile/artifacts/financial-twin-1.20.63.apk). SHA256: `604AE6BE0A631C0038A754AB697D4B49BB4B6F0DF2872D7FB18246E2FEAE3581`. Registro gerado do manifesto validado; homologação física consta do relatório da entrega.
+Release privado atual: **1.20.64 / versionCode 110**, [APK ARM64](mobile/artifacts/financial-twin-1.20.64.apk). SHA256: `BC8B3B7A3DBD74E9F7D511D2AC2FC59F76246C371FF4EA0133B9E00B9E67F5C0`. Registro gerado do manifesto validado; homologação física consta do relatório da entrega.
+
+Histórico preservado (registro anterior): **1.20.63 / versionCode 109**, [APK ARM64](mobile/artifacts/financial-twin-1.20.63.apk). SHA256: `604AE6BE0A631C0038A754AB697D4B49BB4B6F0DF2872D7FB18246E2FEAE3581`. Registro gerado do manifesto validado; homologação física consta do relatório da entrega.
 
 Histórico preservado (registro anterior): **1.20.62 / versionCode 108**, [APK ARM64](mobile/artifacts/financial-twin-1.20.62.apk). SHA256: `46F2B34D4D422786D1D112DE4440BDAC54AB1AB2D4F1EE3EBF44DCBAB2D190AC`. Registro gerado do manifesto validado; homologação física consta do relatório da entrega.
 
