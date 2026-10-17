@@ -83,7 +83,7 @@ const forbid = text => {
   for (const token of ['AAAA-MM-DD', 'parcela(s)', 'horizonte', 'assumido', 'não alcançada']) assert.equal(text.includes(token), false, token);
   assert.equal(/\d{4}-\d{2}-\d{2}/.test(text), false, 'ISO date printed on the screen');
 };
-const saoPauloIso = date => new Intl.DateTimeFormat('en-CA', {timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit'}).format(date);
+const saoPauloIso = date => { const map = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit'}).formatToParts(date).map(part => [part.type, part.value])); return `${map.year}-${map.month}-${map.day}`; };
 const [year, month, day] = saoPauloIso(new Date()).split('-').map(Number);
 const futureIso = new Date(Date.UTC(year, month - 1, day + 10)).toISOString().slice(0, 10);
 const futureDisplay = futureIso.split('-').reverse().join('/');
@@ -91,9 +91,12 @@ const horizon = {start: '2026-10-15', end: '2027-01-13', days: 90, minimum_month
 const context = {horizon, flows: [
   {id: 'commitment:card-azul:2026-11-10', date: '2026-11-10', amount: '-50.00', label: 'Mensalidade', source_ref: 'commitment:card-azul:2026-11-10'},
   {id: 'commitment:card-azul:2026-12-10', date: '2026-12-10', amount: '-50.00', label: 'Mensalidade', source_ref: 'commitment:card-azul:2026-12-10'},
+  {id: 'commitment:installment:plan-ml:1-2:2026-11-05', date: '2026-11-05', amount: '-80.00', label: 'Mercado Livre', source_ref: 'commitment:installment:plan-ml:1-2:2026-11-05'},
+  {id: 'commitment:installment:plan-ml:2-3:2026-12-05', date: '2026-12-05', amount: '-80.00', label: 'Mercado Livre', source_ref: 'commitment:installment:plan-ml:2-3:2026-12-05'},
   {id: 'commitment:claro:2026-01-31', date: '2026-01-31', amount: '-182.80', label: 'Claro', source_ref: 'commitment:claro:2026-01-31'},
 ], suggested_flows: [
   {id: 'obligation:fin', date: '2026-11-20', amount: '-10.00', label: 'financiamento · 2026-11', source_ref: 'obligation:fin'},
+  {id: 'obligation:fin-dec', date: '2026-12-20', amount: '-10.00', label: 'financiamento · 2026-12', source_ref: 'obligation:fin-dec'},
 ], gaps: [], excluded_sources: []};
 const scenario = (name, total, minimum, outside, breach = null) => ({name, purchase_total: total, minimum_balance: minimum, outside_horizon_total: outside, first_reserve_breach: breach});
 const resultFor = count => ({
@@ -141,27 +144,47 @@ const resultFor = count => ({
   assert.equal(opened.includes('Fatura do cartão'), false);
   assert.equal(checked('Mensalidade, 10/11/2026'), true);
   assert.equal(checked('Mensalidade, 10/12/2026'), true);
+  assert.equal(checked('Mercado Livre, 05/11/2026'), true);
+  assert.equal(checked('Mercado Livre, 05/12/2026'), true);
   assert.equal(checked('Claro, 31/01/2026'), true);
   assert.equal(checked('Financiamento · 11/2026, 20/11/2026'), false);
-  for (const label of ['Mensalidade, 10/11/2026', 'Mensalidade, 10/12/2026', 'Claro, 31/01/2026']) {
-    await act(async () => {await checkbox(label).props.onPress();});
-  }
+  assert.equal(checked('Financiamento · 12/2026, 20/12/2026'), false);
+  await pressExact('Limpar seleção de Mensalidade');
   assert.equal(checked('Mensalidade, 10/11/2026'), false);
-  assert.equal(checked('Claro, 31/01/2026'), false);
-  await pressExact('Selecionar Todos de Mensalidade');
-  assert.equal(checked('Mensalidade, 10/11/2026'), true);
-  assert.equal(checked('Mensalidade, 10/12/2026'), true);
-  assert.equal(checked('Claro, 31/01/2026'), false);
-  assert.equal(checked('Financiamento · 11/2026, 20/11/2026'), false);
-  await pressExact('Selecionar Todos os compromissos');
-  assert.equal(checked('Mensalidade, 10/11/2026'), true);
-  assert.equal(checked('Mensalidade, 10/12/2026'), true);
+  assert.equal(checked('Mensalidade, 10/12/2026'), false);
+  assert.equal(checked('Mercado Livre, 05/11/2026'), true);
   assert.equal(checked('Claro, 31/01/2026'), true);
-  assert.equal(checked('Financiamento · 11/2026, 20/11/2026'), false);
-  await act(async () => {await checkbox('Financiamento · 11/2026, 20/11/2026').props.onPress();});
+  await pressExact('Selecionar todo o Compromisso de Mensalidade');
+  assert.equal(checked('Mensalidade, 10/11/2026'), true);
+  assert.equal(checked('Mensalidade, 10/12/2026'), true);
+  await pressExact('Limpar seleção de Mercado Livre');
+  assert.equal(checked('Mercado Livre, 05/11/2026'), false);
+  assert.equal(checked('Mercado Livre, 05/12/2026'), false);
+  await pressExact('Selecionar todo o Compromisso de Mercado Livre');
+  assert.equal(checked('Mercado Livre, 05/11/2026'), true);
+  assert.equal(checked('Mercado Livre, 05/12/2026'), true);
+  await pressExact('Selecionar todo o Compromisso de Financiamento');
   assert.equal(checked('Financiamento · 11/2026, 20/11/2026'), true);
-  await act(async () => {await checkbox('Financiamento · 11/2026, 20/11/2026').props.onPress();});
+  assert.equal(checked('Financiamento · 12/2026, 20/12/2026'), true);
+  await pressExact('Limpar seleção de Financiamento');
   assert.equal(checked('Financiamento · 11/2026, 20/11/2026'), false);
+  assert.equal(checked('Financiamento · 12/2026, 20/12/2026'), false);
+  await pressExact('Limpar seleção');
+  assert.equal(checked('Mensalidade, 10/11/2026'), false);
+  assert.equal(checked('Mensalidade, 10/12/2026'), false);
+  assert.equal(checked('Mercado Livre, 05/11/2026'), false);
+  assert.equal(checked('Claro, 31/01/2026'), false);
+  assert.equal(checked('Financiamento · 11/2026, 20/11/2026'), false);
+  await pressExact('Selecionar Tudo');
+  assert.equal(checked('Mensalidade, 10/11/2026'), true);
+  assert.equal(checked('Mensalidade, 10/12/2026'), true);
+  assert.equal(checked('Mercado Livre, 05/11/2026'), true);
+  assert.equal(checked('Claro, 31/01/2026'), true);
+  assert.equal(checked('Financiamento · 11/2026, 20/11/2026'), true);
+  assert.equal(checked('Financiamento · 12/2026, 20/12/2026'), true);
+  await pressExact('Limpar seleção de Financiamento');
+  assert.equal(checked('Financiamento · 11/2026, 20/11/2026'), false);
+  assert.equal(checked('Financiamento · 12/2026, 20/12/2026'), false);
   assert.match(field('Data do primeiro pagamento').props.value, /^\d{2}\/\d{2}\/\d{4}$/);
   forbid(opened);
   await input('Data do primeiro pagamento', futureDisplay);

@@ -2,9 +2,9 @@
 
 ## Lista, renda e parcelas dentro do período — 17/10/2026
 
-Em **Cabe na minha vida?**, cada compromisso ativo do período entra como linhas com nome, data e valor, inclusive o que é pago no cartão. A fatura consolidada (`fatura_cartao` ou `fatura`) não aparece nessa lista. O planejamento geral (`/v1/insights/planning-context`) continua sem repetir a compra do cartão quando a fatura é a saída de caixa, e continua oferecendo a fatura para conferência.
+Em **Cabe na minha vida?**, cada compromisso ativo do período entra como linhas com nome, data e valor, inclusive o que é pago no cartão e as compras parceladas (`installment_plans` e `parcelamento`). A fatura consolidada (`fatura_cartao` ou `fatura`) não aparece nessa lista. O planejamento geral (`/v1/insights/planning-context`) continua sem repetir a compra do cartão quando a fatura é a saída de caixa, e continua oferecendo a fatura para conferência.
 
-A lista tem **Selecionar Todos** para as ocorrências de um compromisso e **Selecionar Todos** para todos os compromissos listados. Cada linha continua podendo ser marcada sozinha. Obrigações importadas que não são fatura de cartão permanecem desmarcadas até o toque.
+A lista tem **Selecionar Tudo** e **Limpar seleção** no topo para todos os compromissos listados, e em cada compromisso (incluindo **Financiamento**, assinaturas e compras parceladas) os botões **Selecionar todo o Compromisso** e **Limpar seleção**. Cada linha continua podendo ser marcada sozinha. Obrigações importadas que não são fatura de cartão permanecem desmarcadas até o toque.
 
 Se a renda líquida mensal está preenchida, o menor saldo da compra soma essa renda uma vez em cada mês civil do período, junto com o saldo inicial, os compromissos marcados e as parcelas do cenário. Sem renda, o saldo usa só o saldo inicial, os compromissos e as parcelas. A renda não entra no simulador geral de 90 dias.
 
@@ -27,7 +27,7 @@ Funcionalidade implementada em 29/09/2026. Entrada: **Mais → Cabe na minha vid
 1. Escolher um print PNG/JPEG ou preencher preço e parcelas manualmente.
 2. Se desejado, tocar em **Ler print com xAI**. A imagem só é enviada nesse momento. Conferir e corrigir o preço total, número de parcelas e data do primeiro pagamento.
 3. Informar premissas opcionais: saldo inicial, reserva, renda líquida, horas de trabalho e uma meta com aporte mensal.
-4. Conferir os compromissos previstos. Cada compromisso ativo, inclusive o pago no cartão, aparece com nome, data e valor. A fatura consolidada do cartão fica de fora. Obrigações importadas que não são essa fatura começam desmarcadas. **Selecionar Todos** marca um compromisso ou todos os compromissos da lista.
+4. Conferir os compromissos previstos. Cada compromisso ativo, inclusive o pago no cartão e as compras parceladas, aparece com nome, data e valor. A fatura consolidada do cartão fica de fora. Obrigações importadas que não são essa fatura começam desmarcadas. **Selecionar Tudo** e **Limpar seleção** controlam a lista inteira, e **Selecionar todo o Compromisso** e **Limpar seleção** controlam cada compromisso individualmente (inclusive **Financiamento**).
 5. Avaliar horas de trabalho, caixa no período de pelo menos número de parcelas + 1 mês (mínimo de 90 dias) e eventual adiamento da meta. Comparar comprar agora, esperar 30 dias e uma alternativa 20% mais barata.
 6. Abrir a prévia do cartão. No Android, compartilhar a imagem pela folha nativa; no desktop, salvar o PNG.
 

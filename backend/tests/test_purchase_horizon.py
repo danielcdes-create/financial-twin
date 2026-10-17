@@ -169,6 +169,73 @@ class PurchaseHorizonTests(unittest.TestCase):
             app.dependency_overrides.pop(require_session, None)
             app.dependency_overrides.pop(database, None)
 
+    def test_purchase_context_includes_installment_plans_and_current_month_unlinked_commitments(self):
+        commitments = Mock()
+        commitments.find.return_value = [{
+            'commitment_id': 'parcel-oct', 'kind': 'parcelamento', 'name': 'Notebook Parcelado',
+            'status': 'ativo', 'purchase_date': '2026-09-10', 'next_due_date': '2026-10-10',
+            'amount': '250.00', 'frequency': 'mensal', 'installment_count': 3,
+            'next_installment_number': 1, 'payment_method': 'cartao', 'card_id': 'card-1',
+            'renewal_status': 'nao_aplicavel', 'linked_transactions': [],
+        }]
+        installment_plans = Mock()
+        installment_plans.find.return_value = [{
+            '_id': 'plan-ml', 'descricao': 'Mercado Livre', 'status': 'ativo', 'numero_parcelas': 4,
+            'data_compra': '2026-08-05',
+            'installments': [
+                {'numero': 1, 'competencia': '2026-09', 'valor': '80.00', 'status': 'paga', 'transaction_id': 'tx-1'},
+                {'numero': 2, 'competencia': '2026-10', 'valor': '80.00', 'status': 'projetada'},
+                {'numero': 3, 'competencia': '2026-11', 'data_vencimento': '2026-11-05', 'valor': '80.00', 'status': 'projetada'},
+                {'numero': 4, 'competencia': '2026-12', 'valor': '80.00', 'status': 'cancelada'},
+            ],
+        }]
+        obligations = Mock()
+        obligations.find.return_value = [
+            {'_id': 'dup-plan', 'tipo': 'parcelamento', 'origem_id': 'plan-ml',
+             'competencia': '2026-11', 'data_vencimento': '2026-11-05', 'saldo_aberto': '80.00'},
+            {'_id': 'fin-oct', 'tipo': 'financiamento', 'competencia': '2026-10',
+             'data_vencimento': '2026-10-11', 'saldo_aberto': '3716.63'},
+        ]
+        overrides = Mock(); overrides.find.return_value = []
+        db = SimpleNamespace(
+            commitments=commitments,
+            installment_plans=installment_plans,
+            obligations=obligations,
+            future_schedule_overrides=overrides,
+        )
+        app.dependency_overrides[require_session] = lambda: True
+        app.dependency_overrides[database] = lambda: db
+        try:
+            with patch('app.insights.mongo_snapshot', return_value=nullcontext((db, 'test'))), \
+                 patch('app.insights.account_positions', return_value=[]):
+                client = TestClient(app)
+                response = client.get('/v1/insights/purchase-context?start=2026-10-17&installments=6&first_payment=2026-10-17')
+                self.assertEqual(response.status_code, 200)
+                context = response.json()
+                notebook_rows = [row for row in context['flows'] if row['label'] == 'Notebook Parcelado']
+                self.assertEqual(len(notebook_rows), 3)
+                self.assertEqual(notebook_rows[0]['date'], '2026-10-17')
+                self.assertEqual(notebook_rows[0]['original_due_date'], '2026-10-10')
+                self.assertTrue(notebook_rows[0]['overdue'])
+                ml_rows = [row for row in context['flows'] if row['label'] == 'Mercado Livre']
+                self.assertEqual(len(ml_rows), 2)
+                self.assertTrue(all(row['id'].startswith('commitment:installment:plan-ml:') for row in ml_rows))
+                self.assertEqual([row['date'] for row in ml_rows], ['2026-10-17', '2026-11-05'])
+                self.assertEqual([row['id'] for row in context['suggested_flows']], ['obligation:fin-oct'])
+                # Ensure all flows returned by purchase-context are accepted by PurchaseCheckInput
+                checked = assess_purchase(PurchaseCheckInput.model_validate({
+                    'start': '2026-10-17', 'first_payment': '2026-10-17',
+                    'price': '500.00', 'installments': 6, 'opening_balance': '10000.00',
+                    'flows': [
+                        {k: row[k] for k in ('id', 'source_ref', 'date', 'amount', 'label', 'account_key', 'certainty') if k in row}
+                        for row in context['flows'] + context['suggested_flows']
+                    ],
+                }))
+                self.assertEqual(checked['execution'], 'none')
+        finally:
+            app.dependency_overrides.pop(require_session, None)
+            app.dependency_overrides.pop(database, None)
+
 
 if __name__ == '__main__':
     unittest.main()

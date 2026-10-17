@@ -28,10 +28,21 @@ const civilTodayIso = () => { const parts = new Intl.DateTimeFormat('en-CA', {ti
 const decimal = (value: string) => requireMoneyInput(value);
 const money = (value: string | null | undefined) => value == null ? '—' : Number(value).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
 const isObligationRow = (row: {id?: string}) => String(row?.id || '').startsWith('obligation:');
-const commitmentGroupKey = (row: {id?: string}) => {
+const commitmentGroupName = (rows: any[]) => {
+  const first = formatPurchaseFlowLabel(rows[0]?.label);
+  return first.split('·')[0].trim() || first || 'Compromisso';
+};
+const commitmentGroupKey = (row: {id?: string; label?: string}) => {
   const id = String(row?.id || '');
+  const installmentMatch = /^commitment:(installment:[^:]+):.+:\d{4}-\d{2}-\d{2}$/.exec(id);
+  if (installmentMatch) return installmentMatch[1];
   const match = /^commitment:(.+):\d{4}-\d{2}-\d{2}$/.exec(id);
-  return match ? match[1] : `row:${id}`;
+  if (match) return `commitment:${match[1]}`;
+  if (id.startsWith('obligation:')) {
+    const base = formatPurchaseFlowLabel(row?.label).split('·')[0].trim();
+    return `obligation:${base || id}`;
+  }
+  return `row:${id}`;
 };
 const groupCommitmentRows = (rows: any[]) => {
   const groups: {key: string; rows: any[]}[] = [];
@@ -146,12 +157,15 @@ export default function PurchaseCheck({api:request,upload:uploadRequest,onBack,s
   const contextCopy=visibleContext?summarizePlanningContext(visibleContext,{includeProfiles:false}):null;
   const commitmentRows=visibleContext?.flows||[];
   const obligationRows=[...(visibleContext?.suggested_flows||[])].sort((a:any,b:any)=>String(a.date).localeCompare(String(b.date))||String(a.label).localeCompare(String(b.label)));
+  const allRows=[...commitmentRows,...obligationRows];
   const commitmentGroups=groupCommitmentRows(commitmentRows);
-  const markRows=(rows:any[])=>{
+  const obligationGroups=groupCommitmentRows(obligationRows);
+  const allGroups=[...commitmentGroups,...obligationGroups];
+  const markRows=(rows:any[],value=true)=>{
     inputRevision.current++;
     setSelected(previous=>{
       const next={...previous};
-      for (const row of rows) next[row.id]=true;
+      for (const row of rows) next[row.id]=value;
       return next;
     });
     setResult(null);setShareVisible(false);
@@ -193,7 +207,7 @@ export default function PurchaseCheck({api:request,upload:uploadRequest,onBack,s
       {!validWindow&&<Text style={s.note}>Informe de 1 a 60 parcelas e o primeiro pagamento, de hoje em diante, como dd/mm/aaaa.</Text>}
       {!ready&&<Text style={s.note}>Conecte ao servidor para carregar os compromissos.</Text>}
       {!!contextError&&<><Text accessibilityRole="alert" style={s.error}>{contextError}</Text><Action label="Tentar carregar compromissos novamente" disabled={busy} onPress={()=>{setContext(null);setContextRetry(value=>value+1)}}/></>}
-      {visibleContext&&contextCopy&&<><Text style={s.label}>{purchaseHorizonSubtitle(visibleContext.horizon)}</Text><Text style={s.note}>{contextCopy.summary}</Text>{contextCopy.notices.map((notice:string,index:number)=><Text key={`notice:${index}`} style={s.note}>{notice}</Text>)}{commitmentRows.length>0&&<Pressable accessibilityRole="button" accessibilityLabel="Selecionar Todos os compromissos" disabled={false} onPress={()=>markRows(commitmentRows)} style={s.selectAll}><Text style={s.link}>Selecionar Todos</Text></Pressable>}{commitmentGroups.map(group=>{const name=formatPurchaseFlowLabel(group.rows[0].label);return <View key={group.key}>{group.rows.length>0&&<Pressable accessibilityRole="button" accessibilityLabel={`Selecionar Todos de ${name}`} disabled={false} onPress={()=>markRows(group.rows)} style={s.selectAll}><Text style={s.link}>Selecionar Todos</Text></Pressable>}{group.rows.map(flowRow)}</View>})}{obligationRows.map(flowRow)}</>}
+      {visibleContext&&contextCopy&&<><Text style={s.label}>{purchaseHorizonSubtitle(visibleContext.horizon)}</Text><Text style={s.note}>{contextCopy.summary}</Text>{contextCopy.notices.map((notice:string,index:number)=><Text key={`notice:${index}`} style={s.note}>{notice}</Text>)}{allRows.length>0&&<View style={s.bulkRow}><Pressable accessibilityRole="button" accessibilityLabel="Selecionar Tudo" disabled={false} onPress={()=>markRows(allRows,true)} style={s.selectAll}><Text style={s.link}>Selecionar Tudo</Text></Pressable><Pressable accessibilityRole="button" accessibilityLabel="Limpar seleção" disabled={false} onPress={()=>markRows(allRows,false)} style={s.selectAll}><Text style={s.clearLink}>Limpar seleção</Text></Pressable></View>}{allGroups.map(group=>{const name=commitmentGroupName(group.rows);return <View key={group.key} style={s.group}><View style={s.bulkRow}><Pressable accessibilityRole="button" accessibilityLabel={`Selecionar todo o Compromisso de ${name}`} disabled={false} onPress={()=>markRows(group.rows,true)} style={s.selectAll}><Text style={s.link}>Selecionar todo o Compromisso</Text></Pressable><Pressable accessibilityRole="button" accessibilityLabel={`Limpar seleção de ${name}`} disabled={false} onPress={()=>markRows(group.rows,false)} style={s.selectAll}><Text style={s.clearLink}>Limpar seleção</Text></Pressable></View>{group.rows.map(flowRow)}</View>})}</>}
     </View>
     <Action label="Ver impacto da compra" disabled={busy||!price||!ready||!validWindow||!visibleContext} onPress={assess}/>
     <DiscardDraftAction disabled={busy} light label="Excluir rascunho da análise" onDiscard={discardForm} message="Os dados preenchidos, o print selecionado e a análise desta compra serão removidos da tela. Seus registros salvos continuam preservados." />
@@ -215,4 +229,4 @@ export default function PurchaseCheck({api:request,upload:uploadRequest,onBack,s
   </View></FormBusy.Provider>;
 }
 
-const s=StyleSheet.create({container:{gap:12,padding:16,paddingBottom:28,borderRadius:18,backgroundColor:'#EDF5F4'},title:{fontSize:25,fontWeight:'800',color:'#133E43'},note:{fontSize:13,lineHeight:19,color:'#54666C'},error:{color:'#B42318',fontSize:14},card:{backgroundColor:'#FFFFFF',borderRadius:16,padding:16,gap:9,borderWidth:1,borderColor:'#D9E7E7'},heading:{fontSize:17,fontWeight:'700',color:'#173F43'},field:{gap:5},label:{fontSize:14,fontWeight:'600',color:'#25494C'},input:{borderWidth:1,borderColor:'#B8CDCE',borderRadius:9,paddingHorizontal:12,paddingVertical:10,color:'#173F43',backgroundColor:'#FFF',fontSize:15},action:{backgroundColor:'#136D67',borderRadius:11,paddingVertical:12,paddingHorizontal:16,alignItems:'center'},actionText:{color:'#FFFFFF',fontSize:14,fontWeight:'700'},disabled:{opacity:.5},preview:{width:'100%',height:190,backgroundColor:'#F3F6F6',borderRadius:9},flow:{borderTopWidth:1,borderColor:'#E4EEEE',paddingVertical:8,gap:2},selectAll:{alignSelf:'flex-start',minHeight:44,justifyContent:'center'},link:{color:'#136D67',fontSize:14,fontWeight:'700'},result:{fontSize:18,fontWeight:'700',color:'#124D4A'},priceBlock:{backgroundColor:'#F4FBFA',borderRadius:12,padding:12,gap:2},alternative:{backgroundColor:'#F7FBFB',borderRadius:12,padding:12,gap:4,borderWidth:1,borderColor:'#D5E6E4'},alternativeTitle:{fontSize:16,fontWeight:'700',color:'#124D4A'},alternativeBody:{fontSize:15,lineHeight:22,color:'#173F43'},shareCard:{backgroundColor:'#143F46',borderRadius:20,padding:24,gap:10,minHeight:250,justifyContent:'center'},shareBrand:{color:'#71D8C6',fontWeight:'800',letterSpacing:2,fontSize:12},shareTitle:{color:'#FFF',fontSize:21,fontWeight:'800'},sharePrice:{color:'#FFF',fontSize:27,fontWeight:'800'},shareFact:{color:'#D1F1EA',fontSize:19,fontWeight:'700'},shareFoot:{color:'#B7C9C9',fontSize:11,marginTop:14}});
+const s=StyleSheet.create({container:{gap:12,padding:16,paddingBottom:28,borderRadius:18,backgroundColor:'#EDF5F4'},title:{fontSize:25,fontWeight:'800',color:'#133E43'},note:{fontSize:13,lineHeight:19,color:'#54666C'},error:{color:'#B42318',fontSize:14},card:{backgroundColor:'#FFFFFF',borderRadius:16,padding:16,gap:9,borderWidth:1,borderColor:'#D9E7E7'},heading:{fontSize:17,fontWeight:'700',color:'#173F43'},field:{gap:5},label:{fontSize:14,fontWeight:'600',color:'#25494C'},input:{borderWidth:1,borderColor:'#B8CDCE',borderRadius:9,paddingHorizontal:12,paddingVertical:10,color:'#173F43',backgroundColor:'#FFF',fontSize:15},action:{backgroundColor:'#136D67',borderRadius:11,paddingVertical:12,paddingHorizontal:16,alignItems:'center'},actionText:{color:'#FFFFFF',fontSize:14,fontWeight:'700'},disabled:{opacity:.5},preview:{width:'100%',height:190,backgroundColor:'#F3F6F6',borderRadius:9},flow:{borderTopWidth:1,borderColor:'#E4EEEE',paddingVertical:8,gap:2},group:{borderTopWidth:1,borderColor:'#CFE2E0',paddingTop:6,marginTop:4},bulkRow:{flexDirection:'row',flexWrap:'wrap',alignItems:'center',gap:16},selectAll:{alignSelf:'flex-start',minHeight:44,justifyContent:'center'},link:{color:'#136D67',fontSize:14,fontWeight:'700'},clearLink:{color:'#54666C',fontSize:14,fontWeight:'700'},result:{fontSize:18,fontWeight:'700',color:'#124D4A'},priceBlock:{backgroundColor:'#F4FBFA',borderRadius:12,padding:12,gap:2},alternative:{backgroundColor:'#F7FBFB',borderRadius:12,padding:12,gap:4,borderWidth:1,borderColor:'#D5E6E4'},alternativeTitle:{fontSize:16,fontWeight:'700',color:'#124D4A'},alternativeBody:{fontSize:15,lineHeight:22,color:'#173F43'},shareCard:{backgroundColor:'#143F46',borderRadius:20,padding:24,gap:10,minHeight:250,justifyContent:'center'},shareBrand:{color:'#71D8C6',fontWeight:'800',letterSpacing:2,fontSize:12},shareTitle:{color:'#FFF',fontSize:21,fontWeight:'800'},sharePrice:{color:'#FFF',fontSize:27,fontWeight:'800'},shareFact:{color:'#D1F1EA',fontSize:19,fontWeight:'700'},shareFoot:{color:'#B7C9C9',fontSize:11,marginTop:14}});

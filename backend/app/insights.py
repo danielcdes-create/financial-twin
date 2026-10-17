@@ -4,7 +4,7 @@ Writes are additive, atomic and revision checked. No bank execution or messages.
 """
 from app.commitment_estimates import effective_commitments
 
-import asyncio, hashlib, json
+import asyncio, calendar, hashlib, json
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Literal
@@ -25,7 +25,7 @@ from app.purchase_horizon import purchase_horizon
 from app.services.ai.xai.provider import XAIVisionProvider, XAIError, public_xai_error
 from app.pagination import page
 from app.account_positions import account_positions, account_key_for_legacy
-from app.commitments import schedule_from, as_date, historical_occurrence_conflicts
+from app.commitments import commitment_cutoff, linked_due_dates, schedule_from, as_date, historical_occurrence_conflicts
 from app.future_commitments import effective_documents
 from app.economic_period import economic_rows, economic_basis
 from app.obligation_policy import OPEN_OBLIGATION_STATUSES
@@ -177,6 +177,7 @@ _OBLIGATION_LABELS = {
     'fatura_cartao': 'Fatura do cartão',
     'fatura': 'Fatura do cartão',
     'financiamento': 'Financiamento',
+    'parcelamento': 'Compra parcelada',
     'emprestimo': 'Empréstimo',
     'imposto': 'Imposto / tributo',
     'boleto': 'Boleto',
@@ -185,7 +186,9 @@ _OBLIGATION_LABELS = {
 
 def _obligation_display_label(obligation: dict, due: date) -> str:
     raw_type = str(obligation.get('tipo') or 'Obrigação').strip()
-    kind_label = _OBLIGATION_LABELS.get(raw_type.lower(), raw_type.replace('_', ' ').capitalize())
+    profile = obligation.get('profile') if isinstance(obligation.get('profile'), dict) else {}
+    custom = str(profile.get('display_name') or obligation.get('display_name') or (obligation.get('descricao') if raw_type.lower() in {'parcelamento', 'obrigacao'} else '') or '').strip()
+    kind_label = custom or _OBLIGATION_LABELS.get(raw_type.lower(), raw_type.replace('_', ' ').capitalize())
     comp = str(obligation.get('competencia') or '').strip()
     if len(comp) == 7 and comp[4] == '-':
         period_label = f'{comp[5:7]}/{comp[0:4]}'
@@ -195,6 +198,8 @@ def _obligation_display_label(obligation: dict, due: date) -> str:
 
 def _planning_context(start:date,end:date,db,purchase:bool=False):
     flows=[];excluded=[];suggestions=[]
+    cutoff = commitment_cutoff(start)
+    seek = min(start, cutoff) if (purchase and start >= cutoff) else start
     with mongo_snapshot(db) as (reading,consistency):
         positions=account_positions(reading)
         account_keys={p['legacy_account_id']:p['key'] for p in positions if p.get('legacy_account_id')}
@@ -213,20 +218,86 @@ def _planning_context(start:date,end:date,db,purchase:bool=False):
             key=reference.removeprefix('profile:') if reference.startswith('profile:') else account_keys.get(reference)
             # Old weekly subscriptions can need more than 600 occurrences to
             # reach a multiyear purchase horizon. Do not silently truncate them.
-            next_due=start
-            count=max(600,(end-next_due).days//7+2) if commitment['frequency']=='semanal' else max(600,(end.year-next_due.year)*12+end.month-next_due.month+2)
-            for occurrence in schedule_from(commitment,start,count):
+            count=max(600,(end-seek).days//7+2) if commitment['frequency']=='semanal' else max(600,(end.year-seek.year)*12+end.month-seek.month+2)
+            if commitment.get('kind')=='parcelamento':
+                count=max(count,int(commitment.get('installment_count') or 0))
+            linked=linked_due_dates(commitment)
+            label=str(commitment.get('display_name') or commitment.get('name') or 'Compromisso').strip() or 'Compromisso'
+            for occurrence in schedule_from(commitment,seek,count):
                 due=date.fromisoformat(occurrence['due_date'])
-                if start<=due<=end:
-                    identity=f'commitment:{commitment["commitment_id"]}:{due}'
-                    flows.append({'id':identity,'source_ref':identity,'date':due.isoformat(),'amount':money(-Decimal(str(occurrence['amount']))),'label':commitment['name'],'account_key':key,'certainty':'assumed'})
+                if due.isoformat() in linked:
+                    continue
+                if seek<=due<=end:
+                    effective_due=max(start,due)
+                    identity=f'commitment:{commitment["commitment_id"]}:{due.isoformat()}'
+                    flows.append({'id':identity,'source_ref':identity,'date':effective_due.isoformat(),**({'original_due_date':due.isoformat(),'overdue':True} if due<start else {}),'amount':money(-Decimal(str(occurrence['amount']))),'label':label,'account_key':key,'certainty':'assumed'})
+        plan_ids=set()
+        if purchase and getattr(reading,'installment_plans',None) is not None:
+            raw_plans=list(reading.installment_plans.find({'status':'ativo'}))
+            if raw_plans:
+                plans=effective_documents(reading,'installment',raw_plans)
+                try:
+                    from app.installment_cards import attach_cards
+                    plans=attach_cards(reading,plans)
+                except Exception:
+                    pass
+                plan_ids={str(item['_id']) for item in plans if item.get('_id') is not None}
+                for item in plans:
+                    name=str(item.get('display_name') or item.get('descricao') or 'Compra parcelada').strip() or 'Compra parcelada'
+                    if str(item.get('moeda') or 'BRL').upper()!='BRL':
+                        excluded.append({'ref':f'installment:{item["_id"]}','label':name,'reason':'Moeda diferente de BRL; fora da projeção em reais.'})
+                        continue
+                    reference=str(item.get('account_id') or '')
+                    key=reference.removeprefix('profile:') if reference.startswith('profile:') else account_keys.get(reference)
+                    anchor_day=1
+                    for candidate in item.get('installments') or []:
+                        if candidate.get('data_vencimento') or candidate.get('due_date'):
+                            anchor_day=as_date(candidate.get('data_vencimento') or candidate['due_date']).day
+                            break
+                    else:
+                        if item.get('data_compra'):
+                            try:anchor_day=as_date(item['data_compra']).day
+                            except Exception:anchor_day=1
+                    for idx,part in enumerate(item.get('installments') or [],1):
+                        if part.get('status')!='projetada' or part.get('future_excluded') or part.get('transaction_id') or part.get('bill_id') or part.get('payment_link'):
+                            continue
+                        value=amount(part.get('valor'))
+                        if not value or value<=0:
+                            continue
+                        if part.get('data_vencimento') or part.get('due_date'):
+                            due=as_date(part.get('data_vencimento') or part['due_date'])
+                            if due<seek or due>end:
+                                continue
+                        else:
+                            comp=str(part.get('competencia') or '').strip()
+                            if len(comp)==7 and comp[4]=='-' and comp[:4].isdigit() and comp[5:].isdigit() and 1<=int(comp[5:])<=12:
+                                if comp<seek.strftime('%Y-%m') or comp>end.strftime('%Y-%m'):
+                                    continue
+                                year,month_num=int(comp[:4]),int(comp[5:])
+                                due=date(year,month_num,min(anchor_day,calendar.monthrange(year,month_num)[1]))
+                                if due>end:due=end
+                            else:
+                                continue
+                        effective_due=max(start,due)
+                        part_no=f'{idx}-{part.get("numero") or part.get("parcela_numero") or idx}'
+                        identity=f'commitment:installment:{item["_id"]}:{part_no}:{effective_due.isoformat()}'
+                        flows.append({'id':identity,'source_ref':identity,'date':effective_due.isoformat(),**({'original_due_date':due.isoformat(),'overdue':True} if due<start else {}),'amount':money(-value),'label':name,'account_key':key,'certainty':'assumed'})
         # Imported obligations are offered once and require explicit overlap/account review.
         # Due dates in the legacy schema are civil dates stored at UTC midnight.
         for obligation in effective_documents(reading, 'obligation', reading.obligations.find({'status':{'$in':list(OPEN_OBLIGATION_STATUSES)}})):
-            if obligation.get('future_excluded'): continue
+            if obligation.get('future_excluded') or obligation.get('payment_link'): continue
+            if str(obligation.get('origem_id')) in plan_ids and str(obligation.get('tipo') or '').lower() not in {'fatura_cartao', 'fatura'}: continue
             if purchase and str(obligation.get('tipo') or '').lower() in {'fatura_cartao', 'fatura'}: continue
-            if not obligation.get('data_vencimento'):continue
-            due=as_date(obligation['data_vencimento']);value=amount(obligation.get('saldo_aberto'))
+            if obligation.get('data_vencimento'):
+                due=as_date(obligation['data_vencimento'])
+            else:
+                comp=str(obligation.get('competencia') or '').strip()
+                if len(comp)==7 and comp[4]=='-' and comp[:4].isdigit() and comp[5:].isdigit() and 1<=int(comp[5:])<=12:
+                    if comp<seek.strftime('%Y-%m'):continue
+                    due=date(int(comp[:4]),int(comp[5:]),1)
+                else:
+                    continue
+            value=amount(obligation.get('saldo_aberto'))
             if not value or value<=0 or due>end:continue
             identity='obligation:'+str(obligation['_id'])
             suggestions.append({'id':identity,'source_ref':identity,'date':max(start,due).isoformat(),'original_due_date':due.isoformat(),'overdue':due<start,'amount':money(-value),'label':_obligation_display_label(obligation,due),'account_key':None,'certainty':'assumed'})

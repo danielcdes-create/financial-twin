@@ -37,6 +37,7 @@ const OBLIGATION_TYPE_LABELS: Record<string, string> = {
   fatura_cartao: 'Fatura do cartão',
   fatura: 'Fatura do cartão',
   financiamento: 'Financiamento',
+  parcelamento: 'Compra parcelada',
   emprestimo: 'Empréstimo',
   imposto: 'Imposto / tributo',
   boleto: 'Boleto',
@@ -50,7 +51,7 @@ export function purchaseGapSentence(gap: string): string {
 export function formatPurchaseFlowLabel(label: string | null | undefined): string {
   if (!label) return 'Compromisso';
   return String(label)
-    .replace(/^([a-z_]+)(?=\s*·)/i, match => OBLIGATION_TYPE_LABELS[match.toLowerCase()] || (match.charAt(0).toUpperCase() + match.slice(1).replace(/_/g, ' ')))
+    .replace(/^([a-z_]+)(?=\s*·)/i, match => OBLIGATION_TYPE_LABELS[match.toLowerCase()] || (match === match.toLowerCase() ? match.charAt(0).toUpperCase() + match.slice(1).replace(/_/g, ' ') : match))
     .replace(/\b(\d{4})-(\d{2})-(\d{2})\b/g, (_m, year: string, month: string, day: string) => `${day}/${month}/${year}`)
     .replace(/\b(\d{4})-(\d{2})\b/g, (_m, year: string, month: string) => `${month}/${year}`);
 }
