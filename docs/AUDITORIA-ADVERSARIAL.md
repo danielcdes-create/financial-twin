@@ -2,6 +2,22 @@
 
 Julgamento da árvore local de `financial-app` a partir de `431aaf5`, com a correção de contagem dupla desta entrega, commit `cc7f562`. Dados sintéticos. O ledger ao vivo não foi lido, escrito, deduplicado nem reparado. O release privado no disco é Android 1.20.63 / versionCode 109, SHA-256 `604AE6BE0A631C0038A754AB697D4B49BB4B6F0DF2872D7FB18246E2FEAE3581`, commit `c60f17a`, com o certificado de debug anterior. A instalação física permanece unverified.
 
+## Entrega 17/10/2026 — correções P0–P2
+
+Commit `a36867b`. O ledger ao vivo não foi lido nem escrito. Nesta passagem passaram 6 testes de perfil, 2 de corte, 15 de compromissos e 11 de projeção. A suíte completa do cliente e a homologação física não foram repetidas.
+
+| Correção | Veredito |
+| --- | --- |
+| Perfil não regrava extrato pago, vinculado ou protegido | defect fixed. Valor e data só alcançam o lançamento em aberto. Reclamação `ledger:<id>`, reconciliação e vínculo com `paid_date` ou `settled_next` bloqueiam a regravação. |
+| Limpeza de subcategoria, vendedor e plataforma | defect fixed. Subcategoria limpa sai por `$unset`. Trocar o vendedor limpa `merchant_id`. Trocar a plataforma limpa `platform_id`. |
+| Âncora do cadastro gerido | defect fixed. Nova data de vencimento grava `schedule_anchor_day` e `schedule_anchor_end`. |
+| Identidade da gravação | defect fixed. Perfil e compromisso futuro devolvem `request_id`. O perfil toma `lock_movement_insert`. |
+| Data-base da parcela | defect fixed. A agenda e o vínculo usam `base_due_date`. `settled_next` falso com `occurrence_key` não consome a ocorrência. A próxima cobrança avança pela data-base. |
+| Corte da projeção | defect fixed. A projeção mensal usa `commitment_cutoff` da data da consulta, não o relógio de hoje. O piso continua 2026-10-01. |
+| Data civil no cliente | held. Ano, mês e dia saem das partes de `America/Sao_Paulo`, para `Intl.format` não reordenar o dia. |
+| Fila local | held. O diário passa a guardar perfil, desfazer de compromisso e as rotas de pagamento. |
+| Classificação em revisão dentro da transação | defect fixed. O rollback não apaga o comando `needs_review`. Trocar a categoria de uma captura provisória incrementa `revision`. |
+
 Cada superfície recebe um veredito: `held`, `defect fixed`, `still open` ou `owner-blocked`. O que só um aparelho pode fechar fica `unverified`.
 
 | Superfície | Veredito |
@@ -10,7 +26,7 @@ Cada superfície recebe um veredito: `held`, `defect fixed`, `still open` ou `ow
 | Dinheiro e sinal | defect fixed |
 | Data civil `America/Sao_Paulo` | held |
 | Classificação armazenada | held |
-| Compromissos e corte fixo de pago assumido | held |
+| Compromissos e corte móvel de pago assumido | held |
 | Captura e fila local | held |
 | Cartões e contas | defect fixed |
 | Dashboard | defect fixed |
