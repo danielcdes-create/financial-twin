@@ -2,6 +2,17 @@
 
 Julgamento da árvore local de `financial-app` a partir de `431aaf5`, com a correção de contagem dupla desta entrega, commit `cc7f562`. Dados sintéticos. O ledger ao vivo não foi lido, escrito, deduplicado nem reparado. O release privado no disco é Android 1.20.67 / versionCode 113, SHA-256 `9C0F69848E950EF1D96DF13A0CABCAB62839F6A507BAF760846564628E040DA5`, commit `27cd105`, com o certificado de debug anterior. A instalação física permanece unverified.
 
+## Entrega 17/10/2026 — selo e esforço em Cabe na minha vida
+
+Commit do recurso `89ddc4a`. O ledger ao vivo não foi lido nem escrito. Nesta passagem passaram `mobile/scripts/test-purchase-copy.cjs`, `mobile/scripts/test-purchase-card.cjs`, `backend/tests/test_purchase_horizon.py` e `backend/tests/test_purchase_check.py`. A suíte completa do cliente e a homologação física não foram repetidas.
+
+| Correção | Veredito |
+| --- | --- |
+| Análise sem síntese no topo | defect fixed. **Sua análise** abre com um selo que cruza caixa, reserva mínima e efeito na meta. Sem saldo inicial, o selo fica no esforço e na meta. |
+| Esforço só em horas totais | defect fixed. A tela mostra a parcela mensal, os dias úteis de 8 horas, as horas de cada parcela e a renda-hora considerada. |
+| Alternativas sem destaque prático | defect fixed. O texto compara o saldo final com e sem a compra. Comprar agora, esperar 30 dias e a opção 20% mais barata ganham um destaque de parcela, fôlego ou economia. |
+| Cartão sem a parcela | defect fixed. O cartão leva preço, parcelas, horas, dias úteis e adiamento. Salário, saldo, dívida, produto, loja e nome da meta continuam de fora. Teste `test-purchase-card.cjs`. |
+
 ## Entrega 17/10/2026 — seleção e parcelas em Cabe na minha vida
 
 Commit do recurso `7f16fd3`, empacotado em `27cd105`. APK ARM64 de 48076468 bytes, SHA-256 `9C0F69848E950EF1D96DF13A0CABCAB62839F6A507BAF760846564628E040DA5`, assinante `FAC61745DC0903786FB9EDE62A962B399F7348F0BB6F899B8332667591033B9C`. O ledger ao vivo não foi lido nem escrito. Nesta passagem passaram `backend/tests/test_purchase_horizon.py` e `mobile/scripts/test-purchase-copy.cjs`. A suíte completa do cliente e a homologação física não foram repetidas.
