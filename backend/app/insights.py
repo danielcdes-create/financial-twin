@@ -171,7 +171,7 @@ def planning_context(start:date,end:date,db=Depends(database)):
 def purchase_context(start:date,first_payment:date,installments:int=Query(default=1,ge=1,le=60),db=Depends(database)):
     try:horizon=purchase_horizon(start,installments,first_payment)
     except ValueError as exc:raise HTTPException(422,str(exc)) from exc
-    return {**_planning_context(start,date.fromisoformat(horizon['end']),db),'horizon':horizon}
+    return {**_planning_context(start,date.fromisoformat(horizon['end']),db,purchase=True),'horizon':horizon}
 
 _OBLIGATION_LABELS = {
     'fatura_cartao': 'Fatura do cartão',
@@ -193,7 +193,7 @@ def _obligation_display_label(obligation: dict, due: date) -> str:
         period_label = due.strftime('%d/%m/%Y')
     return f'{kind_label} · {period_label}'
 
-def _planning_context(start:date,end:date,db):
+def _planning_context(start:date,end:date,db,purchase:bool=False):
     flows=[];excluded=[];suggestions=[]
     with mongo_snapshot(db) as (reading,consistency):
         positions=account_positions(reading)
@@ -204,7 +204,10 @@ def _planning_context(start:date,end:date,db):
             if historical_occurrence_conflicts(commitment):
                 excluded.append({'ref':'commitment:'+commitment['commitment_id'],'label':commitment.get('name') or 'Compromisso','reason':'Pagamento histórico contradiz a próxima ocorrência. Confira o histórico e a agenda antes de projetar caixa.'})
                 continue
-            if commitment.get('payment_method')=='cartao':
+            # Card purchases stay out of the shared planning context so a bill is not
+            # added twice. Cabe na minha vida lists each card commitment on its own
+            # due date and omits the consolidated invoice instead.
+            if commitment.get('payment_method')=='cartao' and not purchase:
                 excluded.append({'ref':'commitment:'+commitment['commitment_id'],'label':commitment.get('name') or 'Compromisso','reason':'Informe o vencimento da fatura para prever caixa; não duplicar compra e fatura.'});continue
             reference=str(commitment.get('account_id') or '')
             key=reference.removeprefix('profile:') if reference.startswith('profile:') else account_keys.get(reference)
@@ -221,6 +224,7 @@ def _planning_context(start:date,end:date,db):
         # Due dates in the legacy schema are civil dates stored at UTC midnight.
         for obligation in effective_documents(reading, 'obligation', reading.obligations.find({'status':{'$in':list(OPEN_OBLIGATION_STATUSES)}})):
             if obligation.get('future_excluded'): continue
+            if purchase and str(obligation.get('tipo') or '').lower() in {'fatura_cartao', 'fatura'}: continue
             if not obligation.get('data_vencimento'):continue
             due=as_date(obligation['data_vencimento']);value=amount(obligation.get('saldo_aberto'))
             if not value or value<=0 or due>end:continue

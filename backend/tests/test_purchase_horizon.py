@@ -40,6 +40,37 @@ class PurchaseHorizonTests(unittest.TestCase):
         self.assertTrue(all(s['curve'][-1]['date'] == result['horizon']['end'] for s in scenarios))
         self.assertEqual(result['execution'], 'none')
 
+    def test_informed_income_lifts_the_purchase_minimum_once_per_civil_month(self):
+        from decimal import Decimal
+        from app.planning import money
+        start = date(2026, 9, 30)
+        horizon = purchase_horizon(start, 1, start)
+        end = horizon['end']
+        opening = Decimal('1000.00')
+        outflow = Decimal('-5000.00')
+        price = Decimal('100.00')
+        income = Decimal('200.00')
+        months = (date.fromisoformat(end).year - start.year) * 12 + date.fromisoformat(end).month - start.month + 1
+        body = dict(start='2026-09-30', first_payment='2026-09-30', price=str(price), installments=1,
+                    opening_balance=str(opening), flows=[{
+                        'id': 'rent:end', 'date': end, 'amount': str(outflow), 'label': 'Aluguel',
+                    }])
+        with_income = assess_purchase(self.body(**body, monthly_net_income=str(income)))
+        buy = next(row for row in with_income['cash_scenarios']['scenarios'] if row['name'] == 'buy_now')
+        expected = opening + outflow - price + income * months
+        self.assertEqual(buy['minimum_balance'], money(expected))
+        self.assertTrue(all(row['outside_horizon_total'] == '0.00' for row in with_income['cash_scenarios']['scenarios']))
+        without = assess_purchase(self.body(**body))
+        plain = next(row for row in without['cash_scenarios']['scenarios'] if row['name'] == 'buy_now')
+        self.assertEqual(plain['minimum_balance'], money(opening + outflow - price))
+        self.assertEqual(plain['outside_horizon_total'], '0.00')
+        # The twelve-installment case without income keeps its previous close.
+        legacy = assess_purchase(self.body(flows=[{
+            'id': 'mortgage:2027-09', 'date': '2027-09-11', 'amount': '-3635.73',
+            'label': 'Financiamento imobiliário',
+        }]))
+        self.assertEqual(legacy['cash_scenarios']['scenarios'][1]['closing_balance'], '4491.13')
+
     def test_single_payment_keeps_existing_ninety_day_minimum(self):
         h = purchase_horizon(date(2026, 9, 30), 1, date(2026, 9, 30))
         self.assertEqual(h['days'], 90)
@@ -82,6 +113,10 @@ class PurchaseHorizonTests(unittest.TestCase):
             'commitment_id': 'weekly-old', 'name': 'Semanal', 'status': 'ativo',
             'next_due_date': '2010-01-04', 'amount': '10', 'frequency': 'semanal',
             'payment_method': 'pix',
+        }, {
+            'commitment_id': 'card-azul', 'name': 'Mensalidade Azul', 'status': 'ativo',
+            'next_due_date': '2026-10-15', 'amount': '42.50', 'frequency': 'mensal',
+            'payment_method': 'cartao',
         }]
         obligations = Mock()
         obligations.find.return_value = [
@@ -89,6 +124,8 @@ class PurchaseHorizonTests(unittest.TestCase):
              'data_vencimento': '2027-01-11', 'saldo_aberto': '3694.57'},
             {'_id': 'outside', 'tipo': 'financiamento', 'competencia': '2027-11',
              'data_vencimento': '2027-11-11', 'saldo_aberto': '3000'},
+            {'_id': 'bill', 'tipo': 'fatura_cartao', 'competencia': '2026-11',
+             'data_vencimento': '2026-11-10', 'saldo_aberto': '999.00'},
         ]
         overrides = Mock(); overrides.find.return_value = []
         db = SimpleNamespace(commitments=commitments, obligations=obligations, future_schedule_overrides=overrides)
@@ -105,6 +142,20 @@ class PurchaseHorizonTests(unittest.TestCase):
                 self.assertEqual([o['id'] for o in context['suggested_flows']], ['obligation:jan'])
                 self.assertGreater(len(context['flows']), 50)
                 self.assertTrue(all(f['id'].startswith('commitment:') for f in context['flows']))
+                card_rows = [row for row in context['flows'] if row['label'] == 'Mensalidade Azul']
+                self.assertGreaterEqual(len(card_rows), 2)
+                self.assertTrue(all(row['amount'] == '-42.50' for row in card_rows))
+                self.assertTrue(all(row['id'].startswith('commitment:card-azul:') and row['date'] for row in card_rows))
+                self.assertNotIn('obligation:bill', [row['id'] for row in context['flows'] + context['suggested_flows']])
+                self.assertTrue(all('Fatura' not in row['label'] for row in context['flows'] + context['suggested_flows']))
+                self.assertFalse(any(row['ref'] == 'commitment:card-azul' for row in context['excluded_sources']))
+                # The shared planning context still hides card commitments and still offers the invoice.
+                shared = client.get('/v1/insights/planning-context?start=2026-09-30&end=2026-12-28')
+                self.assertEqual(shared.status_code, 200)
+                shared_body = shared.json()
+                self.assertFalse(any(row['label'] == 'Mensalidade Azul' for row in shared_body['flows']))
+                self.assertTrue(any(row['ref'] == 'commitment:card-azul' for row in shared_body['excluded_sources']))
+                self.assertIn('obligation:bill', [row['id'] for row in shared_body['suggested_flows']])
                 # Other planning workflows retain their old maximum.
                 self.assertEqual(client.get('/v1/insights/planning-context?start=2026-09-30&end=2027-10-30').status_code, 422)
                 for suffix in ['installments=61&first_payment=2026-09-30',
@@ -112,8 +163,8 @@ class PurchaseHorizonTests(unittest.TestCase):
                                'installments=12&first_payment=2026-09-29']:
                     self.assertEqual(client.get('/v1/insights/purchase-context?start=2026-09-30&' + suffix).status_code, 422)
                 self.assertFalse(commitments.method_calls.count(('insert_one', (), {})))
-                self.assertEqual([call[0] for call in obligations.method_calls], ['find'])
-                self.assertEqual([call[0] for call in commitments.method_calls], ['find'])
+                self.assertEqual([call[0] for call in obligations.method_calls], ['find', 'find'])
+                self.assertEqual([call[0] for call in commitments.method_calls], ['find', 'find'])
         finally:
             app.dependency_overrides.pop(require_session, None)
             app.dependency_overrides.pop(database, None)

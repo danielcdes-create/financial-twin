@@ -182,6 +182,21 @@ type ScenarioRow = {
   outside_horizon_total?: string | null;
   first_reserve_breach?: string | null;
 };
+
+function remainderAfterPeriod(value: string | null | undefined): number {
+  if (value == null || String(value).trim() === '') return 0;
+  const parsed = Number(String(value).trim().replace(/\s/g, '').replace(',', '.'));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function scenarioSentence(row: ScenarioRow, money: Money): string {
+  const price = `O preço é ${money(row.purchase_total)}. O menor saldo no período é ${money(row.minimum_balance)}.`;
+  if (remainderAfterPeriod(row.outside_horizon_total) > 0) {
+    return `${price} Depois deste período ainda há ${money(row.outside_horizon_total)} em parcelas.`;
+  }
+  return `${price} O período já inclui todas as parcelas desta compra.`;
+}
+
 type PurchaseGoal = {baseline_date?: string | null; purchase_date?: string | null; delay_days?: number | null};
 export type PurchaseResultView = {
   price?: string | null;
@@ -212,7 +227,7 @@ export function purchaseResultCopy(result: PurchaseResultView, money: Money, goa
   const alternatives = ALTERNATIVES.map(item => {
     const row = byName.get(item.name);
     if (!cashReady || !row) return {title: item.title, body: UNCALCULATED_ALTERNATIVE};
-    return {title: item.title, body: `O preço é ${money(row.purchase_total)}. O menor saldo no período é ${money(row.minimum_balance)}. Depois deste período ainda há ${money(row.outside_horizon_total)} em parcelas.`};
+    return {title: item.title, body: scenarioSentence(row, money)};
   });
   const baseline = result.goal?.baseline_date ? civilDateLabel(result.goal.baseline_date) : '';
   const bought = result.goal?.purchase_date ? civilDateLabel(result.goal.purchase_date) : '';

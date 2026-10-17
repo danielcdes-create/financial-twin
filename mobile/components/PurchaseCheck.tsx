@@ -27,6 +27,28 @@ type Props = {
 const civilTodayIso = () => { const parts = new Intl.DateTimeFormat('en-CA', {timeZone:'America/Sao_Paulo', year:'numeric', month:'2-digit', day:'2-digit'}).formatToParts(new Date()); const map = Object.fromEntries(parts.map(p => [p.type, p.value])); return `${map.year}-${map.month}-${map.day}`; };
 const decimal = (value: string) => requireMoneyInput(value);
 const money = (value: string | null | undefined) => value == null ? '—' : Number(value).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
+const isObligationRow = (row: {id?: string}) => String(row?.id || '').startsWith('obligation:');
+const commitmentGroupKey = (row: {id?: string}) => {
+  const id = String(row?.id || '');
+  const match = /^commitment:(.+):\d{4}-\d{2}-\d{2}$/.exec(id);
+  return match ? match[1] : `row:${id}`;
+};
+const groupCommitmentRows = (rows: any[]) => {
+  const groups: {key: string; rows: any[]}[] = [];
+  const index = new Map<string, {key: string; rows: any[]}>();
+  const sorted = [...rows].sort((a, b) => String(a.date).localeCompare(String(b.date)) || String(a.label).localeCompare(String(b.label)));
+  for (const row of sorted) {
+    const key = commitmentGroupKey(row);
+    let group = index.get(key);
+    if (!group) {
+      group = {key, rows: []};
+      index.set(key, group);
+      groups.push(group);
+    }
+    group.rows.push(row);
+  }
+  return groups;
+};
 function Action({label,onPress,disabled=false}:{label:string;onPress:()=>void;disabled?:boolean}){return <Pressable accessibilityRole="button" disabled={disabled} onPress={onPress} style={[s.action,disabled&&s.disabled]}><Text style={s.actionText}>{label}</Text></Pressable>}
 const FormBusy=React.createContext(false);
 function Field({label,value,onChange,placeholder,keyboardType,disabled=false}:{label:string;value:string;onChange:(text:string)=>void;placeholder?:string;keyboardType?:'default'|'number-pad';disabled?:boolean}){const busy=React.useContext(FormBusy);return <View style={s.field}><Text style={s.label}>{label}</Text><TextInput accessibilityLabel={label} editable={!disabled&&!busy} value={value} onChangeText={onChange} placeholder={placeholder} keyboardType={keyboardType} style={s.input} autoCapitalize="none"/></View>}
@@ -122,6 +144,24 @@ export default function PurchaseCheck({api:request,upload:uploadRequest,onBack,s
   const copy=result?purchaseResultCopy(result,money,goalName):null;
   const lines=result?purchaseCardLines({price:result.price,workHours:result.work_hours,delayDays:result.goal?.delay_days??null}):[];
   const contextCopy=visibleContext?summarizePlanningContext(visibleContext,{includeProfiles:false}):null;
+  const commitmentRows=visibleContext?.flows||[];
+  const obligationRows=[...(visibleContext?.suggested_flows||[])].sort((a:any,b:any)=>String(a.date).localeCompare(String(b.date))||String(a.label).localeCompare(String(b.label)));
+  const commitmentGroups=groupCommitmentRows(commitmentRows);
+  const markRows=(rows:any[])=>{
+    inputRevision.current++;
+    setSelected(previous=>{
+      const next={...previous};
+      for (const row of rows) next[row.id]=true;
+      return next;
+    });
+    setResult(null);setShareVisible(false);
+  };
+  const flowRow=(row:any)=>{
+    const included=selected[row.id]??!isObligationRow(row);
+    const due=civilDateLabel(row.date);
+    const displayLabel=formatPurchaseFlowLabel(row.label);
+    return <Pressable accessibilityRole="checkbox" accessibilityLabel={`${displayLabel}, ${due}`} aria-checked={included} accessibilityState={{checked:included}} key={row.id} style={s.flow} onPress={()=>{inputRevision.current++;setSelected(previous=>({...previous,[row.id]:!included}));setResult(null);setShareVisible(false)}}><Text style={s.label}>{included?'☑':'☐'} {displayLabel}</Text><Text style={s.note}>{due} · {money(row.amount)}</Text></Pressable>;
+  };
   return <FormBusy.Provider value={busy}><View style={s.container}>
     <Action label="‹ Voltar" onPress={back}/><Text style={s.title}>Cabe na minha vida?</Text>
     <Text style={s.note}>Confira o impacto antes de comprar. Um print ajuda a preencher os dados; a análise só usa o preço que você confirmar.</Text>
@@ -153,7 +193,7 @@ export default function PurchaseCheck({api:request,upload:uploadRequest,onBack,s
       {!validWindow&&<Text style={s.note}>Informe de 1 a 60 parcelas e o primeiro pagamento, de hoje em diante, como dd/mm/aaaa.</Text>}
       {!ready&&<Text style={s.note}>Conecte ao servidor para carregar os compromissos.</Text>}
       {!!contextError&&<><Text accessibilityRole="alert" style={s.error}>{contextError}</Text><Action label="Tentar carregar compromissos novamente" disabled={busy} onPress={()=>{setContext(null);setContextRetry(value=>value+1)}}/></>}
-      {visibleContext&&contextCopy&&<><Text style={s.label}>{purchaseHorizonSubtitle(visibleContext.horizon)}</Text><Text style={s.note}>{contextCopy.summary}</Text>{contextCopy.notices.map((notice:string,index:number)=><Text key={`notice:${index}`} style={s.note}>{notice}</Text>)}{[...(visibleContext.flows||[]),...(visibleContext.suggested_flows||[])].sort((a:any,b:any)=>a.date.localeCompare(b.date)||a.label.localeCompare(b.label)).map((row:any)=>{const included=selected[row.id]??!row.id.startsWith('obligation:');const due=civilDateLabel(row.date);const displayLabel=formatPurchaseFlowLabel(row.label);return <Pressable accessibilityRole="checkbox" accessibilityLabel={`${displayLabel}, ${due}`} aria-checked={included} accessibilityState={{checked:included}} key={row.id} style={s.flow} onPress={()=>{inputRevision.current++;setSelected(previous=>({...previous,[row.id]:!included}));setResult(null);setShareVisible(false)}}><Text style={s.label}>{included?'☑':'☐'} {displayLabel}</Text><Text style={s.note}>{due} · {money(row.amount)}</Text></Pressable>})}</>}
+      {visibleContext&&contextCopy&&<><Text style={s.label}>{purchaseHorizonSubtitle(visibleContext.horizon)}</Text><Text style={s.note}>{contextCopy.summary}</Text>{contextCopy.notices.map((notice:string,index:number)=><Text key={`notice:${index}`} style={s.note}>{notice}</Text>)}{commitmentRows.length>0&&<Pressable accessibilityRole="button" accessibilityLabel="Selecionar Todos os compromissos" disabled={false} onPress={()=>markRows(commitmentRows)} style={s.selectAll}><Text style={s.link}>Selecionar Todos</Text></Pressable>}{commitmentGroups.map(group=>{const name=formatPurchaseFlowLabel(group.rows[0].label);return <View key={group.key}>{group.rows.length>0&&<Pressable accessibilityRole="button" accessibilityLabel={`Selecionar Todos de ${name}`} disabled={false} onPress={()=>markRows(group.rows)} style={s.selectAll}><Text style={s.link}>Selecionar Todos</Text></Pressable>}{group.rows.map(flowRow)}</View>})}{obligationRows.map(flowRow)}</>}
     </View>
     <Action label="Ver impacto da compra" disabled={busy||!price||!ready||!validWindow||!visibleContext} onPress={assess}/>
     <DiscardDraftAction disabled={busy} light label="Excluir rascunho da análise" onDiscard={discardForm} message="Os dados preenchidos, o print selecionado e a análise desta compra serão removidos da tela. Seus registros salvos continuam preservados." />
@@ -175,4 +215,4 @@ export default function PurchaseCheck({api:request,upload:uploadRequest,onBack,s
   </View></FormBusy.Provider>;
 }
 
-const s=StyleSheet.create({container:{gap:12,padding:16,paddingBottom:28,borderRadius:18,backgroundColor:'#EDF5F4'},title:{fontSize:25,fontWeight:'800',color:'#133E43'},note:{fontSize:13,lineHeight:19,color:'#54666C'},error:{color:'#B42318',fontSize:14},card:{backgroundColor:'#FFFFFF',borderRadius:16,padding:16,gap:9,borderWidth:1,borderColor:'#D9E7E7'},heading:{fontSize:17,fontWeight:'700',color:'#173F43'},field:{gap:5},label:{fontSize:14,fontWeight:'600',color:'#25494C'},input:{borderWidth:1,borderColor:'#B8CDCE',borderRadius:9,paddingHorizontal:12,paddingVertical:10,color:'#173F43',backgroundColor:'#FFF',fontSize:15},action:{backgroundColor:'#136D67',borderRadius:11,paddingVertical:12,paddingHorizontal:16,alignItems:'center'},actionText:{color:'#FFFFFF',fontSize:14,fontWeight:'700'},disabled:{opacity:.5},preview:{width:'100%',height:190,backgroundColor:'#F3F6F6',borderRadius:9},flow:{borderTopWidth:1,borderColor:'#E4EEEE',paddingVertical:8,gap:2},result:{fontSize:18,fontWeight:'700',color:'#124D4A'},priceBlock:{backgroundColor:'#F4FBFA',borderRadius:12,padding:12,gap:2},alternative:{backgroundColor:'#F7FBFB',borderRadius:12,padding:12,gap:4,borderWidth:1,borderColor:'#D5E6E4'},alternativeTitle:{fontSize:16,fontWeight:'700',color:'#124D4A'},alternativeBody:{fontSize:15,lineHeight:22,color:'#173F43'},shareCard:{backgroundColor:'#143F46',borderRadius:20,padding:24,gap:10,minHeight:250,justifyContent:'center'},shareBrand:{color:'#71D8C6',fontWeight:'800',letterSpacing:2,fontSize:12},shareTitle:{color:'#FFF',fontSize:21,fontWeight:'800'},sharePrice:{color:'#FFF',fontSize:27,fontWeight:'800'},shareFact:{color:'#D1F1EA',fontSize:19,fontWeight:'700'},shareFoot:{color:'#B7C9C9',fontSize:11,marginTop:14}});
+const s=StyleSheet.create({container:{gap:12,padding:16,paddingBottom:28,borderRadius:18,backgroundColor:'#EDF5F4'},title:{fontSize:25,fontWeight:'800',color:'#133E43'},note:{fontSize:13,lineHeight:19,color:'#54666C'},error:{color:'#B42318',fontSize:14},card:{backgroundColor:'#FFFFFF',borderRadius:16,padding:16,gap:9,borderWidth:1,borderColor:'#D9E7E7'},heading:{fontSize:17,fontWeight:'700',color:'#173F43'},field:{gap:5},label:{fontSize:14,fontWeight:'600',color:'#25494C'},input:{borderWidth:1,borderColor:'#B8CDCE',borderRadius:9,paddingHorizontal:12,paddingVertical:10,color:'#173F43',backgroundColor:'#FFF',fontSize:15},action:{backgroundColor:'#136D67',borderRadius:11,paddingVertical:12,paddingHorizontal:16,alignItems:'center'},actionText:{color:'#FFFFFF',fontSize:14,fontWeight:'700'},disabled:{opacity:.5},preview:{width:'100%',height:190,backgroundColor:'#F3F6F6',borderRadius:9},flow:{borderTopWidth:1,borderColor:'#E4EEEE',paddingVertical:8,gap:2},selectAll:{alignSelf:'flex-start',minHeight:44,justifyContent:'center'},link:{color:'#136D67',fontSize:14,fontWeight:'700'},result:{fontSize:18,fontWeight:'700',color:'#124D4A'},priceBlock:{backgroundColor:'#F4FBFA',borderRadius:12,padding:12,gap:2},alternative:{backgroundColor:'#F7FBFB',borderRadius:12,padding:12,gap:4,borderWidth:1,borderColor:'#D5E6E4'},alternativeTitle:{fontSize:16,fontWeight:'700',color:'#124D4A'},alternativeBody:{fontSize:15,lineHeight:22,color:'#173F43'},shareCard:{backgroundColor:'#143F46',borderRadius:20,padding:24,gap:10,minHeight:250,justifyContent:'center'},shareBrand:{color:'#71D8C6',fontWeight:'800',letterSpacing:2,fontSize:12},shareTitle:{color:'#FFF',fontSize:21,fontWeight:'800'},sharePrice:{color:'#FFF',fontSize:27,fontWeight:'800'},shareFact:{color:'#D1F1EA',fontSize:19,fontWeight:'700'},shareFoot:{color:'#B7C9C9',fontSize:11,marginTop:14}});

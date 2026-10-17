@@ -88,12 +88,32 @@ def _goal_date(start: date, target: Decimal, saved: Decimal, monthly: Decimal, p
     return reached
 
 
+def _monthly_income_flows(start: date, end: date, income: Decimal) -> list[PlannedFlow]:
+    """One inflow on the first civil day of each month inside the purchase horizon."""
+    rows: list[PlannedFlow] = []
+    year, month = start.year, start.month
+    while (year, month) <= (end.year, end.month):
+        month_start = date(year, month, 1)
+        when = start if month_start < start else month_start
+        if when <= end:
+            key = f'income:{year:04d}-{month:02d}'
+            rows.append(PlannedFlow(id=key, source_ref=key, date=when, amount=income, label='Renda líquida mensal', certainty='assumed'))
+        if month == 12:
+            year, month = year + 1, 1
+        else:
+            month += 1
+    return rows
+
+
 def assess_purchase(body: PurchaseCheckInput) -> dict:
     horizon = purchase_horizon(body.start, body.installments, body.first_payment)
+    flows = list(body.flows)
+    if body.monthly_net_income is not None:
+        flows.extend(_monthly_income_flows(body.start, date.fromisoformat(horizon['end']), body.monthly_net_income))
     scenario = simulate(PurchaseScenarioInput(
         start=body.start, days=horizon['days'], opening_balance=body.opening_balance,
         reserve=body.reserve, purchase=body.price, installments=body.installments,
-        first_payment=body.first_payment, flows=body.flows,
+        first_payment=body.first_payment, flows=flows,
         assumptions=['Valores do print devem ser conferidos antes da análise.'],
     ))
     scenario['horizon'] = horizon

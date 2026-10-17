@@ -68,6 +68,17 @@ const button = label => {
 };
 const input = (label, value) => act(async () => {assert.ok(field(label), 'Field: ' + label); field(label).props.onChangeText(value);});
 const press = label => act(async () => {const node = button(label); assert.equal(node.props.disabled, false, label + ' enabled'); await node.props.onPress();});
+const checkbox = label => {
+  const node = renderer.root.findAllByType('Pressable').find(item => item.props.accessibilityRole === 'checkbox' && item.props.accessibilityLabel === label);
+  assert.ok(node, 'Checkbox: ' + label);
+  return node;
+};
+const checked = label => checkbox(label).props.accessibilityState.checked;
+const pressExact = label => act(async () => {
+  const node = renderer.root.findAllByType('Pressable').find(item => item.props.accessibilityLabel === label);
+  assert.ok(node, 'Button: ' + label);
+  await node.props.onPress();
+});
 const forbid = text => {
   for (const token of ['AAAA-MM-DD', 'parcela(s)', 'horizonte', 'assumido', 'não alcançada']) assert.equal(text.includes(token), false, token);
   assert.equal(/\d{4}-\d{2}-\d{2}/.test(text), false, 'ISO date printed on the screen');
@@ -78,9 +89,12 @@ const futureIso = new Date(Date.UTC(year, month - 1, day + 10)).toISOString().sl
 const futureDisplay = futureIso.split('-').reverse().join('/');
 const horizon = {start: '2026-10-15', end: '2027-01-13', days: 90, minimum_months: 3};
 const context = {horizon, flows: [
-  {id: 'rent', date: '2026-10-15', amount: '-100.00', label: 'Aluguel', source_ref: 'rent'},
-  {id: 'condo', date: '2026-01-31', amount: '-50.00', label: 'Condomínio', source_ref: 'condo'},
-], suggested_flows: [], gaps: [], excluded_sources: []};
+  {id: 'commitment:card-azul:2026-11-10', date: '2026-11-10', amount: '-50.00', label: 'Mensalidade', source_ref: 'commitment:card-azul:2026-11-10'},
+  {id: 'commitment:card-azul:2026-12-10', date: '2026-12-10', amount: '-50.00', label: 'Mensalidade', source_ref: 'commitment:card-azul:2026-12-10'},
+  {id: 'commitment:claro:2026-01-31', date: '2026-01-31', amount: '-182.80', label: 'Claro', source_ref: 'commitment:claro:2026-01-31'},
+], suggested_flows: [
+  {id: 'obligation:fin', date: '2026-11-20', amount: '-10.00', label: 'financiamento · 2026-11', source_ref: 'obligation:fin'},
+], gaps: [], excluded_sources: []};
 const scenario = (name, total, minimum, outside, breach = null) => ({name, purchase_total: total, minimum_balance: minimum, outside_horizon_total: outside, first_reserve_breach: breach});
 const resultFor = count => ({
   price: '300.00', installments: count, work_hours: null, horizon,
@@ -88,13 +102,17 @@ const resultFor = count => ({
     ? {baseline_date: null, purchase_date: null, delay_days: null}
     : count === 2
       ? {baseline_date: '2027-06-01', purchase_date: null, delay_days: null}
-      : {baseline_date: '2026-10-15', purchase_date: '2026-01-31', delay_days: 30},
+      : count === 4
+        ? null
+        : {baseline_date: '2026-10-15', purchase_date: '2026-01-31', delay_days: 30},
   cash_scenarios: count === 3
     ? {status: 'insufficient_data', scenarios: []}
-    : {status: 'scenario', scenarios: [scenario('baseline', '0.00', '1000.00', '0.00'), scenario('buy_now', '300.00', '700.00', '0.00', '2026-01-31'), scenario('wait', '300.00', '800.00', '100.00'), scenario('reduce', '240.00', '760.00', '0.00')]},
+    : count === 4
+      ? {status: 'scenario', scenarios: [scenario('baseline', '0.00', '500.00', '0.00'), scenario('buy_now', '400.00', '100.00', '0.00'), scenario('wait', '400.00', '150.00', '0.00'), scenario('reduce', '320.00', '180.00', '0.00')]}
+      : {status: 'scenario', scenarios: [scenario('baseline', '0.00', '1000.00', '0.00'), scenario('buy_now', '300.00', '700.00', '0.00', '2026-01-31'), scenario('wait', '300.00', '800.00', '100.00'), scenario('reduce', '240.00', '760.00', '0.00')]},
   gaps: [
     'Informe renda líquida e horas trabalhadas no mês para calcular horas de trabalho.',
-    count === 3 ? '' : 'A meta não foi alcançada no limite de dez anos destas premissas.',
+    count === 3 || count === 4 ? '' : 'A meta não foi alcançada no limite de dez anos destas premissas.',
     count === 3 ? 'Informe saldo inicial conhecido ou uma premissa explícita.' : '',
   ].filter(Boolean),
 });
@@ -112,6 +130,38 @@ const resultFor = count => ({
   const opened = visible();
   assert.match(opened, /15\/10\/2026/);
   assert.match(opened, /31\/01\/2026/);
+  assert.match(opened, /Mensalidade/);
+  assert.match(opened, /10\/11\/2026/);
+  assert.match(opened, /10\/12\/2026/);
+  assert.match(opened, /Claro/);
+  assert.match(opened, /50,00/);
+  assert.match(opened, /182,80/);
+  assert.equal(opened.includes('ficaram fora da lista individual'), false);
+  assert.equal(opened.includes('marque a fatura correspondente'), false);
+  assert.equal(opened.includes('Fatura do cartão'), false);
+  assert.equal(checked('Mensalidade, 10/11/2026'), true);
+  assert.equal(checked('Mensalidade, 10/12/2026'), true);
+  assert.equal(checked('Claro, 31/01/2026'), true);
+  assert.equal(checked('Financiamento · 11/2026, 20/11/2026'), false);
+  for (const label of ['Mensalidade, 10/11/2026', 'Mensalidade, 10/12/2026', 'Claro, 31/01/2026']) {
+    await act(async () => {await checkbox(label).props.onPress();});
+  }
+  assert.equal(checked('Mensalidade, 10/11/2026'), false);
+  assert.equal(checked('Claro, 31/01/2026'), false);
+  await pressExact('Selecionar Todos de Mensalidade');
+  assert.equal(checked('Mensalidade, 10/11/2026'), true);
+  assert.equal(checked('Mensalidade, 10/12/2026'), true);
+  assert.equal(checked('Claro, 31/01/2026'), false);
+  assert.equal(checked('Financiamento · 11/2026, 20/11/2026'), false);
+  await pressExact('Selecionar Todos os compromissos');
+  assert.equal(checked('Mensalidade, 10/11/2026'), true);
+  assert.equal(checked('Mensalidade, 10/12/2026'), true);
+  assert.equal(checked('Claro, 31/01/2026'), true);
+  assert.equal(checked('Financiamento · 11/2026, 20/11/2026'), false);
+  await act(async () => {await checkbox('Financiamento · 11/2026, 20/11/2026').props.onPress();});
+  assert.equal(checked('Financiamento · 11/2026, 20/11/2026'), true);
+  await act(async () => {await checkbox('Financiamento · 11/2026, 20/11/2026').props.onPress();});
+  assert.equal(checked('Financiamento · 11/2026, 20/11/2026'), false);
   assert.match(field('Data do primeiro pagamento').props.value, /^\d{2}\/\d{2}\/\d{4}$/);
   forbid(opened);
   await input('Data do primeiro pagamento', futureDisplay);
@@ -129,6 +179,8 @@ const resultFor = count => ({
   assert.match(one, /O preço é/);
   assert.match(one, /O menor saldo no período é/);
   assert.match(one, /Depois deste período ainda há/);
+  assert.match(one, /O período já inclui todas as parcelas desta compra/);
+  assert.equal(one.includes('R$ 0,00 em parcelas'), false);
   assert.match(one, /Dentro de dez anos, com estes aportes, a meta ainda não tem data/);
   assert.match(one, /Horas de trabalho não calculadas/);
   assert.equal(one.includes('Informe renda líquida'), false);
@@ -177,6 +229,14 @@ const resultFor = count => ({
   assert.equal(partial.includes('A meta não foi alcançada'), false);
   forbid(partial);
   assert.equal(bodies[2].installments, 2);
+  await input('Número de parcelas', '4');
+  await settle(400);
+  await press('Ver impacto da compra');
+  await settle();
+  const covered = visible();
+  assert.equal(covered.includes('R$ 0,00 em parcelas'), false);
+  assert.match(covered, /O período já inclui todas as parcelas desta compra/);
+  assert.equal(covered.includes('Depois deste período ainda há'), false);
   await press('‹ Voltar');
   assert.equal(backs, 0, 'Back keeps unsaved input on the screen');
   assert.equal(dialogs.dialogSnapshot().title, 'Rascunho nesta tela');

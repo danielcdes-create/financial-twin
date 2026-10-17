@@ -4,7 +4,7 @@ from datetime import date, timedelta
 from pydantic import Field, model_validator
 
 from app.commitments import advance
-from app.planning import ScenarioInput, StrictModel
+from app.planning import PlannedFlow, ScenarioInput, StrictModel
 
 MAX_PURCHASE_DAYS = 3660
 
@@ -23,6 +23,8 @@ class PurchaseHorizonInput(StrictModel):
 class PurchaseScenarioInput(ScenarioInput):
     # Keep the general /simulate workflow's existing 90-day limit.
     days: int = Field(ge=1, le=MAX_PURCHASE_DAYS)
+    # The purchase assessment may add one income row per civil month on top of the caller's flows.
+    flows: list[PlannedFlow] = Field(default_factory=list, max_length=2200)
 
 
 def purchase_horizon(start: date, installments: int, first_payment: date) -> dict:

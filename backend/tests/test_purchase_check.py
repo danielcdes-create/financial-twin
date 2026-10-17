@@ -1,5 +1,6 @@
 import sys
 import unittest
+from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
@@ -30,7 +31,13 @@ class PurchaseCheckTests(unittest.TestCase):
         self.assertEqual(result['goal']['purchase_date'], '2026-04-30')
         self.assertEqual(result['goal']['delay_days'], 30)
         self.assertEqual(result['installment_amounts'], ['100.00'] * 3)
-        self.assertEqual(result['cash_scenarios']['scenarios'][1]['closing_balance'], '700.00')
+        start = date.fromisoformat(result['horizon']['start'])
+        end = date.fromisoformat(result['horizon']['end'])
+        months = (end.year - start.year) * 12 + end.month - start.month + 1
+        from decimal import Decimal
+        from app.planning import money
+        # Income is one credit per civil month. This call has no other outflow, so the close is opening minus the price plus that income.
+        self.assertEqual(result['cash_scenarios']['scenarios'][1]['closing_balance'], money(Decimal('1000.00') - Decimal('300.00') + Decimal('3000.00') * months))
         self.assertEqual(result['execution'], 'none')
 
     def test_missing_balance_preserves_gap_but_keeps_other_analysis(self):
