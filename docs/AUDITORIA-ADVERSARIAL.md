@@ -1,6 +1,20 @@
 # Auditoria adversarial — 15/10/2026
 
-Julgamento da árvore local de `financial-app` a partir de `431aaf5`, com a correção de contagem dupla desta entrega, commit `cc7f562`. Dados sintéticos. O ledger ao vivo não foi lido, escrito, deduplicado nem reparado. O release privado no disco é Android 1.20.70 / versionCode 116, SHA-256 `94D3BB0F984BA651D3C689EF7571D3CF18CF9361E2B042FFCBFC2439B0B42841`, commit `5b31361`, com o certificado de debug anterior. A instalação física permanece unverified.
+Julgamento da árvore local de `financial-app` a partir de `431aaf5`, com a correção de contagem dupla desta entrega, commit `cc7f562`. Dados sintéticos. O ledger ao vivo não foi lido, escrito, deduplicado nem reparado. O release privado no disco é Android 1.20.71 / versionCode 117, SHA-256 `0520D938561486CA1B3340194365E940720F4412E6A2DB8CDD0C5E61834C505E`, commit `2807461`, com o certificado de debug anterior. A instalação física permanece unverified.
+
+## Entrega 18/10/2026 — formatação e leituras repetidas
+
+Commit do recurso `273e317`, empacotado em `2807461`. APK ARM64 de 48095372 bytes, SHA-256 `0520D938561486CA1B3340194365E940720F4412E6A2DB8CDD0C5E61834C505E`, assinante `FAC61745DC0903786FB9EDE62A962B399F7348F0BB6F899B8332667591033B9C`. O ledger ao vivo não foi lido nem escrito. Nesta passagem passaram `backend/tests/test_commitment_estimates.py` (15) e a compilação dos módulos alterados. A suíte completa do cliente e a homologação física não foram repetidas.
+
+| Correção | Veredito |
+| --- | --- |
+| Formatadores de moeda e data | reutilizados no módulo. Listas, cards e gráficos não criam um `Intl` novo a cada render. |
+| Figuras do quadro de compromissos | calculadas uma vez por card. O painel fechado não é limpo de novo. |
+| Rascunho da revisão e do lote | a fonte é serializada uma vez. A gravação SQLite concorrente fica na última linha pedida. |
+| Rótulos de parcelamento | a busca dos vínculos é `$in`, com texto e `ObjectId` válidos. Não há varredura da coleção. |
+| Contexto histórico da página | capturas, extrato, contas e subcategorias são lidos uma vez e reutilizados na sugestão. |
+| Lista de compromissos | vigência, extrato vinculado e nome do cartão saem em lote. |
+| Cache de classificação | prévia e revisão não derrubam as opções. A trava de inserção incrementa uma vez por transação. |
 
 ## Entrega 18/10/2026 — fila, compartilhamento e mídia órfã
 
