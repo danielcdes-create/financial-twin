@@ -26,6 +26,18 @@ class MediaRecoveryTimeTests(unittest.TestCase):
                 self.assertEqual(path.read_bytes(),data)
                 self.assertEqual(db.media_assets.docs[0]['status'],'orphaned')
 
+    def test_orphaned_media_past_retention_window_is_purged_from_disk(self):
+        with TemporaryDirectory() as folder:
+            db=DomainDB();data=b'Expired orphan media bytes'
+            path=Path(folder)/'expired_orphan';path.write_bytes(data)
+            old_time=datetime.now(timezone.utc)-timedelta(days=8)
+            db.media_assets.docs.append({'_id':'expired','sha256':sha256(data).hexdigest(),
+                'path':str(path),'created_at':old_time,'checked_at':old_time,'status':'orphaned'})
+            result=reconcile_media(db)
+            self.assertEqual(result,{'checked':1,'missing':0,'orphaned':1,'limited':False})
+            self.assertFalse(path.exists())
+            self.assertEqual(db.media_assets.docs[0]['status'],'purged')
+
     def test_recent_bson_media_is_retained_without_marking_orphan(self):
         with TemporaryDirectory() as folder:
             db=DomainDB();data=b'Recent retained bytes';path=Path(folder)/'original';path.write_bytes(data)

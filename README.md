@@ -39,7 +39,7 @@ O dicionário v1.2 separa **Vendedor** (`merchant_id`), quem vendeu o bem ou ser
 
 The v1.2 financial collections are not rebuilt or migrated at startup. Account balance references live in the additive `account_balance_snapshots` collection; transfer details live with captured provisionals.
 
-Uploaded source files are stored by SHA-256 under `MEDIA_STORAGE_PATH` (default `financial-app/data/media`). The server writes a temporary file, checks it, and atomically promotes it; `media_assets` records pending, ready, missing, and orphaned states. A periodic scan flags broken references and retains orphans for review. This path must be an absolute, durable shared volume before running multiple API instances. Protect and back it up; MongoDB transactions cannot make a filesystem write atomic.
+Uploaded source files are stored by SHA-256 under `MEDIA_STORAGE_PATH` (default `financial-app/data/media`). The server writes a temporary file, checks it, and atomically promotes it; `media_assets` records pending, ready, missing, orphaned, and purged states. A periodic scan flags broken references. An orphan file with no reference is removed from disk after 7 days and the record becomes `purged`. This path must be an absolute, durable shared volume before running multiple API instances. Protect and back it up; MongoDB transactions cannot make a filesystem write atomic.
 
 ## Backend setup
 
@@ -78,7 +78,7 @@ No computador atual, a tarefa do Windows **Financial Twin Backend** inicia `scri
 
 ## Acesso no aplicativo
 
-No navegador, a sessão autenticada dura 12 horas e o token fica só na memória. No aplicativo, a sessão de dispositivo e a biometria duram 30 dias e se renovam a cada desbloqueio conferido em `/v1/auth/account`, sem um segundo pedido de digital. Cancelar o sensor, trocar a digital ou receber revogação ainda pede senha. O preenchimento automático não apaga os campos nem reinicia a biometria. O contrato está em [ACCOUNT-SECURITY.md](docs/ACCOUNT-SECURITY.md).
+No navegador, a sessão autenticada dura 12 horas e o token fica só na memória. No aplicativo, a sessão de dispositivo e a biometria duram 30 dias e se renovam a cada desbloqueio conferido em `/v1/auth/account`, sem um segundo pedido de digital. Cancelar o sensor, trocar a digital ou receber revogação ainda pede senha. O preenchimento automático não apaga os campos nem reinicia a biometria. Um compartilhamento recebido com o app bloqueado fica guardado e abre depois da digital ou da senha. A fila nativa de notificações guarda no máximo 500 eventos. O contrato está em [ACCOUNT-SECURITY.md](docs/ACCOUNT-SECURITY.md).
 
 ## Cabe na minha vida?
 

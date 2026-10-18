@@ -13,6 +13,7 @@ const ACK_KEY='financial-twin-queue-acknowledgements';
 const PRESERVED_KEY='financial-twin-preserved-drafts';
 const COMMAND_KEY='financial-twin-review-commands';
 const VOICE_KEY='financial-twin-voice-drafts';
+const MAX_CONFIRMED_RECEIPTS=500;
 const Context=createContext<QueueDb|null>(null);
 function read():QueueItem[]{try{return JSON.parse(localStorage.getItem(KEY)||'[]')}catch{throw new Error('Dados locais não puderam ser lidos. Preserve o armazenamento do navegador para recuperação.')}}
 function write(rows:QueueItem[]){localStorage.setItem(KEY,JSON.stringify(rows))}
@@ -37,13 +38,13 @@ export const webQueueDb:QueueDb={
    const quarantined=sql.includes('s.quarantined=1');
    return read().filter(row=>Boolean(states.get(row.event_id)?.quarantined)===quarantined).sort((a,b)=>a.id-b.id).map(row=>({...row,attempt_count:states.get(row.event_id)?.attempt_count||0,next_attempt_at:states.get(row.event_id)?.next_attempt_at||null,last_error:states.get(row.event_id)?.last_error||null})) as T[];
   }
-  if(sql.startsWith('SELECT * FROM event_queue'))return read().sort((a,b)=>a.id-b.id) as T[];
+  if(sql.startsWith('SELECT * FROM event_queue')){const rows=read().sort((a,b)=>a.id-b.id);return (sql.includes('WHERE event_id=?')?rows.filter(row=>row.event_id===String(params[0])):rows) as T[];}
   if(sql.startsWith('SELECT * FROM review_drafts')){const rows=params.length?readDrafts().filter(row=>row.provisional_id===String(params[0])):readDrafts();return rows.sort((a,b)=>b.updated_at.localeCompare(a.updated_at)).slice(0,sql.includes('LIMIT 1')?1:undefined) as T[]}
   if(sql.startsWith('SELECT * FROM batch_drafts'))return readBatches().filter(row=>!params.length||row.batch_id===String(params[0])) as T[];
   if(sql.startsWith('SELECT * FROM queue_acknowledgements'))return readAcks().filter(row=>!params.length||row.event_id===String(params[0])) as T[];
   if(sql.startsWith('SELECT * FROM queue_state'))return readState().filter(row=>!params.length||row.event_id===String(params[0])) as T[];
   if(sql.startsWith('SELECT * FROM preserved_drafts'))return readPreserved().filter(row=>!params.length||(sql.includes('WHERE draft_id=?')?row.draft_id:row.item_id)===String(params[0])) as T[];
-  if(sql.startsWith('SELECT * FROM review_commands'))return readCommands().filter(row=>!params.length||row.command_key===String(params[0])) as T[];
+  if(sql.startsWith('SELECT * FROM review_commands'))return readCommands().filter(row=>(!sql.includes('WHERE result IS NULL')||row.result===null)&&(!params.length||row.command_key===String(params[0]))) as T[];
   if(sql.startsWith('SELECT * FROM voice_drafts'))return readVoice().filter(row=>!params.length||row.draft_key===String(params[0])) as T[];
   throw new Error('Consulta local não suportada')
  },
@@ -60,9 +61,9 @@ export const webQueueDb:QueueDb={
   if(sql.startsWith('DELETE FROM batch_drafts WHERE batch_id=?')){localStorage.setItem(BATCH_KEY,JSON.stringify(readBatches().filter(row=>!matchesDraft(row,'batch_id',['state','updated_at']))));return}
   const rows=read();
   if(sql.startsWith('INSERT INTO voice_drafts')){const drafts=readVoice().filter(row=>row.draft_key!==String(params[0]));drafts.push({draft_key:String(params[0]),state:String(params[1]),updated_at:String(params[2])});localStorage.setItem(VOICE_KEY,JSON.stringify(drafts));return}
-  if(sql.startsWith('INSERT INTO review_commands')){const commands=readCommands().filter(row=>row.command_key!==String(params[0]));commands.push({command_key:String(params[0]),path:String(params[1]),body:String(params[2]),result:params[3]==null?null:String(params[3]),updated_at:String(params[4])});localStorage.setItem(COMMAND_KEY,JSON.stringify(commands));return}
+  if(sql.startsWith('INSERT INTO review_commands')){const commands=readCommands().filter(row=>row.command_key!==String(params[0]));commands.push({command_key:String(params[0]),path:String(params[1]),body:String(params[2]),result:params[3]==null?null:String(params[3]),updated_at:String(params[4])});const pendingCmds=commands.filter(row=>row.result===null);const completedCmds=commands.filter(row=>row.result!==null).slice(-MAX_CONFIRMED_RECEIPTS);localStorage.setItem(COMMAND_KEY,JSON.stringify([...pendingCmds,...completedCmds]));return}
   if(sql.startsWith('INSERT OR IGNORE INTO preserved_drafts')){const drafts=readPreserved();if(drafts.some(row=>row.draft_id===String(params[0])))return;drafts.push({draft_id:String(params[0]),scope:String(params[1]),item_id:String(params[2]),state:String(params[3]),updated_at:String(params[4])});localStorage.setItem(PRESERVED_KEY,JSON.stringify(drafts));return}
-  if(sql.startsWith('INSERT OR IGNORE INTO queue_acknowledgements')){const receipts=readAcks();if(receipts.some(row=>row.event_id===String(params[0])))return;receipts.push({event_id:String(params[0]),identity:String(params[1]),result:String(params[2]),confirmed_at:String(params[3])});localStorage.setItem(ACK_KEY,JSON.stringify(receipts));return}
+  if(sql.startsWith('INSERT OR IGNORE INTO queue_acknowledgements')){const receipts=readAcks();if(receipts.some(row=>row.event_id===String(params[0])))return;receipts.push({event_id:String(params[0]),identity:String(params[1]),result:String(params[2]),confirmed_at:String(params[3])});localStorage.setItem(ACK_KEY,JSON.stringify(receipts.slice(-MAX_CONFIRMED_RECEIPTS)));return}
   if(sql.startsWith('INSERT OR IGNORE INTO event_queue')){const eventId=String(params[0]);if(rows.some(row=>row.event_id===eventId))return;const hasFile=sql.includes('local_uri,filename,mime_type');const id=Math.max(Number(localStorage.getItem(SEQUENCE_KEY)||0),0,...rows.map(row=>row.id))+1;if(!Number.isSafeInteger(id))throw new Error('Identidade da fila inválida. Preserve os dados para recuperação.');localStorage.setItem(SEQUENCE_KEY,String(id));rows.push({id,event_id:eventId,kind:String(params[1]),payload:String(params[2]),local_uri:hasFile?String(params[3]):null,filename:hasFile?String(params[4]):null,mime_type:hasFile?String(params[5]):null,created_at:String(params[hasFile?6:3])});write(rows);return}
   if(sql.startsWith('INSERT INTO queue_state')){
    if(sql.includes('WHERE EXISTS (SELECT 1 FROM event_queue')&&!rows.some(row=>row.event_id===String(params[5])&&row.kind===params[6]&&row.local_uri===params[7]&&row.payload===params[8]&&row.filename===params[9]&&row.mime_type===params[10]&&row.id===params[11]))return;

@@ -1,9 +1,12 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { ActivityIndicator, Text, View } from 'react-native';
 import { useIncomingShare } from 'expo-sharing';
 import App from '../App';
 
 export default function HandleShare() {
+  useEffect(() => {
+    (globalThis as any).__financialTwinPendingShare = false;
+  }, []);
   const {resolvedSharedPayloads,isResolving,error} = useIncomingShare();
   if (isResolving) return <View style={{flex:1,justifyContent:'center',alignItems:'center'}}><ActivityIndicator/><Text>Lendo imagem compartilhada…</Text></View>;
   const image=resolvedSharedPayloads.find(item=>item.contentType==='image'&&!!item.contentUri);

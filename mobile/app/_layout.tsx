@@ -1,7 +1,7 @@
-import { Stack } from 'expo-router';
+import { Stack, router } from 'expo-router';
 import { SQLiteProvider } from '../utils/queueDb';
 import { StatusBar } from 'expo-status-bar';
-import React, {useSyncExternalStore} from 'react';
+import React, {useEffect, useSyncExternalStore} from 'react';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import AuthProvider, {useAuth} from '../components/AuthProvider';
 import AppDialogHost from '../components/AppDialogHost';
@@ -28,6 +28,12 @@ export default function RootLayout() {
 function RootNavigator() {
   const {authenticated} = useAuth();
   const operation = useSyncExternalStore(subscribeUserOperation, userOperationSnapshot, userOperationSnapshot);
+  useEffect(() => {
+    if (authenticated && (globalThis as any).__financialTwinPendingShare) {
+      (globalThis as any).__financialTwinPendingShare = false;
+      router?.replace?.('/handle-share');
+    }
+  }, [authenticated]);
   return <Stack screenOptions={{headerShown: false, navigationBarHidden: true, navigationBarTranslucent: true,
     gestureEnabled: !operation.busy && !operation.dialogOpen}}>
     <Stack.Protected guard={authenticated}>

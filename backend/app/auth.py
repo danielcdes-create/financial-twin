@@ -36,6 +36,10 @@ class LoginAttempts:
                 raise HTTPException(429, 'Muitas tentativas. Aguarde um minuto.', headers={'Retry-After': '60'})
             queue.append(now)
 
+    def reset(self, identity):
+        with self.lock:
+            self.attempts.pop(identity, None)
+
 
 login_attempts = LoginAttempts()
 

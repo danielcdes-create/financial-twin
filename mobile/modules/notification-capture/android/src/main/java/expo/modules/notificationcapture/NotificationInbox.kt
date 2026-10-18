@@ -11,8 +11,17 @@ import java.util.Locale
 object NotificationInbox {
   const val KEY_INBOX="inbox_v2"
   const val KEY_RECOVERY="recovery_v2"
+  const val MAX_INBOX_EVENTS=500
+  const val MAX_RECOVERY_ENTRIES=64
   @Volatile private var failure:String?=null
 
+  private fun trimArray(source:JSONArray,maxItems:Int):JSONArray {
+    if(source.length()<=maxItems)return source
+    val trimmed=JSONArray()
+    val start=source.length()-maxItems
+    for(i in start until source.length())trimmed.put(source.opt(i))
+    return trimmed
+  }
   private fun valid(value:Any?):Boolean {
     if(value !is JSONObject)return false
     val id=value.opt("event_id")
@@ -24,8 +33,9 @@ object NotificationInbox {
       value.opt("raw_payload") is JSONObject && (value.opt("parsed_payload")==null || value.opt("parsed_payload") is JSONObject)
   }
   private fun write(prefs:SharedPreferences,events:JSONArray,recovery:JSONArray?=null) {
-    val edit=prefs.edit().putString(KEY_INBOX,JSONObject().put("version",2).put("events",events).toString())
-    if(recovery!=null)edit.putString(KEY_RECOVERY,recovery.toString())
+    val boundedEvents=trimArray(events,MAX_INBOX_EVENTS)
+    val edit=prefs.edit().putString(KEY_INBOX,JSONObject().put("version",2).put("events",boundedEvents).toString())
+    if(recovery!=null)edit.putString(KEY_RECOVERY,trimArray(recovery,MAX_RECOVERY_ENTRIES).toString())
     check(edit.commit()){ "Falha ao persistir a fila de notificações. A origem permanece preservada." }
     failure=null
   }
@@ -63,9 +73,11 @@ object NotificationInbox {
       for(i in 0 until recovery.length())if(recovery.getJSONObject(i).optString("source_key")==sourceKey && recovery.getJSONObject(i).optString("raw")==raw)already=true
       if(!already)recovery.put(JSONObject().put("source_key",sourceKey).put("raw",raw).put("reason","invalid_notification_inbox").put("recorded_at_ms",System.currentTimeMillis()))
     }
+    val boundedKept=trimArray(kept,MAX_INBOX_EVENTS)
+    val boundedRecovery=trimArray(recovery,MAX_RECOVERY_ENTRIES)
     // The legacy key is never cleared: v2 makes it an immutable recovery source.
-    if(current==null || malformed || damagedRecovery)write(prefs,kept,recovery)
-    return Pair(kept,recovery)
+    if(current==null || malformed || damagedRecovery || kept.length()>MAX_INBOX_EVENTS || recovery.length()>MAX_RECOVERY_ENTRIES)write(prefs,boundedKept,boundedRecovery)
+    return Pair(boundedKept,boundedRecovery)
   }
   fun snapshot(prefs:SharedPreferences):JSONObject=synchronized(NotificationCaptureService.QUEUE_LOCK) {
     try {

@@ -82,6 +82,7 @@ def setup(body: SetupInput, request: Request):
         db.account.insert_one(account)
     except DuplicateKeyError:
         raise HTTPException(409, 'A conta já foi configurada. Use Entrar.') from None
+    login_attempts.reset('private-owner')
     return session_response(db, account, body.device_label)
 
 
@@ -110,6 +111,7 @@ def login(body: LoginInput, request: Request):
             hash_password(body.password)
         if not account or body.username.strip().lower() != account['username'] or not password_ok:
             raise HTTPException(401, 'Usuário ou senha incorretos.')
+    login_attempts.reset('private-owner')
     return session_response(db, account, body.device_label)
 
 
@@ -168,6 +170,7 @@ def password_change(body: PasswordInput, request: Request, session=Depends(requi
                                   {'$set': {'password_hash': encoded, 'auth_version': version, 'sessions': []}})
     if result.matched_count != 1:
         raise HTTPException(409, 'A senha já foi alterada. Entre novamente.')
+    login_attempts.reset('private-owner')
     return session_response(db, {**account, 'auth_version': version, 'password_hash': encoded}, body.device_label)
 
 

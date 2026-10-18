@@ -9,7 +9,7 @@ export async function importNativeInbox(db:Db, snapshot:InboxSnapshot, ensureSes
     ensureSession();
     const payload=JSON.stringify(event);
     await db.runAsync('INSERT OR IGNORE INTO event_queue(event_id,kind,payload,created_at) VALUES(?,?,?,?)',event.event_id,'native_event',payload,event.captured_at);
-    const stored=(await db.getAllAsync<QueueRow>('SELECT * FROM event_queue ORDER BY id')).find(row=>row.event_id===event.event_id);
+    const stored=(await db.getAllAsync<QueueRow>('SELECT * FROM event_queue WHERE event_id=? ORDER BY id',event.event_id)).find(row=>row.event_id===event.event_id);
     ensureSession();
     if(!stored||stored.kind!=='native_event'||stored.payload!==payload)throw new Error('A notificação permanece na origem: a identidade da fila local não foi confirmada.');
   }

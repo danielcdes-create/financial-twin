@@ -106,6 +106,7 @@ async def lifespan(app: FastAPI):
         app.state.db.commitments.create_index("commitment_id",unique=True)
         app.state.db.commitments.create_index("linked_transactions.period_key",name="commitment_payment_period")
         app.state.db.media_assets.create_index("sha256",unique=True)
+        app.state.db.merchants.create_index("nome_padrao",name="merchant_standard_name")
         app.state.db.batch_commands.create_index([("status",1),("created_at",1)],name="pending_batch_commands")
         app.state.db.capture_batches.create_index([("status",1),("created_at",-1)],name="capture_batch_drafts")
         app.state.db.capture_batch_locks.update_one({"_id":"movement-insert"},{"$setOnInsert":{"revision":0}},upsert=True)
@@ -190,7 +191,7 @@ def mongo_write_conflict(_request, exc):
         return JSONResponse(status_code=503,content={"detail":"O banco atingiu o limite de coleções. A operação foi abortada; o histórico permanece preservado. É necessário liberar capacidade no servidor antes de tentar novamente."})
     return JSONResponse(status_code=503,content={"detail":"Operação indisponível; nenhuma gravação parcial deve ser considerada confirmada."})
 
-app.add_middleware(CORSMiddleware,allow_origins=["http://localhost:19006","http://127.0.0.1:19006"],allow_methods=["GET","POST","PUT","PATCH","DELETE"],allow_headers=["Authorization","Content-Type"],expose_headers=['X-Operation-Pending','Retry-After'])
+app.add_middleware(CORSMiddleware,allow_origins=["http://localhost:19006","http://127.0.0.1:19006"],allow_methods=["GET","POST","PUT","PATCH","DELETE"],allow_headers=["Authorization","Content-Type"],expose_headers=['X-Operation-Pending','Retry-After','X-Session-Token','X-Session-Expires-In'])
 
 @app.middleware("http")
 async def private_response_headers(request: Request, call_next):
@@ -409,6 +410,8 @@ def canonical_distinct(db, field:str, value:str)->str:
     return next((str(item) for item in db.transactions.distinct(field) if item and canonical_key(str(item))==key),value)
 
 def find_canonical_merchant(db, value:str):
+    exact=db.merchants.find_one({"nome_padrao":value.strip()},{"nome_padrao":1,"aliases.normalizado":1}) if value and value.strip() else None
+    if exact: return exact
     key=canonical_key(value)
     for merchant in db.merchants.find({"nome_padrao":{"$nin":[None,""]}},{"nome_padrao":1,"aliases.normalizado":1}):
         if canonical_key(str(merchant.get("nome_padrao","")))==key: return merchant
