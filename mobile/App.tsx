@@ -98,13 +98,13 @@ const newId = () =>
     const r = (Math.random() * 16) | 0;
     return (c === "x" ? r : (r & 3) | 8).toString(16);
   });
-const money = (v: number) =>
-  new Intl.NumberFormat("pt-BR", {
-    style: "currency",
-    currency: "BRL",
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(v || 0);
+const BRL_FORMATTER = new Intl.NumberFormat("pt-BR", {
+  style: "currency",
+  currency: "BRL",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+const money = (v: number) => BRL_FORMATTER.format(v || 0);
 const dashboardMoney = money;
 
 function ParcelamentoPurchaseDetail({item}: {item: any}) {

@@ -14,10 +14,12 @@ import {protectUnsavedBack,useLocalBack} from '../utils/localBack';
 
 type Props={api:(path:string,init?:RequestInit)=>Promise<any>;onBack:()=>void};
 type Section='Fechamento'|'Guardião'|'Simular'|'Liquidez'|'Experimentos';
-const day=(offset=0)=>{const d=new Date();d.setDate(d.getDate()+offset);const parts=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Sao_Paulo',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(d);const map=Object.fromEntries(parts.map(p=>[p.type,p.value]));return `${map.year}-${map.month}-${map.day}`;};
+const DAY_FORMATTER=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Sao_Paulo',year:'numeric',month:'2-digit',day:'2-digit'});
+const BRL_FORMATTER=new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL',minimumFractionDigits:2,maximumFractionDigits:2});
+const day=(offset=0)=>{const d=new Date();d.setDate(d.getDate()+offset);const parts=DAY_FORMATTER.formatToParts(d);const map=Object.fromEntries(parts.map(p=>[p.type,p.value]));return `${map.year}-${map.month}-${map.day}`;};
 const newId=()=> 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{const r=Math.floor(Math.random()*16);return(c==='x'?r:(r&3)|8).toString(16)});
 const decimal=(value:string)=>requireMoneyInput(value,{signed:true});
-const currency=(value:any)=>Number(value||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
+const currency=(value:any)=>BRL_FORMATTER.format(Number(value||0));
 function Button({label,onPress,disabled=false}:{label:string;onPress:()=>void;disabled?:boolean}){return <Pressable accessibilityRole="button" disabled={disabled} onPress={onPress} style={[s.button,disabled&&{opacity:.5}]}><Text style={s.buttonText}>{label}</Text></Pressable>}
 const FormBusy=React.createContext(false);
 function Field({label,value,onChange,multiline=false,disabled=false}:{label:string;value:string;onChange:(value:string)=>void;multiline?:boolean;disabled?:boolean}){const busy=React.useContext(FormBusy);return <View style={s.field}><Text style={s.label}>{label}</Text><TextInput accessibilityLabel={label} editable={!disabled&&!busy} value={value} onChangeText={onChange} style={[s.input,multiline&&{minHeight:90}]} multiline={multiline} autoCapitalize="none"/></View>}

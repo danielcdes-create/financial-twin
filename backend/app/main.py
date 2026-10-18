@@ -44,7 +44,7 @@ from app.commitments import commitment_cutoff, CommitmentIn, advance, as_date, b
 from app.parcelamento_link import decorate_purchase_links, ensure_parcelamento_purchase, sync_parcelamento_purchase
 from app.future_commitments import effective_documents, overlay_link_names
 from app.providers.import_provider import ImportFinancialProvider
-from app.platforms import PLATFORMS, _merchant_catalog, apply_historical_capture_defaults, build_vendor_defaults, has_vendor_tokens_beyond_platform, historical_capture_profile, platform_identity
+from app.platforms import PLATFORMS, _historical_context, _merchant_catalog, apply_historical_capture_defaults, build_vendor_defaults, has_vendor_tokens_beyond_platform, historical_capture_profile, platform_identity
 from app.taxonomy import NATURES, NATURE_LABELS, CURATED_SUBCATEGORIES, category_subcategories, infer_classification, rejects_direct_level1_posting, taxonomy_catalog, taxonomy_overrides, normalized as taxonomy_key
 from app.account_positions import account_key_for_legacy, account_positions, validate_account_key, reconcile_capture_transfer
 from app.account_profiles import (AccountProfileCreate, AccountProfileUpdate, AccountProfileDelete,
@@ -205,7 +205,13 @@ async def private_response_headers(request: Request, call_next):
 
 @app.middleware("http")
 async def invalidate_reference_data(request: Request, call_next):
-    mutates = request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path != "/v1/capture-batches/file-status" and request.url.path.startswith(("/v1/future-commitments", "/v1/commitment-profile", "/v1/commitments", "/v1/capture-batches", "/v1/movements", "/v1/transactions", "/v1/categories", "/v1/provisional", "/v1/merchants", "/v1/reviews", "/v1/events", "/v1/import", "/v1/documents"))
+    path = request.url.path
+    mutates = (
+        request.method in {"POST", "PUT", "PATCH", "DELETE"}
+        and path != "/v1/capture-batches/file-status"
+        and not path.endswith(("/preview", "/review"))
+        and path.startswith(("/v1/commitment-profile", "/v1/capture-batches", "/v1/movements", "/v1/transactions", "/v1/categories", "/v1/subcategories", "/v1/provisional", "/v1/merchants", "/v1/reviews", "/v1/events", "/v1/import", "/v1/documents"))
+    )
     if mutates: classification_cache.invalidate()
     try:
         return await call_next(request)
@@ -231,8 +237,8 @@ def json_safe(value):
     if isinstance(value, dict): return {k:json_safe(v) for k,v in value.items() if k != "_id"} | ({"id":str(value["_id"])} if "_id" in value else {})
     return value
 
-def _attach_historical_capture_defaults(document:dict[str,Any], result:dict[str,Any], db, catalog_cache=None):
-    hist=historical_capture_profile(db,document,catalog_cache=catalog_cache)
+def _attach_historical_capture_defaults(document:dict[str,Any], result:dict[str,Any], db, catalog_cache=None, history_cache=None):
+    hist=historical_capture_profile(db,document,catalog_cache=catalog_cache,history_cache=history_cache)
     if not hist: return
     defaults:dict[str,Any]={}
     if not result.get("vendedor") and hist.get("vendedor"):
@@ -299,7 +305,9 @@ def with_merchant_names(documents:list[dict[str,Any]], db):
     merchants={str(item["_id"]):item.get("nome_padrao") for item in db.merchants.find({"_id":{"$in":list(merchant_ids)}},{"nome_padrao":1})} if merchant_ids else {}
     results=[]
     overrides=taxonomy_overrides(db)
-    catalog_cache=_merchant_catalog(db) if any(item.get("provisional_id") and item.get("status") in {"provisional","enriched"} for item in documents) else None
+    has_active_provisional=any(item.get("provisional_id") and item.get("status") in {"provisional","enriched"} for item in documents)
+    catalog_cache=_merchant_catalog(db) if has_active_provisional else None
+    history_cache=_historical_context(db,catalog_cache=catalog_cache) if has_active_provisional else None
     for document in documents:
         result=json_safe(document)
         if document.get('provisional_id'): result['categoria']=document.get('categoria_sugerida')
@@ -318,7 +326,7 @@ def with_merchant_names(documents:list[dict[str,Any]], db):
         for field,value in infer_classification(document,overrides).items():
             if not result.get(field): result['categoria_inferida' if field=='categoria' and document.get('provisional_id') else f"{field}_sugerida"]=value
         if document.get("provisional_id") and document.get("status") in {"provisional","enriched"}:
-            _attach_historical_capture_defaults(document,result,db,catalog_cache=catalog_cache)
+            _attach_historical_capture_defaults(document,result,db,catalog_cache=catalog_cache,history_cache=history_cache)
         results.append(result)
     return results
 
@@ -2186,12 +2194,18 @@ def installment_plans(limit:int=Query(200,ge=1,le=500),offset:int=Query(0,ge=0),
                 'total':total,'offset':offset,'limit':limit,'has_more':following<total,'next_offset':following if following<total else None}
 
 
-def commitment_output(item, db=None):
-    if db is not None: item=effective_commitments(db, [item])[0]
+def commitment_output(item, db=None, *, precomputed_snapshot=None, precomputed_cards=None, already_effective=False):
+    if db is not None and not already_effective: item=effective_commitments(db, [item])[0]
     result=json_safe(item)
-    if db is not None:
-        identities = [link.get("transaction_id") for link in item.get("linked_transactions") or [] if link.get("transaction_id")]
-        snapshot = linked_statement_snapshots(db, {item.get("commitment_id") or result.get("commitment_id") or "commitment": identities}).get(item.get("commitment_id") or result.get("commitment_id") or "commitment")
+    if db is not None or precomputed_snapshot is not None or precomputed_cards is not None:
+        key = item.get("commitment_id") or result.get("commitment_id") or "commitment"
+        if precomputed_snapshot is not None:
+            snapshot = precomputed_snapshot.get(key)
+        elif db is not None:
+            identities = [link.get("transaction_id") for link in item.get("linked_transactions") or [] if link.get("transaction_id")]
+            snapshot = linked_statement_snapshots(db, {key: identities}).get(key) if identities else None
+        else:
+            snapshot = None
         if snapshot:
             result["linked_purchase"] = snapshot
             raw = result.get("original_description") or result.get("name") or ""
@@ -2202,7 +2216,10 @@ def commitment_output(item, db=None):
             if snapshot.get("subcategoria") and not result.get("subcategoria"):
                 result["subcategoria"] = snapshot["subcategoria"]
         if item.get("card_id") and not result.get("card_label"):
-            result["card_label"] = card_labels(db, [item.get("card_id")]).get(str(item.get("card_id")))
+            if precomputed_cards is not None:
+                result["card_label"] = precomputed_cards.get(str(item.get("card_id")))
+            elif db is not None:
+                result["card_label"] = card_labels(db, [item.get("card_id")]).get(str(item.get("card_id")))
     result["schedule"]=schedule(item)
     result["amount"]=float(item["amount"])
     for field in ("purchase_date","next_due_date","end_date","cash_due_date"):
@@ -2222,7 +2239,31 @@ def list_commitments(limit:int=Query(default=1000,ge=1,le=1000), offset:int=Quer
         total = reading.commitments.count_documents(query)
         rows = list(reading.commitments.find(query).sort([("next_due_date",1),("_id",1)]).skip(offset).limit(limit))
         next_offset = offset + len(rows)
-        return {"items":[commitment_output(x, reading) for x in rows], "total":total, "limit":limit, "offset":offset,
+        if rows:
+            effective_rows = effective_commitments(reading, rows)
+            groups = {
+                (x.get("commitment_id") or str(x.get("_id") or "commitment")): [
+                    link.get("transaction_id") for link in x.get("linked_transactions") or [] if link.get("transaction_id")
+                ]
+                for x in effective_rows
+            }
+            has_linked = any(groups.values())
+            snapshots = linked_statement_snapshots(reading, groups) if has_linked else {}
+            card_ids = [x.get("card_id") for x in effective_rows if x.get("card_id") and not x.get("card_label")]
+            cards_map = card_labels(reading, card_ids) if card_ids else {}
+            items = [
+                commitment_output(
+                    x,
+                    reading,
+                    precomputed_snapshot=snapshots,
+                    precomputed_cards=cards_map,
+                    already_effective=True,
+                )
+                for x in effective_rows
+            ]
+        else:
+            items = []
+        return {"items":items, "total":total, "limit":limit, "offset":offset,
                 "has_more":next_offset < total, "next_offset":next_offset if next_offset < total else None,
                 "commitment_cutoff_date": commitment_cutoff().isoformat(),
                 "read_consistency":consistency}

@@ -235,12 +235,49 @@ def _row_has_user_review(row: dict[str, Any]) -> bool:
     return False
 
 
+def _historical_context(db, catalog_cache: tuple | None = None) -> dict[str, Any]:
+    by_id, platform_ids, platforms_by_key = catalog_cache or _merchant_catalog(db)
+    by_id = dict(by_id)
+    platform_ids = set(platform_ids)
+    platforms_by_key = dict(platforms_by_key)
+    confirmed_captures = _safe_find(getattr(db, "provisional_transactions", None), {"status": "confirmed"}, limit=600)
+    active_edited = [
+        row
+        for row in _safe_find(getattr(db, "provisional_transactions", None), {"status": "provisional"}, limit=200)
+        + _safe_find(getattr(db, "provisional_transactions", None), {"status": "enriched"}, limit=200)
+        if _row_has_user_review(row)
+    ]
+    ledger_rows = _safe_find(getattr(db, "transactions", None), {}, limit=800)
+    raw_candidates: list[tuple[dict[str, Any], bool, bool, str, str]] = []
+    for row in confirmed_captures + active_edited:
+        pid = str(row.get("platform_id") or "")
+        if pid and pid in by_id:
+            platform_ids.add(pid)
+            platforms_by_key[_norm(by_id[pid].get("nome_padrao"))] = by_id[pid]
+        cand_raw = str(row.get("merchant_raw") or row.get("estabelecimento_original") or row.get("descricao_original") or "").strip()
+        raw_candidates.append((row, True, _row_has_user_review(row), _row_flow(row), _norm(cand_raw)))
+    for row in ledger_rows:
+        pid = str(row.get("platform_id") or "")
+        if pid and pid in by_id:
+            platform_ids.add(pid)
+            platforms_by_key[_norm(by_id[pid].get("nome_padrao"))] = by_id[pid]
+        cand_raw = str(row.get("merchant_raw") or row.get("estabelecimento_original") or row.get("descricao_original") or "").strip()
+        raw_candidates.append((row, False, _row_has_user_review(row), _row_flow(row), _norm(cand_raw)))
+    return {
+        "catalog": (by_id, platform_ids, platforms_by_key),
+        "raw_candidates": raw_candidates,
+        "selectable_accounts": _selectable_account_keys(db),
+        "allowed_subcats": _safe_category_subcategories(db),
+    }
+
+
 def historical_capture_profile(
     db,
     document: dict[str, Any],
     *,
     require_reviewed: bool = False,
     catalog_cache: tuple | None = None,
+    history_cache: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Infer pre-fillable fields for a capture from confirmed/reviewed history."""
     if not document or document.get("natureza") == "TRANSFERENCIA":
@@ -257,7 +294,8 @@ def historical_capture_profile(
     if not source_key:
         return {}
 
-    by_id, platform_ids, platforms_by_key = catalog_cache or _merchant_catalog(db)
+    ctx = history_cache or _historical_context(db, catalog_cache=catalog_cache)
+    by_id, platform_ids, platforms_by_key = ctx["catalog"]
     detected_platform_doc, detected_platform_name, plat_tokens = _detect_platform(raw, platforms_by_key)
     store_tokens = _store_tokens(source_key, plat_tokens)
     has_specific_store = any(len(tok) >= 2 for tok in store_tokens)
@@ -268,52 +306,21 @@ def historical_capture_profile(
     source_provider = str(document.get("source_provider") or "").strip()
     instrument_hint = str(document.get("instrument_hint") or "").strip()
 
-    confirmed_captures = _safe_find(getattr(db, "provisional_transactions", None), {"status": "confirmed"}, limit=600)
-    active_edited = [
-        row
-        for row in _safe_find(getattr(db, "provisional_transactions", None), {"status": "provisional"}, limit=200)
-        + _safe_find(getattr(db, "provisional_transactions", None), {"status": "enriched"}, limit=200)
-        if _row_has_user_review(row)
-    ]
-    ledger_rows = _safe_find(getattr(db, "transactions", None), {}, limit=800)
-
     candidates: list[tuple[dict[str, Any], bool]] = []
-    for row in confirmed_captures + active_edited:
-        if current_prov_id and row.get("provisional_id") == current_prov_id:
+    candidate_meta: list[tuple[dict[str, Any], bool, bool, str, str]] = []
+    for row, is_capture, reviewed, row_flow, cand_key in ctx["raw_candidates"]:
+        if is_capture and current_prov_id and row.get("provisional_id") == current_prov_id:
             continue
-        if require_reviewed and not _row_has_user_review(row):
+        if not is_capture and current_id is not None and row.get("_id") == current_id:
             continue
-        candidates.append((row, True))
-    for row in ledger_rows:
-        if current_id is not None and row.get("_id") == current_id:
+        if require_reviewed and not reviewed:
             continue
-        if require_reviewed and not _row_has_user_review(row):
-            continue
-        candidates.append((row, False))
-
-    for row, _ in candidates:
-        pid = str(row.get("platform_id") or "")
-        if pid and pid in by_id:
-            platform_ids.add(pid)
-            platforms_by_key[_norm(by_id[pid].get("nome_padrao"))] = by_id[pid]
-
-    if not detected_platform_name:
-        detected_platform_doc, detected_platform_name, plat_tokens = _detect_platform(raw, platforms_by_key)
-        store_tokens = _store_tokens(source_key, plat_tokens)
-        has_specific_store = any(len(tok) >= 2 for tok in store_tokens)
+        candidates.append((row, is_capture))
+        candidate_meta.append((row, is_capture, reviewed, row_flow, cand_key))
 
     matched_rows: list[tuple[dict[str, Any], float, bool]] = []
-    for idx, (row, is_capture) in enumerate(candidates):
-        if _row_flow(row) != flow:
-            continue
-        cand_raw = str(
-            row.get("merchant_raw")
-            or row.get("estabelecimento_original")
-            or row.get("descricao_original")
-            or ""
-        ).strip()
-        cand_key = _norm(cand_raw)
-        if not cand_key:
+    for idx, (row, is_capture, reviewed, row_flow, cand_key) in enumerate(candidate_meta):
+        if row_flow != flow or not cand_key:
             continue
 
         weight = 0.0
@@ -335,7 +342,7 @@ def historical_capture_profile(
                         weight = 2.0 * ratio
 
         if weight > 0:
-            if _row_has_user_review(row):
+            if reviewed:
                 weight += 1.5
             if is_capture:
                 weight += 0.4
@@ -472,8 +479,8 @@ def historical_capture_profile(
     account_votes: dict[str, float] = defaultdict(float)
 
     allowed_natures = {"ESTORNO", "RENDIMENTO", "COMPRA"} if flow == "entrada" else {"COMPRA", "IMPOSTO_TRIBUTO", "TARIFA_ENCARGO"}
-    selectable_accounts = _selectable_account_keys(db)
-    allowed_subcats = _safe_category_subcategories(db)
+    selectable_accounts = ctx["selectable_accounts"]
+    allowed_subcats = ctx["allowed_subcats"]
 
     for row, weight, is_capture in all_enrichment_rows:
         cat = str((row.get("categoria_sugerida") if is_capture else row.get("categoria")) or row.get("categoria") or row.get("categoria_sugerida") or "").strip()

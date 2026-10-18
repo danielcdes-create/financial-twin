@@ -3,7 +3,7 @@ import {useAsyncScope} from '../utils/useAsyncScope';
 import {requireMoneyInput} from '../utils/moneyInput';
 import {useLocalBack} from '../utils/localBack';
 import { Alert } from "../utils/appAlert";
-import React, { useCallback, useEffect, useLayoutEffect, useState, useRef } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useState, useRef } from 'react';
 import {ActivityIndicator, StyleSheet, Text, View} from 'react-native';
 import {Pressable, TextInput} from './InteractionControls';
 import { useSQLiteContext } from '../utils/queueDb';
@@ -57,8 +57,10 @@ export default function ProvisionalReview({api,money,onUpdated,initialItem,onExi
   const [needsCurrent,setNeedsCurrent]=useState(false);
   const [pendingCommands,setPendingCommands]=useState<Awaited<ReturnType<typeof pendingReviewCommands>>>([]);
   const running=useRef(false),generation=useRef(0);
-  const draftWrites=useRef(Promise.resolve());
+  const draftWrites=useRef(Promise.resolve()),latestDraftRow=useRef<any>(null);
   const draftEpoch=useRef(0),editorEpoch=useRef(0),persistedDraft=useRef<string|null>(null);
+  const selectedSourceDraft=useMemo(()=>selected?initialDraftFor(selected):{},[selected]);
+  const serializedSelected=useMemo(()=>selected?JSON.stringify(selected):'',[selected]);
   const [hasDraft,setHasDraft]=useState(false);
   const back=async()=>{
     const valid=captureScope();await draftWrites.current;
@@ -120,19 +122,19 @@ export default function ProvisionalReview({api,money,onUpdated,initialItem,onExi
   useEffect(()=>{let active=true;void api('/v1/account-positions').then(result=>{if(active)setAccountOptions(result.items||[])}).catch(()=>{});return()=>{active=false}},[api]);
   useEffect(()=>{
     if(!selected?.provisional_id||!Object.keys(draft).length||conflict)return;
-    const source=initialDraftFor(selected);
-    if(persistedDraft.current!==selected.provisional_id&&!Object.entries(draft).some(([field,value])=>value!==(source[field]||'')))return;
+    if(persistedDraft.current!==selected.provisional_id&&!Object.entries(draft).some(([field,value])=>value!==(selectedSourceDraft[field]||'')))return;
     const epoch=draftEpoch.current,valid=captureScope();
-    let active=true;const row={provisional_id:selected.provisional_id,item:selected,draft,updated_at:new Date().toISOString()};
+    let active=true;const row={provisional_id:selected.provisional_id,item:selected,itemJson:serializedSelected,draft,draftJson:JSON.stringify(draft),updated_at:new Date().toISOString()};
+    latestDraftRow.current=row;
     const timer=setTimeout(()=>{if(active&&valid()&&epoch===draftEpoch.current)setDraftState('Salvando rascunho…')},0);
     draftWrites.current=draftWrites.current.catch(()=>{}).then(async()=>{
-      if(epoch!==draftEpoch.current)return;
-      await db.runAsync('INSERT INTO review_drafts(provisional_id,item,draft,updated_at) VALUES(?,?,?,?) ON CONFLICT(provisional_id) DO UPDATE SET item=excluded.item,draft=excluded.draft,updated_at=excluded.updated_at',row.provisional_id,JSON.stringify(row.item),JSON.stringify(row.draft),row.updated_at);
-      if(active&&valid()&&epoch===draftEpoch.current){persistedDraft.current=row.provisional_id;setHasDraft(true);setDraftState('Rascunho salvo neste dispositivo.');setResumable(parseDraft({...row,item:JSON.stringify(row.item),draft:JSON.stringify(row.draft)}))}
+      if(epoch!==draftEpoch.current||latestDraftRow.current!==row)return;
+      await db.runAsync('INSERT INTO review_drafts(provisional_id,item,draft,updated_at) VALUES(?,?,?,?) ON CONFLICT(provisional_id) DO UPDATE SET item=excluded.item,draft=excluded.draft,updated_at=excluded.updated_at',row.provisional_id,row.itemJson,row.draftJson,row.updated_at);
+      if(active&&valid()&&epoch===draftEpoch.current){persistedDraft.current=row.provisional_id;setHasDraft(true);setDraftState('Rascunho salvo neste dispositivo.');setResumable({provisional_id:row.provisional_id,item:row.item,draft:row.draft,updated_at:row.updated_at})}
     }).catch(()=>{if(active&&valid()&&epoch===draftEpoch.current)setDraftState('Falha ao salvar rascunho. Mantenha esta tela aberta e tente novamente.')});
     trackDraftWrite(db,'review',row.provisional_id,draftWrites.current);
     return()=>{active=false;clearTimeout(timer)};
-  },[captureScope,conflict,db,draft,selected]);
+  },[captureScope,conflict,db,draft,selected,selectedSourceDraft,serializedSelected]);
   const open=async(item:any)=>{
     if(running.current)return;running.current=true;setLoading(true);const valid=captureScope();
     try{

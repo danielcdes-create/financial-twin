@@ -1,4 +1,4 @@
-import React, {useCallback, useEffect, useLayoutEffect, useRef, useState} from 'react';
+import React, {useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState} from 'react';
 import {StyleSheet, Text, View} from 'react-native';
 import {Pressable, TextInput} from './InteractionControls';
 import {loadCursorItems} from '../utils/loadCursorItems';
@@ -17,6 +17,7 @@ type Props = {api: (path: string, init?: RequestInit) => Promise<any>; visible: 
   onResolved?: (batchId: string) => void};
 const KINDS: Record<string, string> = {expense: 'Compra ou despesa', income: 'Receita ou entrada', refund: 'Estorno ou reembolso', bill_payment: 'Pagamento de fatura', own_transfer: 'Transferência entre minhas contas', unknown: 'Tipo a conferir'};
 const LABELS: Record<string, string> = {new: 'Nova movimentação', duplicate: 'Já está no app — não será inserida', possible_duplicate: 'Pode já estar no app — confira', invalid: 'Dados a corrigir', blocked: 'Conferência necessária'};
+const BRL_FORMATTER = new Intl.NumberFormat('pt-BR', {style: 'currency', currency: 'BRL', minimumFractionDigits: 2, maximumFractionDigits: 2});
 const sourceRows=(data:any):BatchRow[]=>data.rows.map((row:any)=>({...row,date:row.date?row.date.split('-').reverse().join('/'):'',
   amount:row.amount==null?'':String(row.amount).replace('.',','),selected:true,confirmed_distinct:false}));
 
@@ -37,10 +38,13 @@ export default function StatementBatchReview(p: Props) {
   const [rowPage, setRowPage] = useState(0);
   const [checking, setChecking] = useState(false), [checkRevision, setCheckRevision] = useState(0);
   const [conflict, setConflict] = useState<any>(null), [notice, setNotice] = useState('');
-  const running = useRef(false), writes = useRef(Promise.resolve()), version = useRef(0);
+  const running = useRef(false), writes = useRef(Promise.resolve()), latestSnapshot = useRef<string | null>(null), version = useRef(0);
   const captureScope=useAsyncScope(visible), listGeneration=useRef(0);
   const draftEpoch=useRef(0),editorEpoch=useRef(0),persistedDraft=useRef<string|null>(null);
   const [hasDraft,setHasDraft]=useState(false);
+  const sourceRowsJson = useMemo(() => batch ? JSON.stringify(sourceRows(batch)) : '', [batch]);
+  const batchSourceToken = useMemo(() => batch ? batchDraftSource(batch) : '', [batch]);
+  const rowsJson = useMemo(() => batch ? JSON.stringify(rows) : '', [batch, rows]);
   const back=async()=>{const valid=captureScope();await writes.current;if(batch)await flushDraftWrites(db,'batch',batch.batch_id);if(!valid())return;version.current++;setBatch(null);setResult(null);setPreview(null);setReady(false);setChecking(false);};
   useLocalBack(back,Boolean(visible&&batch),20);
   useLayoutEffect(()=>{const owner=editorEpoch;owner.current++;return()=>{owner.current++}},[batch?.batch_id,visible]);
@@ -60,16 +64,17 @@ export default function StatementBatchReview(p: Props) {
   }, [api, visible, revision]);
   useEffect(() => {
     if (!batch || !ready || result || conflict) return;
-    if(persistedDraft.current!==batch.batch_id&&!account&&!partial&&!brl&&JSON.stringify(rows)===JSON.stringify(sourceRows(batch)))return;
-    const snapshot = JSON.stringify({rows, account, partial, brl, source: batchDraftSource(batch)});
+    if(persistedDraft.current!==batch.batch_id&&!account&&!partial&&!brl&&rowsJson===sourceRowsJson)return;
+    const snapshot = JSON.stringify({rows, account, partial, brl, source: batchSourceToken});
+    latestSnapshot.current = snapshot;
     const id = batch.batch_id, valid=captureScope(),epoch=draftEpoch.current;
     writes.current = writes.current.catch(() => undefined).then(async () => {
-      if(epoch!==draftEpoch.current)return;
+      if(epoch!==draftEpoch.current||latestSnapshot.current!==snapshot)return;
       await db.runAsync('INSERT INTO batch_drafts(batch_id,state,updated_at) VALUES(?,?,?) ON CONFLICT(batch_id) DO UPDATE SET state=excluded.state,updated_at=excluded.updated_at', id, snapshot, new Date().toISOString());
       if(valid()&&epoch===draftEpoch.current){persistedDraft.current=id;setHasDraft(true);}
     }).catch((failure: any) => {if(valid()&&epoch===draftEpoch.current)setError('Não foi possível salvar sua revisão no aparelho: ' + failure.message);});
     trackDraftWrite(db,'batch',id,writes.current);
-  }, [account, batch, brl, conflict, db, partial, ready, result, rows,captureScope]);
+  }, [account, batch, batchSourceToken, brl, conflict, db, partial, ready, result, rows, rowsJson, sourceRowsJson, captureScope]);
   useEffect(() => {
     if (!visible || !batch || !ready || result || conflict || !account) return;
     const controller = new AbortController();
@@ -277,7 +282,7 @@ export default function StatementBatchReview(p: Props) {
           <Text style={s.note}>{outcome.reason}</Text>
           {outcome.matches.map((match: any, index: number) => <View key={index} style={s.match}>
             <Text style={s.note}>{match.source === 'deleted' ? 'Registro removido anteriormente' : match.source === 'capture' ? 'Captura existente' : 'Extrato existente'}: {match.description}</Text>
-            <Text style={s.note}>{String(match.date).split('-').reverse().join('/')} · {Number(match.amount).toLocaleString('pt-BR', {style: 'currency', currency: 'BRL'})}{!match.account_known ? ' · conta não identificada' : ''}</Text>
+            <Text style={s.note}>{String(match.date).split('-').reverse().join('/')} · {BRL_FORMATTER.format(Number(match.amount || 0))}{!match.account_known ? ' · conta não identificada' : ''}</Text>
           </View>)}
           {(outcome.status === 'possible_duplicate' || row.confirmed_distinct) && <Pressable accessibilityRole="checkbox" accessibilityLabel={`Confirmar linha ${row.row_id} como diferente`}
             accessibilityState={{checked: row.confirmed_distinct, disabled: busy}} aria-checked={row.confirmed_distinct} aria-disabled={busy} disabled={busy} onPress={() => change(row.row_id, 'confirmed_distinct', !row.confirmed_distinct)} style={s.choice}>
@@ -291,7 +296,7 @@ export default function StatementBatchReview(p: Props) {
         <Text style={s.note}>Ao confirmar, só as linhas selecionadas e aprovadas entram no Extrato. As duplicidades são conferidas novamente no servidor.</Text>
         <Action label={busy ? 'Inserindo…' : preview.insert_count ? `Inserir ${preview.insert_count} movimentações` : 'Concluir sem inserir'} onPress={() => commit()} disabled={busy || checking || !preview.scan_complete || preview.rows.some((row: any) => row.selected && (['invalid', 'blocked'].includes(row.status) || (row.status === 'possible_duplicate' && !rows.find(item => item.row_id === row.row_id)?.confirmed_distinct)))} />
       </>}
-      {(hasDraft||!!conflict||!!account||partial||brl||JSON.stringify(rows)!==JSON.stringify(sourceRows(batch)))&&<Action label="Excluir rascunho deste lote" disabled={busy} secondary onPress={confirmForgetDraft} />}
+      {(hasDraft||!!conflict||!!account||partial||brl||rowsJson!==sourceRowsJson)&&<Action label="Excluir rascunho deste lote" disabled={busy} secondary onPress={confirmForgetDraft} />}
       <Action label="Remover este lote" disabled={busy} secondary onPress={() => confirmRemove(batch)} />
     </>}
     {result && <View accessibilityRole="alert"><Text style={s.new}>{result.inserted_count} movimentações inseridas · {result.skipped_count} linhas não inseridas.</Text>

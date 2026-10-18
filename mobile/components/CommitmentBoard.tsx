@@ -1,4 +1,4 @@
-import React, {useLayoutEffect, useState} from 'react';
+import React, {useLayoutEffect, useMemo, useState} from 'react';
 import {ScrollView, StyleSheet, Text, View} from 'react-native';
 import {Pressable, TextInput} from './InteractionControls';
 import {financialDateLabel} from '../utils/classification';
@@ -8,8 +8,8 @@ import FutureCommitmentEditor from './FutureCommitmentEditor';
 import PaymentLinkScreen from './PaymentLinkScreen';
 import InstallmentLabelEditor from './InstallmentLabelEditor';
 import {
-  amountText, cardLine2, closureWarning, commitmentFigures, decisionFilter, dedupeCardLabel, formatCharge, frequencyLabel, futureRemovalLabel, groupObligationSeries, kindLabel,
-  inactiveLine, needsLinkAction, paymentMethodLabel, pendingOccurrences, reconcileCharge, reconcileMeta, reinforcesClosure, renewalLabel, restanteCopy, settledRows, sumAmounts, type CommitmentFilter, type OccurrenceState,
+  amountText, cardLine2, civilToday, closureWarning, commitmentCutoff, commitmentFigures, decisionFilter, dedupeCardLabel, formatCharge, frequencyLabel, futureRemovalLabel, groupObligationSeries, kindLabel,
+  inactiveLine, needsLinkAction, paymentMethodLabel, reconcileCharge, reconcileMeta, reinforcesClosure, renewalLabel, restanteCopy, settledRows, sumAmounts, type CommitmentFigures, type CommitmentFilter, type OccurrenceState,
 } from '../utils/commitmentPresentation';
 import {headingForInstallment, headingForManaged, settlementLabel} from '../utils/commitmentProfile';
 import {useLocalBack} from '../utils/localBack';
@@ -18,7 +18,7 @@ import {useScheduleOverlay} from './ScheduleOverlay';
 import CommitmentProfileEditor from './CommitmentProfileEditor';
 
 type Api = (path: string, init?: RequestInit) => Promise<any>;
-type Card = {key: string; source: 'managed' | 'installment' | 'obligation'; title: string; subtitle: string; payload: any; completed: boolean};
+type Card = {key: string; source: 'managed' | 'installment' | 'obligation'; title: string; subtitle: string; payload: any; completed: boolean; figures: CommitmentFigures};
 
 const filters: CommitmentFilter[] = ['Tudo', 'Assinaturas', 'Contas', 'Parcelas', 'Dívidas'];
 function removalPreviewPath(source: string, identity: string) {
@@ -125,30 +125,46 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
   const [importedUndo, setImportedUndo] = useState<{source: 'installment' | 'obligation'; identity: string; revision: number; title: string; transactionId?: string; provisionalId?: string} | null>(null);
 
   const wide = width >= 960;
-  const managed: Card[] = items.map(item => {
-    const heading = headingForManaged(item);
+  const todayKey = civilToday();
+  const cutoffKey = commitmentCutoff();
+  const cards = useMemo<Card[]>(() => {
+    const managed: Card[] = items.map(item => {
+      const heading = headingForManaged(item);
+      return {
+        key: `managed:${item.commitment_id}`, source: 'managed', title: heading.title, subtitle: heading.subtitle, payload: item,
+        completed: item.status === 'concluido' || item.status === 'cancelado',
+        figures: commitmentFigures('managed', item, todayKey, cutoffKey),
+      };
+    });
+    const plans: Card[] = legacy.map(item => {
+      const heading = headingForInstallment(item);
+      const projected = (item.installments || []).filter((part: any) => part.status === 'projetada' && !part.payment_link);
+      return {
+        key: `installment:${item.id}`, source: 'installment', title: heading.title, subtitle: heading.subtitle, payload: item,
+        completed: projected.length === 0 || sumAmounts(projected.map((part: any) => part.valor || 0)) === 0,
+        figures: commitmentFigures('installment', item, todayKey, cutoffKey),
+      };
+    });
+    const seriesCards: Card[] = groupObligationSeries(obligations).map(series => ({
+      key: `series:${series.series_key}`, source: 'obligation', title: series.title, subtitle: series.subtitle, payload: series,
+      completed: false,
+      figures: commitmentFigures('obligation', series, todayKey, cutoffKey),
+    }));
+    return [...managed, ...plans, ...seriesCards];
+  }, [items, legacy, obligations, todayKey, cutoffKey]);
+  const {active, completed} = useMemo(() => {
+    const visible = (card: Card) => filter === 'Tudo' || decisionFilter(card.source, card.payload) === filter;
     return {
-      key: `managed:${item.commitment_id}`, source: 'managed', title: heading.title, subtitle: heading.subtitle, payload: item,
-      completed: item.status === 'concluido' || item.status === 'cancelado',
+      active: cards.filter(card => visible(card) && !card.completed),
+      completed: cards.filter(card => visible(card) && card.completed),
     };
-  });
-  const plans: Card[] = legacy.map(item => {
-    const heading = headingForInstallment(item);
-    const projected = (item.installments || []).filter((part: any) => part.status === 'projetada' && !part.payment_link);
-    return {key: `installment:${item.id}`, source: 'installment', title: heading.title, subtitle: heading.subtitle, payload: item, completed: projected.length === 0 || sumAmounts(projected.map((part: any) => part.valor || 0)) === 0};
-  });
-  const seriesCards: Card[] = groupObligationSeries(obligations).map(series => ({
-    key: `series:${series.series_key}`, source: 'obligation', title: series.title, subtitle: series.subtitle, payload: series, completed: false,
-  }));
-  const cards = [...managed, ...plans, ...seriesCards];
-  const visible = (card: Card) => filter === 'Tudo' || decisionFilter(card.source, card.payload) === filter;
-  const active = cards.filter(card => visible(card) && !card.completed);
-  const completed = cards.filter(card => visible(card) && card.completed);
-  const reconcile = cards.flatMap(card => {
-    const open = pendingOccurrences(card.source, card.payload).find(row => reconcileCharge(row.due, row.state));
-    if (!open || card.completed) return [];
+  }, [cards, filter]);
+  const reconcile = useMemo(() => cards.flatMap(card => {
+    if (card.completed) return [];
+    const open = card.figures.pending.find(row => reconcileCharge(row.due, row.state, todayKey, cutoffKey));
+    if (!open) return [];
     return [{key: card.key, cardKey: card.key, title: card.title, due: open.due, amount: open.amount, estimated: open.estimated, state: open.state, managed: card.source === 'managed' ? card.payload : null}];
-  }).sort((left, right) => (left.state === 'Vencido · sem vínculo' ? 0 : 1) - (right.state === 'Vencido · sem vínculo' ? 0 : 1) || left.due.localeCompare(right.due) || left.title.localeCompare(right.title));
+  }).sort((left, right) => (left.state === 'Vencido · sem vínculo' ? 0 : 1) - (right.state === 'Vencido · sem vínculo' ? 0 : 1) || left.due.localeCompare(right.due) || left.title.localeCompare(right.title)), [cards, todayKey, cutoffKey]);
   const shownReconcile = reconcileAll ? reconcile : reconcile.slice(0, 3);
   useLocalBack(() => {
     if (linkRequest) {setLinkRequest(null); return;}
@@ -392,7 +408,7 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
   };
   const scheduleOverlay = useScheduleOverlay();
   const scheduleView = (card: Card) => {
-    const figures = commitmentFigures(card.source, card.payload);
+    const figures = card.figures;
     const paid = settledRows(card.source, card.payload).slice().sort((left, right) => left.due.localeCompare(right.due) || left.key.localeCompare(right.key)).map(row => ({
       key: row.key,
       due: row.due,
@@ -430,7 +446,7 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
   const paidRows = (card: Card) => settledRows(card.source, card.payload).slice().sort((left, right) => right.due.localeCompare(left.due) || left.key.localeCompare(right.key));
   const detailBody = (card: Card) => {
     const item = card.payload;
-    const figures = commitmentFigures(card.source, card.payload);
+    const figures = card.figures;
     const restante = restanteCopy(figures, money);
     const estimated = figures.estimated;
     const upcoming = figures.pending;
@@ -523,10 +539,14 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
   };
   useLayoutEffect(() => {
     if (editing) return;
-    const opened = cards.find(item => item.key === openKey);
+    if (!openKey && !linkRequest && !paidTarget && !scheduleKey) {
+      scheduleOverlay.clear();
+      return;
+    }
+    const opened = openKey ? cards.find(item => item.key === openKey) : null;
     const linking = linkRequest ? cards.find(item => item.key === linkRequest.cardKey) : null;
     const paid = paidTarget ? cards.map(card => card.payload).filter(item => item?.commitment_id && paidTarget.startsWith(`${item.commitment_id}:`)).flatMap(item => (item.linked_transactions || []).map((link: any) => ({item, link}))).find(entry => paidTarget === `${entry.item.commitment_id}:${entry.link.transaction_id || entry.link.provisional_id}`) : null;
-    const scheduled = cards.find(item => item.key === scheduleKey);
+    const scheduled = scheduleKey ? cards.find(item => item.key === scheduleKey) : null;
     if (linking && linkRequest && (linking.source === 'managed' || !linkRequest.swap)) {
       const managedLink = linking.source === 'managed';
       const subject = managedLink ? linking.payload : {name: linking.title, commitment_id: linking.payload?.commitment_id || linking.payload?.id || linking.key};
@@ -571,10 +591,10 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
       });
     }
     return () => scheduleOverlay.clear();
-  }, [editing, scheduleKey, openKey, paidTarget, paidOpen, futureEdit, profileEdit, endEdit, endMonth, linkRequest, scheduleSegment, collapsedYears, actionsKey, closeKey, confirmKey, armedKey, items, legacy, obligations, busy, paymentStamp, linkUndo]);
+  }, [editing, scheduleKey, openKey, paidTarget, paidOpen, futureEdit, profileEdit, endEdit, endMonth, linkRequest, scheduleSegment, collapsedYears, cards, busy, paymentStamp, linkUndo]);
   const cardView = (card: Card) => {
     const item = card.payload;
-    const figures = commitmentFigures(card.source, card.payload);
+    const figures = card.figures;
     const copy = restanteCopy(figures, money);
     const open = () => {setScheduleKey(null); setActionsKey(null); setOpenKey(card.key);};
     const charge = formatCharge(figures.chargeAmount, figures.suffix, figures.estimated && !figures.chargeMuted, money);

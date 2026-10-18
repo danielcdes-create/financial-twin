@@ -10,6 +10,12 @@ Notificações separam aprovação/recusa/estorno do contexto da compra, comerci
 
 O backend permanece neste PC, conforme a escolha do usuário. PC, sessão Windows e Tailscale precisam estar ativos; suspensão ou desligamento interrompem o acesso. Não foram alteradas as preferências de bateria/suspensão, nem foi contratado um serviço externo.
 
+## Leituras repetidas — 1.20.71
+
+Listas, cards e gráficos reutilizam um `Intl.NumberFormat` e um `Intl.DateTimeFormat` de módulo. O quadro de compromissos calcula as figuras de cada card uma vez por mudança das entradas e não limpa o painel de agenda quando ele já está fechado. O rascunho da revisão e do lote serializa a fonte uma vez, e gravações SQLite concorrentes ficam na última linha pedida.
+
+No servidor, rótulos de parcelamento buscam os lançamentos vinculados por `$in`, com o identificador original, o texto e o `ObjectId` quando ele é válido. Não há varredura da coleção quando um vínculo não aparece. A página de capturas e a de movimentações montam um contexto histórico uma vez e o reutilizam ao sugerir vendedor e plataforma. A lista de compromissos resolve vigência, extrato vinculado e nome do cartão em lote. O cache de opções de classificação não cai em `POST`/`PATCH` de prévia ou revisão. A trava de inserção incrementa o documento `movement-insert` uma vez por transação MongoDB.
+
 ## Servidor
 
 - `backend/run_dev.py` supervisiona um único processo HTTP em `run_server.py`. Um mutex Windows impede supervisores duplicados entre o atalho e a tarefa `Financial Twin Backend`.

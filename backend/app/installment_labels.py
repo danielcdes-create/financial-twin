@@ -16,14 +16,22 @@ def _rows_for(db, identities):
     wanted = [item for item in identities if item not in (None, '')]
     if not wanted:
         return []
-    found = list(db.transactions.find({'_id': {'$in': wanted}}))
-    seen = {str(row.get('_id')) for row in found}
-    if len(seen) < len({str(item) for item in wanted}):
-        for row in db.transactions.find({}):
-            if str(row.get('_id')) in {str(item) for item in wanted} and str(row.get('_id')) not in seen:
-                found.append(row)
-                seen.add(str(row.get('_id')))
-    return found
+    lookup = []
+    seen = set()
+    for item in wanted:
+        text = str(item)
+        candidates = [item, text]
+        if ObjectId.is_valid(text):
+            candidates.append(ObjectId(text))
+        for candidate in candidates:
+            key = (type(candidate), str(candidate))
+            if key not in seen:
+                seen.add(key)
+                lookup.append(candidate)
+    try:
+        return list(db.transactions.find({'_id': {'$in': lookup}}))
+    except TypeError:
+        return []
 
 
 def card_labels(db, card_ids):

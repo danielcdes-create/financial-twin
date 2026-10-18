@@ -36,7 +36,7 @@ export async function listLocalDrafts(db: Db): Promise<LocalDraft[]> {
   const groups = await Promise.all((Object.keys(tables) as Kind[]).map(async kind => {
     const rows = await db.getAllAsync<Record<string, any>>(`SELECT * FROM ${tables[kind].table}`);
     return rows.map(row => {
-      const state = parsed(kind === 'review' ? row.draft : row.state), item = parsed(row.item) || state?.item || {};
+      const state = parsed(kind === 'review' ? row.draft : row.state), item = (kind === 'review' ? parsed(row.item) : null) || state?.item || {};
       const name = textValue(state?.draft?.merchant, state?.draft?.vendedor, state?.vendedor, state?.name, state?.filename, item.vendedor, item.merchant_name, item.merchant_raw, item.descricao_original, item.texto_original, item.raw_text, state?.text);
       const pendingCreation = kind === 'batch' && row.batch_id === 'commitment-create' && !state?.creation_receipt;
       let title = kind === 'review' ? 'Revisão de captura' : kind === 'batch' ? 'Revisão de lote' : kind === 'voice' ? 'Captura por voz' : 'Cópia preservada';
