@@ -2,6 +2,16 @@
 
 Julgamento da árvore local de `financial-app` a partir de `431aaf5`, com a correção de contagem dupla desta entrega, commit `cc7f562`. Dados sintéticos. O ledger ao vivo não foi lido, escrito, deduplicado nem reparado. O release privado no disco é Android 1.20.68 / versionCode 114, SHA-256 `7CF20E65021FC28CE5B4E2A055C7F2AC4C38B7FF51A338F894510C4EC8EDE38F`, commit `49253ef`, com o certificado de debug anterior. A instalação física permanece unverified.
 
+## Entrega 18/10/2026 — sessão biométrica
+
+Commit do recurso `ef97ad5`. O ledger ao vivo não foi lido nem escrito. Nesta passagem passaram `backend/tests/test_auth.py` (14), `mobile/scripts/test-account-security.cjs` e `mobile/scripts/test-auth-transitions.cjs` (10). A suíte completa do cliente e a homologação física não foram repetidas.
+
+| Correção | Veredito |
+| --- | --- |
+| Sessão nativa de 12 horas | defect fixed. No aplicativo, a sessão de dispositivo e a biometria duram 30 dias e se renovam a cada validação em `/v1/auth/account`, com o mesmo `jti`. No navegador continua 12 horas. |
+| Segundo pedido de digital ao renovar | defect fixed. A renovação usa o envelope já protegido pelo hardware. Um blur ou uma oscilação de rede depois da leitura do sensor não abre outro `BiometricPrompt`. |
+| Samsung Pass reinicia a biometria | defect fixed. Na tela bloqueada, o preenchimento automático não apaga os campos nem recomeça o ciclo biométrico. Cancelar o sensor, trocar a digital ou receber 401 ainda pede senha. |
+
 ## Entrega 17/10/2026 — selo e esforço em Cabe na minha vida
 
 Commit do recurso `89ddc4a`, empacotado em `49253ef`. APK ARM64 de 48087604 bytes, SHA-256 `7CF20E65021FC28CE5B4E2A055C7F2AC4C38B7FF51A338F894510C4EC8EDE38F`, assinante `FAC61745DC0903786FB9EDE62A962B399F7348F0BB6F899B8332667591033B9C`. O ledger ao vivo não foi lido nem escrito. Nesta passagem passaram `mobile/scripts/test-purchase-copy.cjs`, `mobile/scripts/test-purchase-card.cjs`, `backend/tests/test_purchase_horizon.py` e `backend/tests/test_purchase_check.py`. A suíte completa do cliente e a homologação física não foram repetidas.
