@@ -139,9 +139,9 @@ class FilterConsistencyTests(unittest.TestCase):
         for item in (with_merchant_name(row,db),with_merchant_names([row],db)[0]):
             self.assertIsNone(item['categoria_sugerida'])
             self.assertIsNone(item['categoria'])
-            self.assertEqual(item['categoria_inferida'],'Despesas Financeiras')
+            self.assertEqual(item['categoria_inferida'],'Finanças/Impostos')
         self.assertEqual(listing(db,category='Sem categoria')['total'],1)
-        self.assertEqual(listing(db,category='Despesas Financeiras')['total'],0)
+        self.assertEqual(listing(db,category='Finanças/Impostos')['total'],0)
         self.assertEqual(row,original)
 
     def test_cursor_is_bound_to_search_category_account_dates_basis_and_spending(self):

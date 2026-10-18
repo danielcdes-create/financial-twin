@@ -98,7 +98,7 @@ class SubcategoryTests(unittest.TestCase):
         with self.assertRaises(HTTPException) as error: self.create('energia solar')
         self.assertEqual(error.exception.status_code, 409)
         self.create('energia solar', 'Transporte')
-        with self.assertRaises(HTTPException): self.create('Manutencao')
+        with self.assertRaises(HTTPException): self.create('Energia')
 
     def test_rename_updates_aliases_and_live_captures_only_preserving_money_and_sources(self):
         self.seed()
@@ -117,20 +117,20 @@ class SubcategoryTests(unittest.TestCase):
         self.assertIn('Reparos', category_subcategories(self.db)['Habitação'])
 
     def test_case_only_rename_changes_display_without_duplicate_or_tombstone(self):
-        self.rename('IPTU', 'Iptu')
+        self.rename('Energia', 'energia')
         options = category_subcategories(self.db)['Habitação']
-        self.assertIn('Iptu', options)
-        self.assertNotIn('IPTU', options)
-        self.assertEqual(len([name for name in options if name.lower() == 'iptu']), 1)
+        self.assertIn('energia', options)
+        self.assertNotIn('Energia', options)
+        self.assertEqual(len([name for name in options if name.lower() == 'energia']), 1)
 
     def test_delete_default_is_durable_and_explicit_recreation_restores_it(self):
-        self.delete('IPTU')
-        self.assertNotIn('IPTU', category_subcategories(self.db)['Habitação'])
-        self.create('IPTU')
-        self.assertIn('IPTU', category_subcategories(self.db)['Habitação'])
+        self.delete('Energia')
+        self.assertNotIn('Energia', category_subcategories(self.db)['Habitação'])
+        self.create('Energia')
+        self.assertIn('Energia', category_subcategories(self.db)['Habitação'])
 
     def test_future_suggestions_follow_renames_and_do_not_recreate_deleted_defaults(self):
-        self.rename('IPTU', 'Imposto da casa')
+        self.rename('IPTU/Seguro', 'Imposto da casa')
         self.rename('Imposto da casa', 'Tributo municipal')
         suggestion = infer_classification({'descricao_original': 'PARCELA IPTU'}, taxonomy_overrides(self.db))
         self.assertEqual(suggestion['subcategoria'], 'Tributo municipal')
@@ -180,7 +180,7 @@ class SubcategoryTests(unittest.TestCase):
     def test_rename_to_existing_does_not_silently_merge(self):
         self.seed()
         before = copy.deepcopy(self.db.transactions.docs)
-        with self.assertRaises(HTTPException): self.rename('Manutenção', 'IPTU')
+        with self.assertRaises(HTTPException): self.rename('Manutenção', 'Condomínio')
         self.assertEqual(self.db.transactions.docs, before)
 
     def test_audit_failure_rolls_back_labels_and_catalog(self):

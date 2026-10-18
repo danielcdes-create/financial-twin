@@ -45,7 +45,7 @@ from app.parcelamento_link import decorate_purchase_links, ensure_parcelamento_p
 from app.future_commitments import effective_documents, overlay_link_names
 from app.providers.import_provider import ImportFinancialProvider
 from app.platforms import PLATFORMS, _merchant_catalog, apply_historical_capture_defaults, build_vendor_defaults, has_vendor_tokens_beyond_platform, historical_capture_profile, platform_identity
-from app.taxonomy import NATURES, NATURE_LABELS, CURATED_SUBCATEGORIES, category_subcategories, infer_classification, taxonomy_overrides, normalized as taxonomy_key
+from app.taxonomy import NATURES, NATURE_LABELS, CURATED_SUBCATEGORIES, category_subcategories, infer_classification, rejects_direct_level1_posting, taxonomy_catalog, taxonomy_overrides, normalized as taxonomy_key
 from app.account_positions import account_key_for_legacy, account_positions, validate_account_key, reconcile_capture_transfer
 from app.account_profiles import (AccountProfileCreate, AccountProfileUpdate, AccountProfileDelete,
     account_usage, create_profile, update_profile, delete_profile, movement_account_context, capture_account_query, legacy_accounts_by_profile)
@@ -903,6 +903,7 @@ def build_classification_options(db):
     result["categoria_subcategorias"]=category_subcategories(db)
     result["subcategoria"]=sorted({name for names in result["categoria_subcategorias"].values() for name in names},key=str.casefold)
     result["vendor_defaults"]=build_vendor_defaults(db)
+    result["taxonomy"]=taxonomy_catalog()
     return result
 
 class TransactionClassificationUpdate(BaseModel):
@@ -1062,6 +1063,8 @@ def _update_transaction_classification(transaction_id:str, update:TransactionCla
                 if db.refund_claims.find_one({'_id':'ledger:'+identity}) or db.commitments.find_one({'linked_transactions.transaction_id':identity}):
                     raise HTTPException(409,'Um registro da prévia sustenta vínculo financeiro; revise o conjunto antes de aplicar.')
     effective_category=changes.get("categoria",item.get("categoria"))
+    if "categoria" in changes and rejects_direct_level1_posting(changes.get("categoria"), changes.get("subcategoria", item.get("subcategoria"))):
+        raise HTTPException(422, "Este grupo não aceita lançamento direto. Escolha uma subcategoria.")
     retired=taxonomy_overrides(db).get(taxonomy_key(effective_category),{}).get(taxonomy_key(changes.get("subcategoria")),{}).get("active") is False if "subcategoria" in changes else False
     if changes.get("subcategoria") and (effective_category in CURATED_SUBCATEGORIES or retired):
         allowed=set(category_subcategories(db).get(effective_category, []))
@@ -1617,6 +1620,8 @@ def _atomic_update_provisional(provisional_id:str, update:ProvisionalUpdate, db=
     validate_signed_flow(final)
     if item.get("status")=="confirmed": validate_confirmed_provisional(final,db)
     effective_category=values.get("categoria_sugerida",item.get("categoria_sugerida"))
+    if "categoria_sugerida" in values and rejects_direct_level1_posting(values.get("categoria_sugerida"), values.get("subcategoria", item.get("subcategoria"))):
+        raise HTTPException(422, "Este grupo não aceita lançamento direto. Escolha uma subcategoria.")
     retired=taxonomy_overrides(db).get(taxonomy_key(effective_category),{}).get(taxonomy_key(values.get("subcategoria")),{}).get("active") is False if "subcategoria" in values else False
     if values.get("subcategoria") and (effective_category in CURATED_SUBCATEGORIES or retired):
         allowed=set(category_subcategories(db).get(effective_category, []))
@@ -2923,7 +2928,7 @@ def categories(db=Depends(database)):
         provisional_count=provisional_counts.get(k,0)
         extra_count=extra_counts.get(k,0)
         details.append({"name":name,"usage_count":transaction_count+provisional_count+extra_count,"transaction_count":transaction_count,"provisional_count":provisional_count,"custom":k in catalog,"subcategory_count":len(subcategories_by_category.get(name, []))})
-    return {"items":ordered,"details":details}
+    return {"items":ordered,"details":details,"taxonomy":taxonomy_catalog()}
 
 class CategoryCreate(BaseModel):
     name:str=Field(min_length=1,max_length=120)
