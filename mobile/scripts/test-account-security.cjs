@@ -48,7 +48,13 @@ function load(file) {
   assert.equal(prompt.disableDeviceFallback, true); assert.equal(prompt.biometricsSecurityLevel, 'strong');
   assert.equal(await biometric.biometricEnabled(), true);
   assert.equal((await biometric.readBiometricSession()).token, 'biometric-secret');
+  const protectedWritesBefore = writes.filter(item => item.key.includes('biometric-session')).length;
+  await biometric.updateBiometricSession('renewed-biometric-secret', Date.now() + 120000);
+  assert.equal(writes.filter(item => item.key.includes('biometric-session')).length, protectedWritesBefore, 'Sliding renewal uses hardware-anchored envelope without triggering a second OS prompt');
+  assert.equal(await biometric.biometricEnabled(), true);
+  assert.equal((await biometric.readBiometricSession()).token, 'renewed-biometric-secret');
   values.delete(sessionWrite.key); await assert.rejects(biometric.readBiometricSession(), /alterada/);
+  await biometric.clearBiometricSession();
   values.set(sessionWrite.key, JSON.stringify({token: 'expired', expiresAt: Date.now() - 1}));
   await assert.rejects(biometric.readBiometricSession(), /expirada/);
   await biometric.clearBiometricSession(); assert.equal(await biometric.biometricEnabled(), false);
@@ -81,5 +87,5 @@ function load(file) {
   const desktop = load('utils/sessionClient.ts');
   assert.equal(desktop.API, 'http://127.0.0.1:8000', 'Local desktop must use the local server without tailnet dependency');
   await assert.rejects(desktop.api.json('/v1/dashboard'), /Entre/);
-  console.log('PASS: account privacy, TLS, strong biometrics, cancellation, protected storage, expiration, revocation and late-write blocking.');
+  console.log('PASS: account privacy, TLS, strong biometrics, cancellation, protected storage, envelope renewal, expiration, revocation and late-write blocking.');
 })().catch(error => {console.error(error); process.exitCode = 1;});

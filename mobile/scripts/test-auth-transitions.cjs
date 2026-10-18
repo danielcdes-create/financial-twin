@@ -12,7 +12,7 @@ function harness({biometric=false,security=false}={}){
   class TestDate extends Date{static now(){return clock;}}
   const native={Platform:{OS:'android'},AppState:{currentState:'active',addEventListener:(event,listener)=>{events.on(event,listener);return{remove:()=>events.off(event,listener)};}},Keyboard:{dismiss(){}},StyleSheet:{create:value=>value},
     ...Object.fromEntries(['View','Text','TextInput','Pressable','ActivityIndicator','KeyboardAvoidingView','ScrollView'].map(name=>[name,name]))};
-  const mocks={'react':React,'react-native':native,'react-native-safe-area-context':{SafeAreaView:'SafeAreaView'},'../utils/useScreenPrivacy':{useScreenPrivacy(){}},'../utils/appAlert':{clearDialogs(){},Alert:{alert(){}}},
+  const mocks={'react':React,'react-native':native,'react-native-safe-area-context':{SafeAreaView:'SafeAreaView'},'expo-router':{router:{canGoBack:()=>false,back(){},replace(){}}},'../utils/useScreenPrivacy':{useScreenPrivacy(){}},'../utils/appAlert':{clearDialogs(){},Alert:{alert(){}}},
     '../utils/biometricSession':{removeLegacySession:async()=>{},biometricAvailable:async()=>biometric,biometricEnabled:async()=>biometric,
       readBiometricSession:()=>{const prompt=deferred();prompts.push(prompt);return prompt.promise;},clearBiometricSession:async()=>{},updateBiometricSession:async()=>{},saveBiometricSession:async()=>{}}};
   if(security){mocks['../utils/sessionClient']={api:{json:(...args)=>request(...args)}};mocks['./AuthProvider']={useAuth:()=>({account:{username:'synthetic',display_name:'Synthetic'},setAccount(){accountWrites++;},replaceSession:async()=>{},biometricOn:false,biometricSupported:false}),
@@ -34,6 +34,8 @@ function harness({biometric=false,security=false}={}){
     emit:async(event,state)=>act(async()=>{if(event==='change')native.AppState.currentState=state;events.emit(event,state);}),
     advance:async(ms)=>act(async()=>{clock+=ms;for(const[id,timer]of [...timers])if(timer.at<=clock){timers.delete(id);timer.callback();}}),
     press:async label=>act(async()=>{const button=renderer.root.findAllByType('Pressable').find(node=>node.props.accessibilityLabel===label||node.findAllByType('Text').some(text=>text.props.children===label));assert.ok(button,label);assert.ok(!button.props.disabled,label+' enabled');button.props.onPress();}),
+    input:async(label,value)=>act(async()=>{renderer.root.findByProps({accessibilityLabel:label}).props.onChangeText(value);}),
+    fieldValue:label=>renderer.root.findByProps({accessibilityLabel:label}).props.value,
     text:()=>renderer.root.findAllByType('Text').map(node=>[].concat(node.props.children).join('')).join('\n'),
     covered:()=>renderer.root.findAllByProps({accessibilityLabel:'Dados protegidos'}).length>0,
     passwordFields:()=>renderer.root.findAllByType('TextInput').length};
@@ -62,12 +64,27 @@ async function check(name,options,work){const h=harness(options);try{await work(
     assert.equal(h.requests.filter(route=>route==='/v1/auth/account').length,0,'Covered login cannot bypass suspended private networking');
     await h.emit('focus');await settle();assert.equal(h.requests.filter(route=>route==='/v1/auth/account').length,1);assert.equal(h.session.authState.unlocked(),true);
   });
-  await check('Blur cancels biometric server validation and discards the late response',{biometric:true},async h=>{
+  await check('Blur cancels biometric server validation and allows retry without re-prompting OS sensor',{biometric:true},async h=>{
     const response=deferred();let signal;
     await h.mount();h.fetchDelegate=async(route,init)=>{assert.equal(route,'/v1/auth/account');signal=init.signal;return response.promise;};
     await act(async()=>h.prompts[0].resolve({token:'synthetic-biometric',expiresAt:h.clock+60_000}));await settle();assert.ok(signal);
     await h.emit('blur');assert.equal(signal.aborted,true,'Private biometric validation is cancelled by the privacy cover');
     await act(async()=>response.resolve(new Response('{"username":"synthetic","display_name":"Synthetic"}')));await h.emit('focus');await settle();assert.equal(h.session.authState.unlocked(),false);assert.match(h.text(),/A validação foi interrompida/);assert.doesNotMatch(h.text(),/Consulta cancelada/);
+    assert.equal(h.passwordFields(),0,'Transient validation interruption keeps the biometric screen available');
+    h.fetchDelegate=null;await h.press('Desbloquear com biometria');await settle();
+    assert.equal(h.prompts.length,1,'Retry in the same lock cycle reuses the hardware-unlocked token without a duplicate OS fingerprint prompt');
+    assert.equal(h.session.authState.unlocked(),true);
+  });
+  await check('Samsung Pass / Android autofill overlay on password form preserves filled credentials and does not restart biometric prompt',{biometric:true},async h=>{
+    await h.mount();await act(async()=>h.prompts[0].reject(new Error('Sessão expirada. Entre com sua senha.')));await settle();
+    assert.equal(h.passwordFields(),2);
+    await h.emit('blur');await h.emit('change','inactive');
+    await h.input('Usuário','daniel');await h.input('Senha','autofilled-secret-123');
+    await h.emit('change','active');await h.emit('focus');await settle();
+    assert.equal(h.passwordFields(),2,'Autofill activity return stays on password form');
+    assert.equal(h.fieldValue('Usuário'),'daniel');
+    assert.equal(h.fieldValue('Senha'),'autofilled-secret-123');
+    assert.equal(h.prompts.length,1,'Autofill return must not re-trigger the expired biometric prompt');
   });
   await check('A cancelled request cannot later mark a newer connection as reconnecting',{},async h=>{
     const {createApiClient}=h.load('utils/apiClient.ts'),old=deferred();let calls=0;
@@ -85,5 +102,5 @@ async function check(name,options,work){const h=harness(options);try{await work(
     await h.mount();await h.press('Atualizar sessões');await settle();assert.match(h.text(),/Latest synthetic session/);
     await act(async()=>old.reject(new Error('Obsolete sessions error')));assert.doesNotMatch(h.text(),/Obsolete sessions error/);
   });
-  if(failures.length){console.error(`${failures.length} auth-transition regressions failed`);process.exitCode=1;}else console.log('9 auth-transition regressions passed; synthetic OS, clock and HTTP only.');
+  if(failures.length){console.error(`${failures.length} auth-transition regressions failed`);process.exitCode=1;}else console.log('10 auth-transition regressions passed; synthetic OS, clock and HTTP only.');
 })().catch(error=>{console.error(error);process.exitCode=1;});

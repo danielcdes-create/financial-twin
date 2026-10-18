@@ -13,8 +13,8 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parents[1]))
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from app.auth import (OWNER_ID, create_session_token, require_session, session_hash,
-                      hash_password, verify_password, LoginAttempts)
+from app.auth import (BIOMETRIC_SESSION_SECONDS, OWNER_ID, create_session_token, renew_session_token, require_session,
+                      session_hash, session_response, hash_password, verify_password, LoginAttempts)
 from app.main import app
 
 
@@ -25,8 +25,10 @@ class SessionTests(unittest.TestCase):
         self.settings_patch.start()
         self.identity = secrets.token_urlsafe(32)
         self.account = {'_id': OWNER_ID, 'kind': 'app_identity', 'auth_version': 2,
+                        'username': 'daniel', 'display_name': 'Daniel', 'password_hash': 'hash',
                         'sessions': [{'id': session_hash(self.identity), 'expires_at': int(time.time()) + 100}]}
-        self.db = SimpleNamespace(account=SimpleNamespace(find_one=lambda query: self.account))
+        self.db = SimpleNamespace(account=SimpleNamespace(find_one=lambda query: self.account,
+                                                          update_one=lambda *a, **kw: SimpleNamespace(matched_count=1)))
         self.request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(db=self.db)))
         self.token = create_session_token(OWNER_ID, 2, self.identity)
 
@@ -47,6 +49,18 @@ class SessionTests(unittest.TestCase):
     def test_expired_boundary_is_rejected(self):
         with patch('app.auth.time.time', return_value=int(time.time()) + 43200):
             with self.assertRaises(HTTPException): self.check(self.token)
+
+    def test_biometric_device_session_and_sliding_renewal(self):
+        mobile_resp = session_response(self.db, self.account, 'Android')
+        self.assertEqual(mobile_resp['expires_in'], BIOMETRIC_SESSION_SECONDS)
+        web_resp = session_response(self.db, self.account, 'Navegador')
+        self.assertEqual(web_resp['expires_in'], 43200)
+        renewed = renew_session_token(self.db, self.account, self.identity)
+        self.assertIsNotNone(renewed)
+        self.assertEqual(renewed['expires_in'], BIOMETRIC_SESSION_SECONDS)
+        self.assertEqual(len(self.account['sessions']), 1)
+        with patch('app.auth.time.time', return_value=int(time.time()) + 86400):
+            self.assertEqual(self.check(renewed['access_token'])['session_id'], session_hash(self.identity))
 
     def test_revoke_and_password_version_invalidate(self):
         self.account['sessions'] = []

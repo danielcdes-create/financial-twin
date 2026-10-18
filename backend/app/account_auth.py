@@ -3,11 +3,12 @@ import hmac
 import re
 import time
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field, field_validator
 from pymongo.errors import DuplicateKeyError
-from app.auth import (OWNER_ID, auth_database, auth_settings, get_settings, hash_password,
-                      login_attempts, owner, public_account, require_session, session_response, verify_password)
+from app.auth import (BIOMETRIC_SESSION_SECONDS, OWNER_ID, auth_database, auth_settings, get_settings, hash_password,
+                      login_attempts, owner, public_account, renew_session_token, require_session, session_response,
+                      verify_password)
 
 router = APIRouter(prefix='/v1/auth', tags=['account'])
 
@@ -113,8 +114,26 @@ def login(body: LoginInput, request: Request):
 
 
 @router.get('/account')
-def account_info(session=Depends(require_session)):
+def account_info(request: Request, response: Response, session=Depends(require_session)):
+    jti = session.get('jti', '')
+    if jti:
+        try:
+            renewed = renew_session_token(auth_database(request), session['account'], jti, BIOMETRIC_SESSION_SECONDS)
+            if renewed:
+                response.headers['X-Session-Token'] = renewed['access_token']
+                response.headers['X-Session-Expires-In'] = str(renewed['expires_in'])
+        except Exception:
+            pass
     return public_account(session['account'])
+
+
+@router.post('/biometric')
+def biometric_refresh(request: Request, session=Depends(require_session)):
+    jti = session.get('jti', '')
+    renewed = renew_session_token(auth_database(request), session['account'], jti, BIOMETRIC_SESSION_SECONDS)
+    if renewed:
+        return renewed
+    return session_response(auth_database(request), session['account'], 'Este aparelho', BIOMETRIC_SESSION_SECONDS)
 
 
 @router.patch('/account')

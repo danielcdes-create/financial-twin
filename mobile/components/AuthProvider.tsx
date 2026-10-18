@@ -3,7 +3,7 @@ import {ActivityIndicator, AppState, KeyboardAvoidingView, Platform, ScrollView,
 import {Pressable, TextInput} from './InteractionControls';
 import {SafeAreaView} from 'react-native-safe-area-context';
 import {API, api, authState} from '../utils/sessionClient';
-import {createApiClient, isAbort} from '../utils/apiClient';
+import {createApiClient, isAbort, isTransientFailure} from '../utils/apiClient';
 import {requirePrivateTransport} from '../utils/authState';
 import * as biometrics from '../utils/biometricSession';
 import {useScreenPrivacy} from '../utils/useScreenPrivacy';
@@ -54,6 +54,7 @@ export default function AuthProvider({children}: {children: React.ReactNode}) {
   const checkingRef = useRef(checking);
   const focusWaiters = useRef(new Set<() => void>());
   const validationControllers = useRef(new Set<AbortController>());
+  const unlockedBiometric = useRef<{attempt: number; saved: {token: string; expiresAt: number}} | null>(null);
   const working = useRef(false);
   const prompting = useRef(false);
   const automaticBiometricAttempt = useRef<number | null>(null);
@@ -65,6 +66,7 @@ export default function AuthProvider({children}: {children: React.ReactNode}) {
   const resetLockCycle = useCallback(() => {
     if (hiddenTimer.current !== null) clearTimeout(hiddenTimer.current);
     hiddenTimer.current = null; hiddenSince.current = null;
+    unlockedBiometric.current = null;
     generation.current++;
     validationControllers.current.forEach(controller => controller.abort());
     if (mounted.current) {setAccount(null); setPassword(''); setConfirmation(''); setSetupToken(''); setPasswordMode(false);}
@@ -120,7 +122,10 @@ export default function AuthProvider({children}: {children: React.ReactNode}) {
     const hide = () => {
       cover();
       if (!authState.unlocked()) {
-        if (!prompting.current && !devicePromptActive()) lock();
+        // Only invalidate when an authentication request is actually in flight.
+        // External autofill/credential overlays (e.g. Samsung Pass) while editing
+        // login fields must not wipe typed credentials or restart biometric mode.
+        if (!prompting.current && !devicePromptActive() && working.current) lock();
         return;
       }
       // Repeated inactive/background/picker events must not extend the deadline.
@@ -169,21 +174,33 @@ export default function AuthProvider({children}: {children: React.ReactNode}) {
   const replaceSession = useCallback(async (body: SessionResponse) => {
     const attempt = generation.current;
     const expiresAt = Date.now() + body.expires_in * 1000;
+    await awaitForeground(attempt);
     if (biometricOn) {
       prompting.current = true;
       try {await biometrics.updateBiometricSession(body.access_token, expiresAt);}
-      catch {await biometrics.clearBiometricSession(); setBiometricOn(false);}
+      catch {/* Keep biometric setting enabled if OS overlay/prompt was dismissed during password login */}
       finally {prompting.current = false;}
     }
     await awaitForeground(attempt);
-    authState.activate(body.access_token, expiresAt); setAccount(body.account); setStatus(value => value ? {...value, setup_required: false} : value);
+    unlockedBiometric.current = null;
+    authState.activate(body.access_token, expiresAt); setAccount(body.account);
+    if (body.account?.username) setUsername(prev => prev || body.account.username);
+    setStatus(value => value ? {...value, setup_required: false} : value);
   }, [biometricOn, awaitForeground]);
 
   const toggleBiometric = useCallback(async () => {
     if (biometricOn) {await biometrics.clearBiometricSession(); setBiometricOn(false); return;}
-    const token = authState.getToken(); const expiry = authState.expiry();
+    let token = authState.getToken(); let expiry = authState.expiry();
     if (!token) throw new Error('Entre com sua senha para ativar a biometria.');
     const attempt = generation.current;
+    try {
+      const refreshed = await api.json('/v1/auth/biometric', {method: 'POST'});
+      if (refreshed?.access_token && Number.isFinite(refreshed?.expires_in)) {
+        token = refreshed.access_token;
+        expiry = Date.now() + refreshed.expires_in * 1000;
+        authState.activate(token, expiry);
+      }
+    } catch {/* Preserve existing token if refresh endpoint is not mocked or unreachable */}
     prompting.current = true;
     try {
       await biometrics.saveBiometricSession(token, expiry);
@@ -199,17 +216,20 @@ export default function AuthProvider({children}: {children: React.ReactNode}) {
     await biometrics.clearBiometricSession(); setBiometricOn(false);
   }, [lock]);
 
-  const run = useCallback(async (operation: () => Promise<void>) => {
+  const run = useCallback(async (operation: () => Promise<void>, clearSecrets = true) => {
     if (working.current) return;
     const attempt = generation.current;
     working.current = true; setBusy(true); setError('');
+    let shouldClear = clearSecrets;
     try {await operation();}
-    catch (e) {if (mounted.current && attempt === generation.current) setError(isAbort(e) ? 'A validação foi interrompida. Tente entrar novamente.' : e instanceof Error ? e.message : 'Não foi possível entrar.');}
-    finally {
+    catch (e) {
+      if (isAbort(e) || (clearSecrets && isTransientFailure(e))) shouldClear = false;
+      if (mounted.current && attempt === generation.current) setError(isAbort(e) ? 'A validação foi interrompida. Tente entrar novamente.' : e instanceof Error ? e.message : 'Não foi possível entrar.');
+    } finally {
       working.current = false;
       if (mounted.current) {
         setBusy(false);
-        if (attempt === generation.current) {setPassword(''); setConfirmation(''); setSetupToken('');}
+        if (shouldClear && attempt === generation.current) {setPassword(''); setConfirmation(''); setSetupToken('');}
       }
     }
   }, []);
@@ -225,24 +245,52 @@ export default function AuthProvider({children}: {children: React.ReactNode}) {
   const unlockBiometric = useCallback(() => run(async () => {
     const attempt = generation.current;
     prompting.current = true;
+    let saved: {token: string; expiresAt: number} | undefined;
     try {
-      const saved = await biometrics.readBiometricSession();
-      if (attempt !== generation.current) throw new Error('O aplicativo foi bloqueado. Tente novamente.');
+      if (unlockedBiometric.current && unlockedBiometric.current.attempt === attempt && unlockedBiometric.current.saved.expiresAt > Date.now()) {
+        saved = unlockedBiometric.current.saved;
+      } else {
+        saved = await biometrics.readBiometricSession();
+        if (attempt !== generation.current) throw new Error('O aplicativo foi bloqueado. Tente novamente.');
+        unlockedBiometric.current = {attempt, saved};
+      }
       await awaitForeground(attempt);
-      const validation = createApiClient({baseUrl: API, token: () => saved.token,
-        fetch: (input, init) => {requirePrivateTransport(API); return fetch(input, init);}});
+      let renewedToken = saved.token;
+      let renewedExpiresAt = saved.expiresAt;
+      const validation = createApiClient({baseUrl: API, token: () => saved!.token,
+        readRetryDelaysMs: [400, 800, 1500, 2500],
+        fetch: async (input, init) => {
+          requirePrivateTransport(API);
+          const response = await fetch(input, init);
+          const nextToken = response.headers?.get?.('X-Session-Token');
+          const nextExpiresIn = Number(response.headers?.get?.('X-Session-Expires-In'));
+          if (response.ok && nextToken && Number.isFinite(nextExpiresIn) && nextExpiresIn > 0) {
+            renewedToken = nextToken;
+            renewedExpiresAt = Date.now() + nextExpiresIn * 1000;
+          }
+          return response;
+        }});
       const controller = new AbortController(); validationControllers.current.add(controller);
       let identity: Identity;
       try {identity = await validation.json('/v1/auth/account', {signal: controller.signal});}
       finally {validationControllers.current.delete(controller);}
       await awaitForeground(attempt);
-      authState.activate(saved.token, saved.expiresAt); setAccount(identity);
+      if (renewedToken !== saved.token) {
+        await biometrics.updateBiometricSession(renewedToken, renewedExpiresAt).catch(() => {});
+      }
+      unlockedBiometric.current = null;
+      authState.activate(renewedToken, renewedExpiresAt); setAccount(identity);
+      if (identity?.username) setUsername(prev => prev || identity.username);
     } catch (e) {
-      // Cancellation/failure leaves a usable password form, never a prompt loop.
-      if (mounted.current && attempt === generation.current) setPasswordMode(true);
+      const status = (e as {status?: number})?.status;
+      if (!saved || status === 401 || status === 403 || saved.expiresAt <= Date.now()) {
+        unlockedBiometric.current = null;
+        // Cancellation/failure leaves a usable password form, never a prompt loop.
+        if (mounted.current && attempt === generation.current) setPasswordMode(true);
+      }
       throw e;
     } finally {prompting.current = false;}
-  }), [run, awaitForeground]);
+  }, false), [run, awaitForeground]);
   const biometricEntry = biometricOn && biometricSupported && !setup && !passwordMode;
   useEffect(() => {
     if (Platform.OS === 'web' || !biometricEntry || checking || !status?.configured || unlocked || !visible || busy || working.current) return;
@@ -268,9 +316,9 @@ export default function AuthProvider({children}: {children: React.ReactNode}) {
             <AuthButton secondary title="Entrar com senha" disabled={busy} onPress={() => {setPasswordMode(true); setError('');}}/>
           </View> : <>
           {setup && <><Text style={s.label}>Como você quer ser chamado?</Text><TextInput accessibilityLabel="Nome" value={name} onChangeText={setName} maxLength={80} style={s.input} autoComplete="name"/></>}
-          <Text style={s.label}>Usuário</Text><TextInput accessibilityLabel="Usuário" value={username} onChangeText={setUsername} autoCapitalize="none" autoCorrect={false} autoComplete="username" maxLength={64} style={s.input} placeholder="ex.: daniel" placeholderTextColor="#8190A5"/>
-          <Text style={s.label}>{setup ? 'Senha · mínimo de 12 caracteres' : 'Senha'}</Text><TextInput accessibilityLabel="Senha" value={password} onChangeText={setPassword} secureTextEntry autoCapitalize="none" autoCorrect={false} autoComplete={setup ? 'new-password' : 'current-password'} maxLength={256} style={s.input} onSubmitEditing={setup ? undefined : submit}/>
-          {setup && <><Text style={s.label}>Repita a senha</Text><TextInput accessibilityLabel="Repita a senha" value={confirmation} onChangeText={setConfirmation} secureTextEntry autoComplete="new-password" maxLength={256} style={s.input}/>
+          <Text style={s.label}>Usuário</Text><TextInput accessibilityLabel="Usuário" value={username} onChangeText={setUsername} autoCapitalize="none" autoCorrect={false} autoComplete="username" textContentType="username" importantForAutofill="yes" maxLength={64} style={s.input} placeholder="ex.: daniel" placeholderTextColor="#8190A5"/>
+          <Text style={s.label}>{setup ? 'Senha · mínimo de 12 caracteres' : 'Senha'}</Text><TextInput accessibilityLabel="Senha" value={password} onChangeText={setPassword} secureTextEntry autoCapitalize="none" autoCorrect={false} autoComplete={setup ? 'new-password' : 'current-password'} textContentType={setup ? 'newPassword' : 'password'} importantForAutofill="yes" maxLength={256} style={s.input} onSubmitEditing={setup ? undefined : submit}/>
+          {setup && <><Text style={s.label}>Repita a senha</Text><TextInput accessibilityLabel="Repita a senha" value={confirmation} onChangeText={setConfirmation} secureTextEntry autoComplete="new-password" textContentType="newPassword" importantForAutofill="yes" maxLength={256} style={s.input}/>
             <Text style={s.label}>Código de primeiro acesso</Text><TextInput accessibilityLabel="Código de primeiro acesso" value={setupToken} onChangeText={setSetupToken} secureTextEntry autoCapitalize="none" autoCorrect={false} autoComplete="off" maxLength={256} style={s.input}/>
             <Text style={s.hint}>No seu computador, abra “Primeiro acesso” e copie o código. Ele autoriza este cadastro e não será pedido nos próximos acessos.</Text></>}
           <AuthButton title={busy ? 'Aguarde…' : setup ? 'Criar meu acesso' : 'Entrar'} disabled={busy || !status?.configured || (setup && !status.setup_available)} onPress={submit}/>
@@ -292,7 +340,7 @@ export default function AuthProvider({children}: {children: React.ReactNode}) {
   // a password response must not replace/remount the entire navigation tree.
   return <AuthContext.Provider value={context}>
     <View style={{flex: 1}}>
-      <View style={{flex: 1, opacity: visible ? 1 : 0}} pointerEvents={visible ? 'auto' : 'none'} accessibilityElementsHidden={!visible} importantForAccessibility={visible ? 'auto' : 'no-hide-descendants'}>
+      <View style={{flex: 1, opacity: visible ? 1 : 0}} pointerEvents={visible ? 'auto' : 'none'} accessibilityElementsHidden={!visible && unlocked} importantForAccessibility={visible || !unlocked ? 'auto' : 'no-hide-descendants'}>
         <ChoiceOverlayProvider><ScheduleOverlayProvider>{children}</ScheduleOverlayProvider></ChoiceOverlayProvider>
       </View>
       {!visible && <View style={[s.root, {position: 'absolute', top: 0, right: 0, bottom: 0, left: 0}]} accessibilityLabel="Dados protegidos"/>}

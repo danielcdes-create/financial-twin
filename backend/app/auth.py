@@ -12,6 +12,7 @@ from app.config import get_settings
 
 OWNER_ID = 'financial-twin-owner'
 SESSION_SECONDS = 12 * 60 * 60
+BIOMETRIC_SESSION_SECONDS = 30 * 24 * 60 * 60
 MAX_SESSIONS = 10
 PASSWORD_ITERATIONS = 600_000
 
@@ -82,21 +83,23 @@ def session_hash(identity: str) -> str:
     return hashlib.sha256(identity.encode()).hexdigest()
 
 
-def create_session_token(identity: str, version: int, session_id: str, now: int | None = None) -> str:
+def create_session_token(identity: str, version: int, session_id: str, now: int | None = None,
+                         ttl: int = SESSION_SECONDS) -> str:
     settings = auth_settings()
     now = int(time.time()) if now is None else now
     head = _b64(b'{"alg":"HS256","typ":"JWT"}')
-    payload = _b64(json.dumps({'sub': identity, 'iat': now, 'exp': now + SESSION_SECONDS,
+    payload = _b64(json.dumps({'sub': identity, 'iat': now, 'exp': now + ttl,
                               'ver': version, 'jti': session_id}, separators=(',', ':')).encode())
     message = f'{head}.{payload}'
     signature = _b64(hmac.new(settings.jwt_secret.encode(), message.encode(), hashlib.sha256).digest())
     return f'{message}.{signature}'
 
 
-def session_response(db, account, label: str):
+def session_response(db, account, label: str, ttl: int | None = None):
     now = int(time.time())
+    duration = ttl if ttl is not None else (SESSION_SECONDS if label == 'Navegador' else BIOMETRIC_SESSION_SECONDS)
     identity = secrets.token_urlsafe(32)
-    item = {'id': session_hash(identity), 'label': label, 'created_at': now, 'last_seen_at': now, 'expires_at': now + SESSION_SECONDS}
+    item = {'id': session_hash(identity), 'label': label, 'created_at': now, 'last_seen_at': now, 'expires_at': now + duration}
     # Filter stale sessions, append atomically, cap independently of concurrent logins.
     result = db.account.update_one({'_id': OWNER_ID, 'kind': 'app_identity', 'auth_version': account['auth_version'],
                                     'password_hash': account['password_hash']}, [
@@ -106,8 +109,31 @@ def session_response(db, account, label: str):
     ])
     if result.matched_count != 1:
         raise HTTPException(401, 'A conta mudou. Entre novamente.')
-    return {'access_token': create_session_token(OWNER_ID, account['auth_version'], identity, now),
-            'token_type': 'bearer', 'expires_in': SESSION_SECONDS, 'account': public_account(account)}
+    return {'access_token': create_session_token(OWNER_ID, account['auth_version'], identity, now, duration),
+            'token_type': 'bearer', 'expires_in': duration, 'account': public_account(account)}
+
+
+def renew_session_token(db, account, jti: str, ttl: int = BIOMETRIC_SESSION_SECONDS):
+    if not jti or len(jti) != 43:
+        return None
+    now = int(time.time())
+    identity = session_hash(jti)
+    updated = False
+    for s_item in account.get('sessions', []):
+        if s_item.get('id') == identity and int(s_item.get('expires_at') or 0) > now:
+            s_item['last_seen_at'] = now
+            s_item['expires_at'] = max(int(s_item.get('expires_at') or 0), now + ttl)
+            updated = True
+            break
+    if not updated:
+        return None
+    try:
+        db.account.update_one({'_id': OWNER_ID, 'auth_version': account['auth_version']},
+                              {'$set': {'sessions': account['sessions']}})
+    except Exception:
+        pass
+    return {'access_token': create_session_token(OWNER_ID, account['auth_version'], jti, now, ttl),
+            'token_type': 'bearer', 'expires_in': ttl, 'account': public_account(account)}
 
 
 def public_account(account):
@@ -148,4 +174,4 @@ def require_session(request: Request, authorization: str | None = Header(default
                 except Exception:
                     pass
             break
-    return {'account': account, 'session_id': identity}
+    return {'account': account, 'session_id': identity, 'jti': claims['jti']}
