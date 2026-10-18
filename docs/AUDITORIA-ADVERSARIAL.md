@@ -1,6 +1,19 @@
 # Auditoria adversarial — 15/10/2026
 
-Julgamento da árvore local de `financial-app` a partir de `431aaf5`, com a correção de contagem dupla desta entrega, commit `cc7f562`. Dados sintéticos. O ledger ao vivo não foi lido, escrito, deduplicado nem reparado. O release privado no disco é Android 1.20.71 / versionCode 117, SHA-256 `0520D938561486CA1B3340194365E940720F4412E6A2DB8CDD0C5E61834C505E`, commit `2807461`, com o certificado de debug anterior. A instalação física permanece unverified.
+Julgamento da árvore local de `financial-app` a partir de `431aaf5`, com a correção de contagem dupla desta entrega, commit `cc7f562`. Dados sintéticos. O ledger ao vivo não foi lido, escrito, deduplicado nem reparado. O release privado no disco é Android 1.20.72 / versionCode 118, SHA-256 `E169973B1FF6CCEA0682700B2AC529A658542D1D17E77ED8CC279BA26B61B99F`, commit `1509ed6`, com o certificado de debug anterior. A instalação física permanece unverified.
+
+## Entrega 18/10/2026 — aba visível e contexto histórico
+
+Commit do recurso `804b79a`, empacotado em `1509ed6`. APK ARM64 de 48097660 bytes, SHA-256 `E169973B1FF6CCEA0682700B2AC529A658542D1D17E77ED8CC279BA26B61B99F`, assinante `FAC61745DC0903786FB9EDE62A962B399F7348F0BB6F899B8332667591033B9C`. O ledger ao vivo não foi lido nem escrito. Nesta passagem passaram `backend/tests/test_category_catalog_consistency.py` (6) e a compilação dos módulos alterados. A suíte completa do cliente e a homologação física não foram repetidas.
+
+| Correção | Veredito |
+| --- | --- |
+| Troca de aba | a rolagem nativa permanece. Só a aba visível busca de novo; as outras atualizam ao abrir. |
+| Confirmação na revisão | o item sai da lista na hora. A página recarrega em segundo plano, sem pedir de novo as opções de classificação. |
+| Contexto histórico | fica em memória por 120 segundos e cai junto com o cache de classificação numa escrita. |
+| Gravação de captura preenchida | não varre o histórico para repetir vendedor e plataforma. |
+| Fila de revisão e saldos | eventos, capturas, lançamentos e extratos vinculados saem em consultas `$in`. |
+| Catálogo de categorias | `categories` é lida uma vez. |
 
 ## Entrega 18/10/2026 — formatação e leituras repetidas
 
