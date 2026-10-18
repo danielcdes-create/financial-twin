@@ -10,6 +10,12 @@ Notificações separam aprovação/recusa/estorno do contexto da compra, comerci
 
 O backend permanece neste PC, conforme a escolha do usuário. PC, sessão Windows e Tailscale precisam estar ativos; suspensão ou desligamento interrompem o acesso. Não foram alteradas as preferências de bateria/suspensão, nem foi contratado um serviço externo.
 
+## Abas e leituras — 1.20.72
+
+Trocar de aba não recria o `ScrollView`. Depois de gravar, só a aba visível busca de novo; as outras perdem a marca de carregadas e atualizam quando forem abertas. Confirmar uma captura ou uma revisão tira o item da lista na hora e recarrega a página em segundo plano, sem pedir de novo as opções de classificação. Mais, Capturar e Compromissos reutilizam contas e perfis já lidos na sessão. O recálculo de saldos fica na aba Contas.
+
+No servidor, a sugestão de vendedor e plataforma reutiliza um contexto histórico em memória por 120 segundos. Ele cai junto com o cache de classificação em qualquer escrita que já invalidava esse cache. A gravação de uma captura preenchida não varre o histórico para repetir vendedor e plataforma. A fila de revisão busca eventos, capturas e lançamentos em três consultas `$in`. O saldo de conta lê os extratos vinculados de uma vez. O painel agrupa o mês econômico numa passada e reaproveita o intervalo quando o período pedido já é esse mês. O catálogo de categorias lê `categories` uma vez.
+
 ## Leituras repetidas — 1.20.71
 
 Listas, cards e gráficos reutilizam um `Intl.NumberFormat` e um `Intl.DateTimeFormat` de módulo. O quadro de compromissos calcula as figuras de cada card uma vez por mudança das entradas e não limpa o painel de agenda quando ele já está fechado. O rascunho da revisão e do lote serializa a fonte uma vez, e gravações SQLite concorrentes ficam na última linha pedida.

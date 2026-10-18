@@ -35,12 +35,12 @@ def _aware(value):
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
-def _linked_statement_inside_reference(db, capture, account_id, after_reference):
+def _linked_statement_inside_reference(db, capture, account_id, after_reference, linked_by_id=None):
     """A capture promoted from a statement leg already inside the reference is not a new movement."""
     link = str(capture.get("linked_transaction_id") or "")
     if not ObjectId.is_valid(link):
         return False
-    linked = db.transactions.find_one({"_id": ObjectId(link)}, {"account_id": 1, "data_evento": 1})
+    linked = linked_by_id.get(link) if linked_by_id is not None else db.transactions.find_one({"_id": ObjectId(link)}, {"account_id": 1, "data_evento": 1})
     when = linked.get("data_evento") if linked and linked.get("account_id") == account_id else None
     return bool(when) and not after_reference(when)
 
@@ -56,6 +56,8 @@ def account_positions(db):
     legacy_transactions = list(db.transactions.find({'data_evento':{'$gte':earliest}}, {"account_id":1,"data_evento":1,"valor":1})) if earliest else []
     # A capture can precede the cutoff while its linked bank leg follows it.
     captures = list(db.provisional_transactions.find({"status":"confirmed"}, {"data_evento":1,"valor":1,"natureza":1,"transfer":1,"account_profile_id":1,"account_id":1,"linked_transaction_id":1})) if earliest else []
+    linked_ids = [ObjectId(str(c["linked_transaction_id"])) for c in captures if ObjectId.is_valid(str(c.get("linked_transaction_id") or ""))]
+    linked_by_id = {str(row["_id"]): row for row in db.transactions.find({"_id": {"$in": linked_ids}}, {"account_id": 1, "data_evento": 1})} if linked_ids else {}
     transfer_legs = resolved_transfer_legs(db, captures, legacy_by_key)
     result = []
     for profile in profiles:
@@ -101,7 +103,7 @@ def account_positions(db):
                             counted_legacy_ids.add(str(posted["_id"]))
                 elif not after_reference(when): continue
                 elif duplicate_of_ledger(capture, counted_legacy_ids): continue
-                elif legacy and _linked_statement_inside_reference(db, capture, legacy["_id"], after_reference): continue
+                elif legacy and _linked_statement_inside_reference(db, capture, legacy["_id"], after_reference, linked_by_id): continue
                 elif effective_capture_account_key(capture, legacy_by_key) == key:
                     amount += value
                     movement_count += 1

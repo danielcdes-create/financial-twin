@@ -274,7 +274,7 @@ def _sync_merchant_alias(db, merchant:dict[str,Any], raw_source:str|None, suppli
         merchant["aliases"]=aliases
         db.merchants.update_one({"_id":merchant["_id"]},{"$set":{"aliases":aliases,"updated_at":now}})
 
-def with_merchant_name(document:dict[str,Any], db):
+def with_merchant_name(document:dict[str,Any], db, *, include_historical:bool=True):
     result=json_safe(document)
     if document.get('provisional_id'): result['categoria']=document.get('categoria_sugerida')
     result['source_token']=source_token(document)
@@ -295,7 +295,7 @@ def with_merchant_name(document:dict[str,Any], db):
     suggestion=infer_classification(document,taxonomy_overrides(db))
     for field,value in suggestion.items():
         if not result.get(field): result['categoria_inferida' if field=='categoria' and document.get('provisional_id') else f"{field}_sugerida"]=value
-    if document.get("provisional_id") and document.get("status") in {"provisional","enriched"}:
+    if include_historical and document.get("provisional_id") and document.get("status") in {"provisional","enriched"}:
         _attach_historical_capture_defaults(document,result,db)
     return result
 
@@ -306,8 +306,8 @@ def with_merchant_names(documents:list[dict[str,Any]], db):
     results=[]
     overrides=taxonomy_overrides(db)
     has_active_provisional=any(item.get("provisional_id") and item.get("status") in {"provisional","enriched"} for item in documents)
-    catalog_cache=_merchant_catalog(db) if has_active_provisional else None
-    history_cache=_historical_context(db,catalog_cache=catalog_cache) if has_active_provisional else None
+    history_cache=_historical_context(db) if has_active_provisional else None
+    catalog_cache=history_cache["catalog"] if history_cache else None
     for document in documents:
         result=json_safe(document)
         if document.get('provisional_id'): result['categoria']=document.get('categoria_sugerida')
@@ -490,7 +490,7 @@ def exact_descriptor_matches(db,item:dict[str,Any],limit:int=500):
     if len(matches)>limit: raise HTTPException(status_code=409,detail="Há mais correspondências do que o limite seguro do lote. Refine a seleção.")
     return matches
 
-def batch_classification_matches(db,item:dict[str,Any],limit:int=500):
+def batch_classification_matches(db,item:dict[str,Any],limit:int=500,*,descriptor_matches=None):
     """Only suggest a batch when the descriptor is specific and flow direction agrees."""
     source=str(item.get("estabelecimento_original") or item.get("descricao_original") or "")
     source_key=canonical_key(source)
@@ -503,7 +503,8 @@ def batch_classification_matches(db,item:dict[str,Any],limit:int=500):
     except (TypeError,ValueError): source_signed=0
     source_sign=1 if source_signed>0 else -1
     matches=[]
-    for candidate,raw in exact_descriptor_matches(db,item,limit=5000):
+    candidates=descriptor_matches if descriptor_matches is not None else exact_descriptor_matches(db,item,limit=5000)
+    for candidate,raw in candidates:
         raw_amount=candidate.get("valor")
         try: signed=float(raw_amount.to_decimal() if hasattr(raw_amount,"to_decimal") else raw_amount or 0)
         except (TypeError,ValueError): signed=0
@@ -611,9 +612,12 @@ def _dashboard(period, date_from, date_to, db, snapshot=None, forecast=None):
         confirmed_dates=[snapshot[2]["captured"]] if snapshot[2]["captured"] else []
     all_dates=[*dates,*confirmed_dates]
     data_anchor=max((normalized_datetime(value) for value in all_dates),default=None)
-    economic_dates=[economic_instant(row) for row in [*txs,*confirmed_all] if economic_instant(row)]
-    if snapshot is not None and len(snapshot)>2 and snapshot[2].get("economic_anchor"):economic_dates.append(snapshot[2]["economic_anchor"])
-    anchor=max((normalized_datetime(value) for value in [*all_dates,*economic_dates]),default=datetime.now(timezone.utc))
+    if snapshot is not None and len(snapshot)>2 and snapshot[2].get("anchor"):
+        anchor=snapshot[2]["anchor"]
+    else:
+        economic_dates=[inst for row in [*txs,*confirmed_all] if (inst:=economic_instant(row))]
+        if snapshot is not None and len(snapshot)>2 and snapshot[2].get("economic_anchor"):economic_dates.append(snapshot[2]["economic_anchor"])
+        anchor=max((normalized_datetime(value) for value in [*all_dates,*economic_dates]),default=datetime.now(timezone.utc))
     range_start=period_start(anchor,period,date_from)
     range_end=(day_start(date_to+timedelta(days=1))-timedelta(microseconds=1)) if date_to else anchor
     if range_start>range_end: raise HTTPException(status_code=422,detail="A data inicial deve ser anterior à data final.")
@@ -625,10 +629,18 @@ def _dashboard(period, date_from, date_to, db, snapshot=None, forecast=None):
     totals=calculate_financial_totals(filtered_txs,confirmed)
     income,expenses,categories=totals["income"],totals["expenses"],totals["categories"]
     nature_totals={nature:Decimal("0") for nature in NATURES}
+    inferred_nature_cache:dict[tuple,str|None]={}
     for captured, rows in ((False,filtered_txs),(True,confirmed)):
         for row in rows:
             effect=effects(row,captured)
-            nature=row.get("natureza") or infer_classification(row).get("natureza")
+            if not effect["expenses"]:
+                continue
+            nature=row.get("natureza")
+            if not nature:
+                cache_key=(row.get("tipo"),row.get("descricao_original"),row.get("estabelecimento_original"),row.get("merchant_raw"),(row.get("classification") or {}).get("migration_reason"))
+                if cache_key not in inferred_nature_cache:
+                    inferred_nature_cache[cache_key]=infer_classification(row).get("natureza")
+                nature=inferred_nature_cache[cache_key]
             if nature in nature_totals:nature_totals[nature]+=effect["expenses"]
     previous_totals=None;previous_start=None;previous_end=None
     if period!="all":
@@ -646,13 +658,21 @@ def _dashboard(period, date_from, date_to, db, snapshot=None, forecast=None):
     latest=max(dates).isoformat() if dates else None
     latest_confirmed=max(confirmed_dates).isoformat() if confirmed_dates else None
     latest_any=data_anchor.isoformat() if data_anchor else None
-    filtered_dates=[tx["data_evento"] for tx in filtered_txs if tx.get("data_evento")]
-    latest_month=max((economic_month(row) for row in [*filtered_txs,*confirmed] if economic_month(row)),default=None)
+    txs_by_month:dict[str,list]= {}
+    prov_by_month:dict[str,list]= {}
+    for tx in filtered_txs:
+        m_key=economic_month(tx)
+        if m_key: txs_by_month.setdefault(m_key,[]).append(tx)
+    for cap in confirmed:
+        m_key=economic_month(cap)
+        if m_key: prov_by_month.setdefault(m_key,[]).append(cap)
+    month_keys=sorted(set(txs_by_month)|set(prov_by_month))
+    latest_month=month_keys[-1] if month_keys else None
     recurring_total=Decimal("0");recurring_count=0;recurring_categories={}
     non_expense_recurring_categories={"pagamento de fatura","pagamento de fatura cartao","investimentos","movimentacao de credito do cartao","transferencia pix","transferencia ted doc"}
-    for tx in filtered_txs:
+    for tx in (txs_by_month.get(latest_month,[]) if latest_month else ()):
         recurrence=tx.get("recorrencia") or {};event_date=tx.get("data_evento");amount=decimal_amount(tx.get("valor"))
-        if not event_date or not amount or economic_month(tx)!=latest_month: continue
+        if not event_date or not amount: continue
         if recurrence.get("tipo") not in {"recorrente_fixa","recorrente_variavel"} or recurrence.get("periodicidade")!="mensal": continue
         if not eligible_payment(tx): continue
         category=tx.get("categoria") or "Sem categoria"
@@ -668,11 +688,8 @@ def _dashboard(period, date_from, date_to, db, snapshot=None, forecast=None):
     commitment_due_total=forecast["commitment_due_total"]
     investment_count=forecast["investment_count"]
     monthly_series=[]
-    month_keys=sorted({economic_month(item) for item in [*filtered_txs,*confirmed] if economic_month(item)})
     for month_key in month_keys:
-        month_transactions=[item for item in filtered_txs if economic_month(item)==month_key]
-        month_provisionals=[item for item in confirmed if economic_month(item)==month_key]
-        month_totals=calculate_financial_totals(month_transactions,month_provisionals)
+        month_totals=calculate_financial_totals(txs_by_month.get(month_key,()),prov_by_month.get(month_key,()))
         monthly_series.append({"month":month_key,"income":float(month_totals["income"]),"expenses":float(month_totals["expenses"]),"net":float(month_totals["net_flow"])})
     latest_dt=datetime.fromisoformat(latest.replace("Z","+00:00")) if latest else None
     if latest_dt and latest_dt.tzinfo is None: latest_dt=latest_dt.replace(tzinfo=timezone.utc)
@@ -697,10 +714,13 @@ def dashboard_overview(period:Literal["month","3m","6m","12m","year","all"]="mon
         year_begin=year_start or end.replace(month=1,day=1)
         snapshot=snapshot_for(reading,[(period,None,None),("year",year_begin,end),("month",month_begin,end)]) if isinstance(reading,(Database,_SessionDatabase)) else (list(reading.transactions.find({},PROJECTION).limit(0)),list(reading.provisional_transactions.find({'status':'confirmed'},PROJECTION)))
         forecast=dashboard_forecast(reading)
+        selected_view=_dashboard(period,None,None,reading,snapshot,forecast)
+        year_view=selected_view if period=="year" and selected_view.get("period_start")==year_begin.isoformat() and selected_view.get("period_end")==end.isoformat() else _dashboard("year",year_begin,end,reading,snapshot,forecast)
+        month_view=selected_view if period=="month" and selected_view.get("period_start")==month_begin.isoformat() and selected_view.get("period_end")==end.isoformat() else _dashboard("month",month_begin,end,reading,snapshot,forecast)
         result={
-            "selected":_dashboard(period,None,None,reading,snapshot,forecast),
-            "year":_dashboard("year",year_begin,end,reading,snapshot,forecast),
-            "month":_dashboard("month",month_begin,end,reading,snapshot,forecast),
+            "selected":selected_view,
+            "year":year_view,
+            "month":month_view,
         }
     result["read_consistency"]=consistency
     result["read_at"]=datetime.now(timezone.utc).isoformat()
@@ -894,8 +914,8 @@ def transaction_classification_options(db=Depends(database)):
 def build_classification_options(db):
     live_captures={"status":{"$in":ACTIVE_CAPTURES}}
     result={field:sorted({str(value) for value in db.transactions.distinct(field)
-                         +db.provisional_transactions.distinct("categoria_sugerida" if field=="categoria" else field,live_captures)
-                         if value not in (None,"")},key=str.casefold) for field in CLASSIFICATION_FIELDS}
+                         +db.provisional_transactions.distinct(field,live_captures)
+                         if value not in (None,"")},key=str.casefold) for field in CLASSIFICATION_FIELDS if field!="categoria"}
     result["categoria"]=sorted(set(catalog_category_names(db)),key=str.casefold)
     known_platform_ids=[value for value in db.transactions.distinct("platform_id")+db.provisional_transactions.distinct("platform_id",live_captures) if value]
     platform_names={name for _,name in PLATFORMS.values()} | {str(value) for value in db.merchants.distinct("nome_padrao",{"_id":{"$in":known_platform_ids}}) if value} | {str(value) for value in db.merchants.distinct("nome_padrao",{"external_key":{"$regex":"^platform-user-"}}) if value}
@@ -910,7 +930,7 @@ def build_classification_options(db):
     result["metodo_pagamento_labels"]=PAYMENT_METHOD_LABELS
     result["categoria_subcategorias"]=category_subcategories(db)
     result["subcategoria"]=sorted({name for names in result["categoria_subcategorias"].values() for name in names},key=str.casefold)
-    result["vendor_defaults"]=build_vendor_defaults(db)
+    result["vendor_defaults"]=build_vendor_defaults(db,allowed_subcats=result["categoria_subcategorias"])
     result["taxonomy"]=taxonomy_catalog()
     return result
 
@@ -949,8 +969,8 @@ def classification_match_preview(transaction_id:str, db=Depends(database)):
     except Exception: raise HTTPException(status_code=404,detail="Transaction not found")
     item=db.transactions.find_one({"_id":object_id})
     if item is None: raise HTTPException(status_code=404,detail="Transaction not found")
-    matches=batch_classification_matches(db,item)
-    descriptor_matches=exact_descriptor_matches(db,item)
+    descriptor_matches=exact_descriptor_matches(db,item,limit=5000)
+    matches=batch_classification_matches(db,item,descriptor_matches=descriptor_matches)
     return {"preview_token":preview_signature([c for c,_ in matches],str(object_id)),"total":len(matches),"same_description_count":len(descriptor_matches),"match_type":"specific_descriptor_and_flow","samples":[{"id":str(candidate["_id"]),"description":raw,"amount":json_safe(candidate.get("valor"))} for candidate,raw in matches[:8]]}
 
 @app.get("/v1/transactions/{transaction_id}/supplier-match-preview", dependencies=[Depends(require_session)])
@@ -1048,13 +1068,19 @@ def _update_transaction_classification(transaction_id:str, update:TransactionCla
     validate_review=bool(payload.pop("validate_review",False))
     supplier_token=payload.pop("supplier_preview_token",None)
     classification_token=payload.pop("classification_preview_token",None)
+    cached_supplier_matches=None
     if apply_similar_supplier:
         name=payload.get("vendedor") or payload.get("fornecedor") or ""
         tx_matches,capture_matches=similar_supplier_records(db,item,name.strip())
+        cached_supplier_matches=(tx_matches,capture_matches)
         actual=preview_signature([c for c,_,_ in tx_matches+capture_matches],name.strip())
         if supplier_token!=actual:raise HTTPException(409,"A prévia de vendedores mudou. Confira o novo conjunto antes de aplicar.")
+    cached_descriptor_matches=None
+    cached_class_matches=None
     if apply_similar_classification:
-        actual=preview_signature([c for c,_ in batch_classification_matches(db,item)],str(object_id))
+        cached_descriptor_matches=exact_descriptor_matches(db,item,limit=5000)
+        cached_class_matches=batch_classification_matches(db,item,descriptor_matches=cached_descriptor_matches)
+        actual=preview_signature([c for c,_ in cached_class_matches],str(object_id))
         if classification_token!=actual:raise HTTPException(409,"A prévia de classificação mudou. Confira o novo conjunto antes de aplicar.")
     recurrence_type=payload.pop("recorrencia_tipo",None)
     recurrence_periodicity=payload.pop("recorrencia_periodicidade",None)
@@ -1065,7 +1091,7 @@ def _update_transaction_classification(transaction_id:str, update:TransactionCla
         if db.refund_claims.find_one({'_id':'ledger:'+transaction_id}) or db.commitments.find_one({'linked_transactions.transaction_id':transaction_id}):
             raise HTTPException(409,'Esta movimentação sustenta um vínculo financeiro. Revise o vínculo antes de mudar sua natureza ou direção.')
     if apply_similar_classification and any(key in changes for key in ('natureza','fluxo','tipo')):
-        for peer,_ in batch_classification_matches(db,item):
+        for peer,_ in (cached_class_matches or []):
             if any(key in changes and changes[key]!=peer.get(key) for key in ('natureza','fluxo','tipo')):
                 identity=str(peer['_id'])
                 if db.refund_claims.find_one({'_id':'ledger:'+identity}) or db.commitments.find_one({'linked_transactions.transaction_id':identity}):
@@ -1104,13 +1130,13 @@ def _update_transaction_classification(transaction_id:str, update:TransactionCla
     if changes.get("localidade"): changes["localidade"]=canonical_distinct(db,"localidade",changes["localidade"])
     validate_signed_flow({**item,**changes})
     if apply_similar_classification:
-        for candidate,_ in batch_classification_matches(db,item):
+        for candidate,_ in (cached_class_matches or []):
             validate_signed_flow({**candidate,**changes})
     if "fluxo" in changes:
         if apply_similar_classification:
             # Validate every exact peer before the batch filters by sign, so a
             # mixed debit/credit descriptor cannot be partially rewritten.
-            for candidate,_ in exact_descriptor_matches(db,item):
+            for candidate,_ in (cached_descriptor_matches if cached_descriptor_matches is not None else exact_descriptor_matches(db,item)):
                 validate_signed_flow({**candidate,"fluxo":changes["fluxo"]})
     current_merchant=db.merchants.find_one({"_id":item["merchant_id"]}) if item.get("merchant_id") else None
     merchant=find_canonical_merchant(db,supplier_name) if supplier_name else current_merchant
@@ -1145,7 +1171,7 @@ def _update_transaction_classification(transaction_id:str, update:TransactionCla
         if "vendedor" in item: set_values["vendedor"]=supplier_name
         if "merchant_name" in item: set_values["merchant_name"]=supplier_name
     platform_changed=clear_platform
-    platform_before=with_merchant_name(item,db).get('plataforma') if platform_name is not None else None
+    platform_before=with_merchant_name(item,db,include_historical=False).get('plataforma') if platform_name is not None else None
     unset_values={}
     if changes.get('metodo_pagamento')=='':
         set_values.pop('metodo_pagamento',None);unset_values['metodo_pagamento']=''
@@ -1181,7 +1207,7 @@ def _update_transaction_classification(transaction_id:str, update:TransactionCla
     propagated_transactions=0;propagated_provisionals=0
     validated_peer_ids:set[ObjectId]=set()
     if apply_similar_supplier and supplier_name and merchant:
-        transaction_matches,provisional_matches=similar_supplier_records(db,item,supplier_name)
+        transaction_matches,provisional_matches=cached_supplier_matches if cached_supplier_matches is not None else similar_supplier_records(db,item,supplier_name)
         transaction_ids=[candidate["_id"] for candidate,_,_ in transaction_matches]
         provisional_ids=[candidate["_id"] for candidate,_,_ in provisional_matches]
         if transaction_ids:
@@ -1210,7 +1236,7 @@ def _update_transaction_classification(transaction_id:str, update:TransactionCla
     classification_propagated_count=0
     classification_matches=[]
     if apply_similar_classification:
-        classification_matches=batch_classification_matches(db,item)
+        classification_matches=cached_class_matches if cached_class_matches is not None else batch_classification_matches(db,item)
         safe_fields={"tipo","natureza","categoria","subcategoria","metodo_pagamento","fluxo","localidade","localidade_contexto","status_conciliacao"}
         classification_values={key:value for key,value in changes.items() if key in safe_fields}
         classification_unsets={}
@@ -1379,11 +1405,9 @@ def cursor_movements(limit, cursor, search, category, account_id, date_from, dat
     pairs.sort(key=order,reverse=True)
     has_more=len(pairs)>needed
     selected=pairs[offset:needed]
-    ledger_display={str(item["id"]):item for item in with_merchant_names([doc for source,doc in selected if source=="ledger"],db)}
-    capture_display={str(item["provisional_id"]):item for item in with_merchant_names([doc for source,doc in selected if source=="capture"],db)}
+    enriched_selected=with_merchant_names([doc for _,doc in selected],db)
     items=[]
-    for source,doc in selected:
-        item=ledger_display[str(doc["_id"])] if source=="ledger" else capture_display[str(doc["provisional_id"])]
+    for (source,_),item in zip(selected,enriched_selected):
         item["movement_source"]=source
         if source=="capture" and review_status is not None: display_capture_review(item,historical)
         items.append(item)
@@ -1649,9 +1673,10 @@ def _atomic_update_provisional(provisional_id:str, update:ProvisionalUpdate, db=
     before={key:json_safe(item.get(key)) for key in values}
     changed={key:value for key,value in values.items() if item.get(key)!=value}
     now=datetime.now(timezone.utc)
-    previous_vendor=with_merchant_name(item,db).get("vendedor")
-    previous_platform=with_merchant_name(item,db).get('plataforma') if platform_name is not None else None
-    if supplier and supplier!=with_merchant_name(item,db).get("vendedor"):
+    previous_display=with_merchant_name(item,db,include_historical=False)
+    previous_vendor=previous_display.get("vendedor")
+    previous_platform=previous_display.get("plataforma") if platform_name is not None else None
+    if supplier and supplier!=previous_vendor:
         raw_source=item.get("merchant_raw")
         platform_active=bool(platform_name or item.get("platform_id") or platform_identity(raw_source))
         use_raw=bool(raw_source) and (not platform_active or has_vendor_tokens_beyond_platform(raw_source,platform_name))
@@ -1668,7 +1693,7 @@ def _atomic_update_provisional(provisional_id:str, update:ProvisionalUpdate, db=
         platform=find_or_create_platform(db,platform_name,now)
         if item.get("platform_id")!=platform["_id"]: changed["platform_id"]=platform["_id"]
         if previous_vendor and not supplier and canonical_key(previous_vendor)==canonical_key(platform["nome_padrao"]): clear_supplier=True
-        if "platform_id" in changed: before["plataforma"]=with_merchant_name(item,db).get("plataforma")
+        if "platform_id" in changed: before["plataforma"]=previous_platform
     unset_values={}
     if account_profile_id is not None or nature=='TRANSFERENCIA':
         if clear_account_profile or nature=='TRANSFERENCIA' or not legacy_accounts_by_profile(db).get(account_profile_id):
@@ -1701,7 +1726,7 @@ def _atomic_update_provisional(provisional_id:str, update:ProvisionalUpdate, db=
             if next_review=="validado": changed["revisado_em"]=now
             elif item.get("revisado_em"): unset_values["revisado_em"]=""
     if not changed and not unset_values:
-        result=with_merchant_name(item,db)
+        result=with_merchant_name(item,db,include_historical=(update.action is None))
         if item.get('status')=='confirmed':
             historical=historical_statement_reviews(db,{'provisional_id':provisional_id,'status':'confirmed'})
             display_capture_review(result,historical)
@@ -1710,7 +1735,7 @@ def _atomic_update_provisional(provisional_id:str, update:ProvisionalUpdate, db=
     changed["revision"]=item.get("revision",1)+1
     db.provisional_transactions.update_one({"_id":item["_id"]},{"$set":changed,**({"$unset":unset_values} if unset_values else {})})
     db.audit_log.insert_one({"event":"provisional_transaction_updated","provisional_id":provisional_id,"source":"mobile_manual_review","before":before,"after":{**json_safe(changed),**{key:None for key in unset_values if key not in {'merchant_id','merchant_name','platform_id'}},**({'plataforma':None} if 'platform_id' in unset_values else {}),**({"vendedor":None} if 'merchant_id' in unset_values or 'merchant_name' in unset_values else {"vendedor":supplier} if supplier and "merchant_id" in changed else {})},"change_reason":"user_review","created_at":now})
-    return {"item":with_merchant_name(db.provisional_transactions.find_one({"_id":item["_id"]}),db),"changed":True}
+    return {"item":with_merchant_name(db.provisional_transactions.find_one({"_id":item["_id"]}),db,include_historical=(update.action is None)),"changed":True}
 
 class ProvisionalAction(BaseModel):
     request_id:UUID|None=None
@@ -1756,17 +1781,36 @@ def review_sources(db,item):
     return original,candidate
 
 
-def review_view(db,item):
-    original,candidate=review_sources(db,item)
+def review_view(db,item,*,precomputed=None):
+    original,candidate=precomputed if precomputed is not None else review_sources(db,item)
     return {**json_safe(item),'review_token':source_token(item),'source_token':source_token(original),
             'candidate_token':source_token(candidate),'source':json_safe(original['capture']),'source_event':json_safe(original['event']),
             'candidate':json_safe(candidate),'has_source':bool(original['capture'] or original['event'])}
+
+def review_views(db,rows):
+    if not rows: return []
+    event_ids=[x.get('event_id') for x in rows if x.get('event_id')]
+    tx_ids=[x.get('candidate_transaction_id') for x in rows if x.get('candidate_type','transaction')=='transaction' and x.get('candidate_transaction_id')]
+    prov_ids=[x.get('candidate_provisional_id') for x in rows if x.get('candidate_type','transaction')!='transaction' and x.get('candidate_provisional_id')]
+    events_by_id={e['event_id']:e for e in db.raw_events.find({'event_id':{'$in':event_ids}})} if event_ids else {}
+    captures_by_event={c['event_id']:c for c in db.provisional_transactions.find({'event_id':{'$in':event_ids}})} if event_ids else {}
+    tx_by_id={t['_id']:t for t in db.transactions.find({'_id':{'$in':tx_ids}})} if tx_ids else {}
+    prov_by_id={p['provisional_id']:p for p in db.provisional_transactions.find({'provisional_id':{'$in':prov_ids}})} if prov_ids else {}
+    result=[]
+    for item in rows:
+        ev_id=item.get('event_id')
+        original={'event':events_by_id.get(ev_id) if ev_id else None,'capture':captures_by_event.get(ev_id) if ev_id else None}
+        kind=item.get('candidate_type','transaction')
+        identity=item.get('candidate_transaction_id') if kind=='transaction' else item.get('candidate_provisional_id')
+        candidate=(tx_by_id.get(identity) if kind=='transaction' else prov_by_id.get(identity)) if identity else None
+        result.append(review_view(db,item,precomputed=(original,candidate)))
+    return result
 
 @app.get("/v1/reviews", dependencies=[Depends(require_session)])
 def reviews(status_filter:str="pending",limit:int=Query(100,ge=1,le=500),cursor:str|None=None,db=Depends(database)):
     with mongo_snapshot(db) as (reading,consistency):
         rows,info=workflow_page(reading.review_queue,{"status":status_filter},"created_at",limit,cursor)
-        return {"items":[review_view(reading,x) for x in rows],**info,'read_consistency':consistency}
+        return {"items":review_views(reading,rows),**info,'read_consistency':consistency}
 
 class ReviewDecision(BaseModel):
     request_id:UUID|None=None

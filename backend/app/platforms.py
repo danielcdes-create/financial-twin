@@ -8,8 +8,10 @@ from typing import Any
 import unicodedata
 
 from bson.decimal128 import Decimal128
+from pymongo.database import Database
 
 from app.account_profiles import account_profiles
+from app.reference_cache import historical_context_cache
 from app.taxonomy import CURATED_SUBCATEGORIES, NATURES, category_subcategories
 
 
@@ -235,7 +237,7 @@ def _row_has_user_review(row: dict[str, Any]) -> bool:
     return False
 
 
-def _historical_context(db, catalog_cache: tuple | None = None) -> dict[str, Any]:
+def _build_historical_context(db, catalog_cache: tuple | None = None, allowed_subcats: dict[str, list[str]] | None = None) -> dict[str, Any]:
     by_id, platform_ids, platforms_by_key = catalog_cache or _merchant_catalog(db)
     by_id = dict(by_id)
     platform_ids = set(platform_ids)
@@ -265,10 +267,19 @@ def _historical_context(db, catalog_cache: tuple | None = None) -> dict[str, Any
         raw_candidates.append((row, False, _row_has_user_review(row), _row_flow(row), _norm(cand_raw)))
     return {
         "catalog": (by_id, platform_ids, platforms_by_key),
+        "confirmed_captures": confirmed_captures,
+        "ledger_rows": ledger_rows,
         "raw_candidates": raw_candidates,
         "selectable_accounts": _selectable_account_keys(db),
-        "allowed_subcats": _safe_category_subcategories(db),
+        "allowed_subcats": allowed_subcats if allowed_subcats is not None else _safe_category_subcategories(db),
     }
+
+
+def _historical_context(db, catalog_cache: tuple | None = None, allowed_subcats: dict[str, list[str]] | None = None) -> dict[str, Any]:
+    raw_db = getattr(db, "db", db)
+    if catalog_cache is None and allowed_subcats is None and isinstance(raw_db, Database):
+        return historical_context_cache.get(raw_db, lambda: _build_historical_context(db))
+    return _build_historical_context(db, catalog_cache=catalog_cache, allowed_subcats=allowed_subcats)
 
 
 def historical_capture_profile(
@@ -567,6 +578,11 @@ def apply_historical_capture_defaults(
 ) -> list[str]:
     """Populate missing capture fields on `draft` from reviewed historical records."""
     source = {**(base_item or {}), **draft}
+    target_fields = ("merchant_id", "platform_id", "categoria_sugerida", "subcategoria", "natureza", "tipo", "metodo_pagamento", "localidade")
+    if include_account_profile:
+        target_fields = (*target_fields, "account_profile_id")
+    if all(source.get(field) for field in target_fields):
+        return []
     profile = historical_capture_profile(db, source, require_reviewed=True)
     if not profile:
         return []
@@ -607,13 +623,14 @@ def apply_historical_capture_defaults(
     return prefilled
 
 
-def build_vendor_defaults(db) -> dict[str, dict[str, str]]:
+def build_vendor_defaults(db, *, allowed_subcats: dict[str, list[str]] | None = None) -> dict[str, dict[str, str]]:
     """Build per-vendor most frequent classification defaults for interactive form pre-fill."""
-    by_id, platform_ids, _ = _merchant_catalog(db)
-    confirmed_captures = _safe_find(getattr(db, "provisional_transactions", None), {"status": "confirmed"}, limit=600)
-    ledger_rows = _safe_find(getattr(db, "transactions", None), {}, limit=800)
-    selectable_accounts = _selectable_account_keys(db)
-    allowed_subcats = _safe_category_subcategories(db)
+    ctx = _historical_context(db, allowed_subcats=allowed_subcats)
+    by_id, platform_ids, _ = ctx["catalog"]
+    confirmed_captures = ctx["confirmed_captures"]
+    ledger_rows = ctx["ledger_rows"]
+    selectable_accounts = ctx["selectable_accounts"]
+    allowed_subcats = allowed_subcats if allowed_subcats is not None else ctx["allowed_subcats"]
 
     buckets: dict[str, dict[str, dict[str, float]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
     subcat_buckets: dict[str, dict[str, dict[str, float]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))

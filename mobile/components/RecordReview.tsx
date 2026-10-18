@@ -22,8 +22,8 @@ export default function RecordReview({api,money,onUpdated}:Props){
   const [readError,setReadError]=useState(''),[refreshVersion,setRefreshVersion]=useState(0);
   const queryKey=JSON.stringify([reviewStatus,appliedSearch,offset]);
   const generation=useRef(0);
-  const load=useCallback(async()=>{
-    const current=++generation.current;setLoading(true);setReadError('');
+  const load=useCallback(async(silent=false)=>{
+    const current=++generation.current;if(!silent)setLoading(true);setReadError('');
     try{
       const query=new URLSearchParams({limit:String(PAGE_SIZE),offset:String(offset),review_status:reviewStatus});
       if(appliedSearch)query.set('search',appliedSearch);
@@ -34,8 +34,8 @@ export default function RecordReview({api,money,onUpdated}:Props){
     finally{if(current===generation.current)setLoading(false)}
   },[api,appliedSearch,offset,reviewStatus]);
   useEffect(()=>{const counter=generation;const task=setTimeout(()=>load(),0);return()=>{clearTimeout(task);counter.current++;}},[load,refreshVersion]);
-  if(selected?.provisional_id)return <ProvisionalReview key={selected.provisional_id} initialItem={selected} api={api} money={money} reviewRecord onExit={()=>setSelected(null)} onUpdated={async()=>{await Promise.all([load(),onUpdated()])}}/>;
-  if(selected)return <TransactionEditor key={selected.id} item={selected} api={api} money={money} onCancel={()=>setSelected(null)} onSaved={async()=>{setSelected(null);await Promise.all([load(),onUpdated()])}}/>;
+  if(selected?.provisional_id)return <ProvisionalReview key={selected.provisional_id} initialItem={selected} api={api} money={money} reviewRecord onExit={()=>setSelected(null)} onUpdated={async()=>{await Promise.all([load(true),onUpdated()])}}/>;
+  if(selected)return <TransactionEditor key={selected.id} item={selected} api={api} money={money} onCancel={()=>setSelected(null)} onSaved={async(updatedItem)=>{if(updatedItem){if(reviewStatus==='pendente'&&updatedItem.status_revisao==='validado'){setItems(current=>current.filter(row=>row.id!==updatedItem.id));setTotal(current=>Math.max(0,current-1));}else{setItems(current=>current.map(row=>row.id===updatedItem.id?{...row,...updatedItem}:row));}}setSelected(null);await Promise.all([load(true),onUpdated()])}}/>;
   const visibleItems=resultKey===queryKey?items:[],visibleTotal=resultKey===queryKey?total:0;
   const applySearch=()=>{setOffset(0);setAppliedSearch(search.trim());setRefreshVersion(value=>value+1)},first=visibleTotal?offset+1:0,last=Math.min(offset+PAGE_SIZE,visibleTotal);
   return <View>

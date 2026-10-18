@@ -7,7 +7,7 @@ from decimal import Decimal
 from bson import ObjectId
 from fastapi import HTTPException
 
-from app.account_profiles import profile_for_legacy
+from app.account_profiles import account_profiles, legacy_accounts_by_profile, profile_for_legacy
 from app.financial_time import local_date, utc_instant
 
 
@@ -30,6 +30,8 @@ def historical_statement_reviews(db, capture_query):
         audited.setdefault(audit['batch_id'], []).append(audit)
     reviews = {}
     accounts = {}
+    legacy_by_profile = None
+    valid_profile_keys = None
     for capture in candidates:
         batch = batches.get(capture.get('capture_batch_id'))
         if not batch or not batch.get('committed_at') or not capture.get('confirmed_at'):
@@ -55,7 +57,17 @@ def historical_statement_reviews(db, capture_query):
         if kind == 'ledger' and ObjectId.is_valid(identity):
             if identity not in accounts:
                 account = db.accounts.find_one({'_id': ObjectId(identity)})
-                accounts[identity] = (account, profile_for_legacy(db, account) if account else None)
+                if account:
+                    if legacy_by_profile is None:
+                        legacy_by_profile = legacy_accounts_by_profile(db)
+                        valid_profile_keys = {p["key"] for p in account_profiles(db)}
+                    from app.account_positions import account_key_for_legacy
+                    key = account_key_for_legacy(account)
+                    matched = legacy_by_profile.get(key)
+                    prof = key if matched and matched["_id"] == account["_id"] and key in valid_profile_keys else None
+                else:
+                    prof = None
+                accounts[identity] = (account, prof)
             account, profile = accounts[identity]
             if not account or str(capture.get('account_id')) != identity or capture.get('account_profile_id') != profile:
                 continue

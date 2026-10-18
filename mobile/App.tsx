@@ -26,6 +26,7 @@ import { API, api, authState } from "./utils/sessionClient";
 import React, {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -573,20 +574,41 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
     if (tab === "Início") return fresh("início", dashboardPath) ? Promise.resolve() : refresh("dashboard");
     if (tab === "Movimentações") return fresh("movimentações", movementsPath) ? Promise.resolve() : refresh("movements");
     if (tab === "Revisão") return fresh("revisão", "/v1/reviews") ? Promise.resolve() : refresh("reviews");
-    if (tab === "Contas" || tab === "Compromissos" || tab === "Capturar" || tab === "Mais")
+    if (tab === "Contas")
       return fresh("contas", "/v1/accounts") && fresh("saldos", "/v1/account-positions")
+        ? Promise.resolve() : refresh("accounts");
+    if (tab === "Compromissos" || tab === "Capturar" || tab === "Mais")
+      return (!force && loadedResources.contas && loadedResources.saldos) || (fresh("contas", "/v1/accounts") && fresh("saldos", "/v1/account-positions"))
         ? Promise.resolve() : refresh("accounts");
     if (tab === "Cartões") return fresh("cartões", "/v1/card-catalog") ? Promise.resolve() : refresh("cards");
     return Promise.resolve();
-  }, [lastLoaded, refresh, tab]);
+  }, [lastLoaded, loadedResources.contas, loadedResources.saldos, refresh, tab]);
+  const resolveActiveRefreshScopes = useCallback((scopes: Parameters<typeof refresh>[0][]) => {
+    const requested = scopes.length ? scopes : (["finance"] as const);
+    const active: Parameters<typeof refresh>[0][] = [];
+    for (const s of requested) {
+      if (s === "all") { active.push("all"); continue; }
+      if (s === "finance" || s === "dashboard" || s === "dashboard-period") lastLoaded.delete("início");
+      if (s === "finance" || s === "movements") lastLoaded.delete("movimentações");
+      if (s === "reviews") lastLoaded.delete("revisão");
+      if (s === "accounts" || s === "account-catalog") { lastLoaded.delete("contas"); if (s === "accounts") lastLoaded.delete("saldos"); }
+      if (s === "cards") lastLoaded.delete("cartões");
+      if (tab === "Início" && (s === "finance" || s === "dashboard" || s === "dashboard-period")) active.push("dashboard");
+      else if ((tab === "Movimentações" || tab === "Detalhe") && (s === "finance" || s === "movements")) active.push("movements");
+      else if (tab === "Revisão" && s === "reviews") active.push("reviews");
+      else if (tab === "Contas" && (s === "accounts" || s === "account-catalog")) active.push(s);
+      else if (tab === "Cartões" && s === "cards") active.push("cards");
+    }
+    return Array.from(new Set(active));
+  }, [lastLoaded, tab]);
   // The write response already acknowledges persistence. Aggregate screens can
   // refresh independently; LatestQueries keeps failures visible and rejects
   // responses belonging to an obsolete read generation.
   const refreshAfterMutation = useCallback((...scopes: Parameters<typeof refresh>[0][]) => {
-    void Promise.all((scopes.length ? scopes : ["finance" as const]).map(scope => refresh(scope, true)))
+    void Promise.all(resolveActiveRefreshScopes(scopes).map(scope => refresh(scope, false)))
       .catch(error => setRefreshErrors(current => ({...current, atualização: error.message || "Não foi possível atualizar os dados."})));
     return Promise.resolve();
-  }, [refresh]);
+  }, [refresh, resolveActiveRefreshScopes]);
   useEffect(() => {
     visibleRefreshRef.current = refreshVisible;
   }, [refreshVisible]);
@@ -877,7 +899,7 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
     );
     if (detailId.current === item.id) setDetailLoading(false);
   };
-  const transactionSaved = async (updated: any) => {
+  const transactionSaved = async (updated: any, result?: any) => {
     setSelectedItem((current: any) => ({ ...current, ...updated }));
     setItems((current) =>
       current.map((value) =>
@@ -887,7 +909,13 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
     setEditingItem(false);
     // result.item includes the current source token; another detail GET is
     // redundant and used to delay confirmation after the write completed.
-    await refreshAfterMutation("finance", "reviews");
+    lastLoaded.delete("início");
+    lastLoaded.delete("revisão");
+    if (Number(result?.propagated_count || 0) > 0) {
+      await refreshAfterMutation("movements", "reviews");
+    } else if (movementResultPath) {
+      lastLoaded.set("movimentações", { key: movementResultPath, at: Date.now(), generation: api.getReadGeneration() });
+    }
   };
   const movementDeleted = async () => {
     requests.cancel("detalhe");
@@ -953,6 +981,8 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
   const selectDashboardPeriod = async (period: DashboardPeriod) => {
     dashboardPeriod.current = period;
     setDashboardPeriodState(period);
+    if (period === "month" && monthDashboard) setDashboard(monthDashboard);
+    else if (period === "year" && yearDashboard) setDashboard(yearDashboard);
     await refresh("dashboard-period", true);
   };
   const openCategory = async (category: string) => {
@@ -1121,9 +1151,12 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
       </SingleLineValue>
     </Pressable>
   );
+  useLayoutEffect(() => {
+    if (tab !== "Compromissos") contentScroll.current?.scrollTo?.({ y: 0, animated: false });
+  }, [tab]);
   const reviewHeader = (
     <>
-      <ProvisionalReview api={json} money={money} onUpdated={() => refreshAfterMutation("finance", "reviews")} />
+      <ProvisionalReview api={json} money={money} initialAccounts={accountProfiles} onUpdated={() => refreshAfterMutation("finance", "reviews")} />
       <Text style={s.section}>Pendências automáticas</Text>
       {reviews.length === 0 && (
         <Text style={s.muted}>Nenhuma pendência automática para revisar.</Text>
@@ -1308,7 +1341,6 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
         />
       ) : (
         <ScrollView
-          key={tab}
           ref={node => {contentScroll.current = node; if (tab === "Compromissos") bindChartScroller(node);}}
           onScroll={event => {if (tab === "Compromissos") recordChartOffset(event.nativeEvent.contentOffset.y);}}
           scrollEventThrottle={16}
@@ -1514,6 +1546,7 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
               <ProvisionalReview
                 key={selectedItem.provisional_id}
                 initialItem={selectedItem}
+                initialAccounts={accountProfiles}
                 api={json}
                 money={money}
                 onUpdated={() => refreshAfterMutation("finance", "reviews")}

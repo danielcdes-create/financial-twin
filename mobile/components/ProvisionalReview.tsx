@@ -32,12 +32,12 @@ const PREFILLABLE_FIELDS=['vendedor','plataforma','tipo','categoria_sugerida','s
 const PREFILL_LABELS:Record<string,string>={vendedor:'Vendedor',plataforma:'Plataforma',tipo:'Tipo',categoria_sugerida:'Categoria',subcategoria:'Subcategoria',natureza:'Natureza',metodo_pagamento:'Meio de pagamento',localidade:'Localidade',account_profile_id:'Conta movimentada'};
 const initialDraftFor=(item:any):Record<string,string>=>{const base=draftFor(item);if(!item||item.status==='confirmed'||base.natureza==='TRANSFERENCIA')return base;const defaults=item.historical_defaults||{};for(const field of PREFILLABLE_FIELDS){if(!String(base[field]||'').trim()&&defaults[field])base[field]=String(defaults[field]);}return base;};
 const prefilledSummaryFor=(item:any,currentDraft:Record<string,string>):string=>{if(!item||item.status==='confirmed'||currentDraft.natureza==='TRANSFERENCIA')return '';const base=draftFor(item),defaults=item.historical_defaults||{},persisted=Array.isArray(item.historical_prefill_fields)?item.historical_prefill_fields:[];const names:string[]=[];for(const field of PREFILLABLE_FIELDS){const val=String(currentDraft[field]||'').trim();if(!val)continue;const fromDefaults=!String(base[field]||'').trim()&&defaults[field]&&val===String(defaults[field]).trim();const fromPersisted=persisted.includes(field)&&val===String(base[field]||'').trim();if((fromDefaults||fromPersisted)&&PREFILL_LABELS[field]&&!names.includes(PREFILL_LABELS[field]))names.push(PREFILL_LABELS[field]);}return names.length?`Pré-preenchido pelo histórico (${names.join(', ')}). Confira antes de confirmar.`:'';};
-type Props={api:(path:string,init?:RequestInit)=>Promise<any>;money:(value:number)=>string;onUpdated:()=>Promise<void>;initialItem?:any;onExit?:()=>void;reviewRecord?:boolean};
+type Props={api:(path:string,init?:RequestInit)=>Promise<any>;money:(value:number)=>string;onUpdated:()=>Promise<void>;initialItem?:any;initialAccounts?:any[];onExit?:()=>void;reviewRecord?:boolean};
 type DraftRow={provisional_id:string;item:string;draft:string;updated_at:string};
 
 const parseDraft=(row:DraftRow|null|undefined)=>{try{return row?{provisional_id:row.provisional_id,item:JSON.parse(row.item),draft:JSON.parse(row.draft),updated_at:row.updated_at}:null}catch{return null}};
 
-export default function ProvisionalReview({api,money,onUpdated,initialItem,onExit,reviewRecord=false}:Props){
+export default function ProvisionalReview({api,money,onUpdated,initialItem,initialAccounts,onExit,reviewRecord=false}:Props){
   const db=useSQLiteContext();const captureScope=useAsyncScope(initialItem?.provisional_id);
   const [items,setItems]=useState<any[]>([]),[options,setOptions]=useState<Record<string,any>>({});
   const [optionsError,setOptionsError]=useState(''),[optionsLoading,setOptionsLoading]=useState(false);
@@ -48,7 +48,7 @@ export default function ProvisionalReview({api,money,onUpdated,initialItem,onExi
     catch(error:any){if(valid()&&current===optionsGeneration.current)setOptionsError(error.message||'Não foi possível carregar as sugestões.');}
     finally{if(valid()&&current===optionsGeneration.current)setOptionsLoading(false);}
   };
-  const [accountOptions,setAccountOptions]=useState<any[]>([]);
+  const [accountOptions,setAccountOptions]=useState<any[]>(()=>initialAccounts||[]);
   const [selected,setSelected]=useState<any>(initialItem||null),[draft,setDraft]=useState<Record<string,string>>({});
   const [loading,setLoading]=useState(false),[saving,setSaving]=useState(false);
   const [resumable,setResumable]=useState<ReturnType<typeof parseDraft>>(null);
@@ -89,16 +89,17 @@ export default function ProvisionalReview({api,money,onUpdated,initialItem,onExi
     draftEpoch.current++;
     if(persistedDraft.current===provisionalId)persistedDraft.current=null;
   },[db]);
-  const load=useCallback(async()=>{
-    const version=++generation.current;setLoading(true);
+  const hasOptionsRef=useRef(false);
+  const load=useCallback(async(silent=false)=>{
+    const version=++generation.current;if(!silent)setLoading(true);
     try {
       if(initialItem?.provisional_id)await flushDraftWrites(db,'review',initialItem.provisional_id);
-      let local=await storedDraft(initialItem?.provisional_id);
+      const [rawLocal,commands]=await Promise.all([storedDraft(initialItem?.provisional_id),pendingReviewCommands(db)]);
+      let local=rawLocal;
       if(local&&await reviewDraftWasCompleted(db,local))local=null;
-      const commands=await pendingReviewCommands(db);
       if(initialItem){
         let available:Record<string,any>|null=null;
-        try{available=await api('/v1/transactions/classification-options')||{};if(version===generation.current)setOptionsError('');}catch(error:any){if(version===generation.current)setOptionsError(error.message||'Não foi possível carregar as sugestões.');}
+        try{available=await api('/v1/transactions/classification-options')||{};if(version===generation.current){hasOptionsRef.current=true;setOptionsError('');}}catch(error:any){if(version===generation.current)setOptionsError(error.message||'Não foi possível carregar as sugestões.');}
         if(version!==generation.current)return;
         persistedDraft.current=local?initialItem.provisional_id:null;setHasDraft(!!local);
         setDraftState(local?'Rascunho salvo neste dispositivo.':'Sem alterações locais');
@@ -106,20 +107,20 @@ export default function ProvisionalReview({api,money,onUpdated,initialItem,onExi
         setConflict(local&&!sameReviewSource(local.item,initialItem)?initialItem:null);
         const pending=!!await pendingReviewCommand(db,initialItem.provisional_id);if(version===generation.current)setCommandPending(pending);
       }else{
-        const [captures,available]=await Promise.allSettled([api('/v1/provisional?active_only=true'),api('/v1/transactions/classification-options')]);
+        const [captures,available]=await Promise.allSettled([api('/v1/provisional?active_only=true'),hasOptionsRef.current?Promise.resolve(null):api('/v1/transactions/classification-options')]);
         if(version!==generation.current)return;
         setResumable(local);
         setPendingCommands(commands);
         if(captures.status==='fulfilled'){setItems(captures.value.items||[]);setPage({total:captures.value.total||0,next_cursor:captures.value.next_cursor||null})}
-        if(available.status==='fulfilled'){setOptions(available.value||{});setOptionsError('');}
+        if(available.status==='fulfilled'){if(available.value!==null){hasOptionsRef.current=true;setOptions(available.value||{});}setOptionsError('');}
         else setOptionsError(available.reason?.message||'Não foi possível carregar as sugestões.');
-        if(captures.status==='rejected'&&available.status==='rejected'&&!local)throw captures.reason;
+        if(captures.status==='rejected'&&(available.status==='rejected'||hasOptionsRef.current)&&!local)throw captures.reason;
       }
     }catch(error:any){if(version===generation.current)Alert.alert('Não foi possível carregar as capturas',error.message)}
     finally{if(version===generation.current)setLoading(false)}
   },[api,db,initialItem,storedDraft]);
   useEffect(()=>{const lifetime=generation,task=setTimeout(()=>load(),0);return()=>{clearTimeout(task);lifetime.current++}},[load]);
-  useEffect(()=>{let active=true;void api('/v1/account-positions').then(result=>{if(active)setAccountOptions(result.items||[])}).catch(()=>{});return()=>{active=false}},[api]);
+  useEffect(()=>{if(initialAccounts?.length){setAccountOptions(initialAccounts);return;}let active=true;void api('/v1/account-positions').then(result=>{if(active)setAccountOptions(result.items||[])}).catch(()=>{});return()=>{active=false}},[api,initialAccounts]);
   useEffect(()=>{
     if(!selected?.provisional_id||!Object.keys(draft).length||conflict)return;
     if(persistedDraft.current!==selected.provisional_id&&!Object.entries(draft).some(([field,value])=>value!==(selectedSourceDraft[field]||'')))return;
@@ -139,14 +140,15 @@ export default function ProvisionalReview({api,money,onUpdated,initialItem,onExi
     if(running.current)return;running.current=true;setLoading(true);const valid=captureScope();
     try{
       await draftWrites.current;await flushDraftWrites(db,'review',item.provisional_id);
-      const current=(await api(`/v1/provisional/${item.provisional_id}`)).item;
+      const [response,local,pendingCmd]=await Promise.all([api(`/v1/provisional/${item.provisional_id}`),storedDraft(item.provisional_id),pendingReviewCommand(db,item.provisional_id)]);
+      const current=response?.item;
       if(!current)throw new Error('Não foi possível conferir a versão atual. O rascunho permanece salvo.');
-      const local=await storedDraft(item.provisional_id);if(!valid())return;
+      if(!valid())return;
       persistedDraft.current=local?item.provisional_id:null;setHasDraft(!!local);
       setDraftState(local?'Rascunho salvo neste dispositivo.':'Sem alterações locais');
       setNeedsCurrent(false);setSelected(local?.item||current);setDraft(local?.draft||initialDraftFor(current));
       setConflict(local&&!sameReviewSource(local.item,current)?current:null);
-      const pending=!!await pendingReviewCommand(db,item.provisional_id);if(valid())setCommandPending(pending);
+      setCommandPending(!!pendingCmd);
     }catch(error:any){if(!valid())return;Alert.alert('Não foi possível abrir a captura',error.message)}
     finally{running.current=false;if(valid())setLoading(false)}
   };
@@ -209,14 +211,15 @@ export default function ProvisionalReview({api,money,onUpdated,initialItem,onExi
     if(!pending&&[409,428].includes(error.status))setNeedsCurrent(true);
     Alert.alert(title,`${error.message}\n\nA tentativa e seus campos permanecem salvos.`);
   };
-  const finishConfirmed=async(provisionalId:string,confirmed:boolean,valid:()=>boolean)=>{
+  const finishConfirmed=async(provisionalId:string,confirmed:boolean,valid:()=>boolean,removedFromActive=confirmed)=>{
     setCommandPending(false);setConflict(null);
     let notice='';
     try{await forgetDraft(provisionalId)}catch{notice=' O rascunho foi preservado porque a limpeza local não terminou.'}
     if(!valid())return;setResumable(current=>current?.provisional_id===provisionalId?null:current);setHasDraft(false);setSelected(null);
+    if(removedFromActive){setItems(current=>current.filter(row=>row.provisional_id!==provisionalId));setPage(current=>({...current,total:Math.max(0,current.total-1)}));}
     Alert.alert(confirmed?'Captura confirmada':'Captura atualizada',(confirmed?'A movimentação foi confirmada e entrou nos totais financeiros.':'As correções foram salvas.')+notice);
     void Promise.resolve().then(onUpdated).catch(()=>{if(valid())Alert.alert('Captura salva','A gravação foi confirmada. Atualize a tela para conferir os dados atuais.');});
-    if(initialItem)onExit?.();else await load();
+    if(initialItem)onExit?.();else await load(true);
   };
   const save=async(confirm=false)=>{
     if(running.current||!selected?.provisional_id||conflict||needsCurrent)return;
@@ -252,7 +255,7 @@ export default function ProvisionalReview({api,money,onUpdated,initialItem,onExi
   };
   const decide=(item:any,action:'confirm'|'cancel')=>{const valid=captureScope();const run=async()=>{
     if(!valid()||running.current)return;running.current=true;setSaving(true);
-    try{await runReviewCommand(db,api,item.provisional_id,`/v1/provisional/${item.provisional_id}/decision`,{action,expected_revision:item.revision||1});if(valid())await finishConfirmed(item.provisional_id,action==='confirm',valid)}
+    try{await runReviewCommand(db,api,item.provisional_id,`/v1/provisional/${item.provisional_id}/decision`,{action,expected_revision:item.revision||1});if(valid())await finishConfirmed(item.provisional_id,action==='confirm',valid,true)}
     catch(error:any){if(!valid())return;Alert.alert('Não foi possível concluir',error.message);await load()}finally{running.current=false;if(valid())setSaving(false)}
   };if(action==='cancel')Alert.alert('Descartar captura?','Ela permanecerá no histórico de auditoria, mas não entrará nos totais.',[{text:'Voltar',style:'cancel'},{text:'Descartar',style:'destructive',onPress:()=>run()}]);else return run()};
   const loadMore=async()=>{

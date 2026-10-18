@@ -5,12 +5,13 @@ from time import monotonic
 
 
 class ReferenceCache:
-    def __init__(self, ttl_seconds=300):
+    def __init__(self, ttl_seconds=300, dependents=()):
         self.ttl_seconds = ttl_seconds
         self._lock = Lock()
         self._generation = 0
         self._values = {}
         self._pending = {}
+        self._dependents = list(dependents)
 
     def invalidate(self):
         # Never wait for a database read while running in ASGI middleware.
@@ -18,6 +19,8 @@ class ReferenceCache:
             self._generation += 1
             self._values.clear()
             self._pending.clear()
+        for dependent in self._dependents:
+            dependent.invalidate()
 
     def get(self, scope, build):
         key = id(scope)
@@ -52,4 +55,5 @@ class ReferenceCache:
                     return value
 
 
-classification_cache = ReferenceCache()
+historical_context_cache = ReferenceCache(ttl_seconds=120)
+classification_cache = ReferenceCache(dependents=(historical_context_cache,))

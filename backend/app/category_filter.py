@@ -29,10 +29,12 @@ def catalog_category_names(db):
             cat = row.get("category") or row.get("categoria")
             if cat and str(cat).strip():
                 names.append(str(cat).strip())
-    names += [item["name"] for item in db.categories.find({"active": {"$ne": False}}) if item.get("name")]
-    inactive = {str(item.get("name") or "").strip().casefold() for item in db.categories.find({}) if item.get("active") is False and item.get("name")}
+    all_categories = list(db.categories.find({}))
+    active_categories = [item for item in all_categories if item.get("active") is not False and item.get("name")]
+    names += [item["name"] for item in active_categories]
+    inactive = {str(item.get("name") or "").strip().casefold() for item in all_categories if item.get("active") is False and item.get("name")}
     if inactive:
-        active_explicit = {str(item.get("name") or "").strip().casefold() for item in db.categories.find({"active": {"$ne": False}}) if item.get("name")}
+        active_explicit = {str(item.get("name") or "").strip().casefold() for item in active_categories}
         retired = inactive - active_explicit
         if retired:
             names = [name for name in names if name.strip().casefold() not in retired]
