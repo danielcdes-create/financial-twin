@@ -2,6 +2,19 @@
 
 Julgamento da árvore local de `financial-app` a partir de `431aaf5`, com a correção de contagem dupla desta entrega, commit `cc7f562`. Dados sintéticos. O ledger ao vivo não foi lido, escrito, deduplicado nem reparado. O release privado no disco é Android 1.20.69 / versionCode 115, SHA-256 `4AC9D24CD14C8AC3189290226EDD55CBE8AB99C8D32A906C28EB8F0225B2D790`, commit `dcbd443`, com o certificado de debug anterior. A instalação física permanece unverified.
 
+## Entrega 18/10/2026 — fila, compartilhamento e mídia órfã
+
+Commit do recurso `a7c071f`. O ledger ao vivo não foi lido nem escrito. Nesta passagem passaram `backend/tests/test_media_recovery_time.py` (3), `backend/tests/test_auth.py` (14), `mobile/scripts/test-node-forge-security.cjs` e `mobile/scripts/test-braces-security.cjs`. A suíte completa do cliente e a homologação física não foram repetidas.
+
+| Correção | Veredito |
+| --- | --- |
+| PS-R02, share com sessão bloqueada | defect fixed no código. A intenção fica em `__financialTwinPendingShare` e segue para `/handle-share` depois do desbloqueio. App frio, bloqueio e biometria no aparelho: unverified. |
+| PS-R01, inbox sem orçamento | defect fixed no código nativo. A fila guarda no máximo 500 eventos e 64 entradas de recuperação. Fila grande e disco baixo no aparelho: unverified. |
+| Exceção GHSA do `node-forge` e do `braces` | a janela auditada passa a 2027-11-01T00:00:00Z. O hash e a rejeição RSA/AST continuam conferidos. Não houve release oficial que substitua o pacote. |
+| Mídia órfã | defect fixed. Depois de 7 dias sem referência, o arquivo sai do disco e o registro fica `purged`. |
+| Limite de login do proprietário | defect fixed. Um login válido zera o balde compartilhado `private-owner`. |
+| Nome padronizado do vendedor | o índice `merchant_standard_name` em `merchants.nome_padrao` é consultado antes da varredura. |
+
 ## Entrega 18/10/2026 — sessão biométrica
 
 Commit do recurso `ef97ad5`, empacotado em `dcbd443`. APK ARM64 de 48095144 bytes, SHA-256 `4AC9D24CD14C8AC3189290226EDD55CBE8AB99C8D32A906C28EB8F0225B2D790`, assinante `FAC61745DC0903786FB9EDE62A962B399F7348F0BB6F899B8332667591033B9C`. O ledger ao vivo não foi lido nem escrito. Nesta passagem passaram `backend/tests/test_auth.py` (14), `mobile/scripts/test-account-security.cjs` e `mobile/scripts/test-auth-transitions.cjs` (10). A suíte completa do cliente e a homologação física não foram repetidas.
