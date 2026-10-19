@@ -1,6 +1,18 @@
 # Auditoria adversarial — 15/10/2026
 
-Julgamento da árvore local de `financial-app` a partir de `431aaf5`, com a correção de contagem dupla desta entrega, commit `cc7f562`. Dados sintéticos. O ledger ao vivo não foi lido, escrito, deduplicado nem reparado. O release privado no disco é Android 1.20.72 / versionCode 118, SHA-256 `E169973B1FF6CCEA0682700B2AC529A658542D1D17E77ED8CC279BA26B61B99F`, commit `1509ed6`, com o certificado de debug anterior. A instalação física permanece unverified.
+Julgamento da árvore local de `financial-app` a partir de `431aaf5`, com a correção de contagem dupla desta entrega, commit `cc7f562`. Dados sintéticos. O ledger ao vivo não foi lido, escrito, deduplicado nem reparado. O release privado no disco é Android 1.20.73 / versionCode 119, SHA-256 `DD0A21A417AA14E510E72B5F6D40437E91A78859FCA62036507BADFD69A59A60`, commit `5590258`, com o certificado de debug anterior. A instalação física permanece unverified.
+
+## Entrega 18/10/2026 — telemetria e janelas do painel
+
+Commit do recurso `89f3916`, empacotado em `5590258`. APK ARM64 de 48114040 bytes, SHA-256 `DD0A21A417AA14E510E72B5F6D40437E91A78859FCA62036507BADFD69A59A60`, assinante `FAC61745DC0903786FB9EDE62A962B399F7348F0BB6F899B8332667591033B9C`. O ledger ao vivo não foi lido nem escrito. Nesta passagem passaram `backend/tests/test_telemetry_privacy.py` (4), `backend/tests/test_performance_plan.py` (3), `backend/tests/test_commitment_estimates.py` (15), `test-user-operation.cjs`, `test-connection-recovery.cjs`, `test-interaction-lock.cjs`, `test-commitment-lists.cjs` e `test-app-transitions.cjs`. A suíte completa do cliente e a homologação física não foram repetidas.
+
+| Correção | Veredito |
+| --- | --- |
+| Telemetria | `POST /v1/telemetry/events` e `GET /v1/telemetry/report` exigem sessão. O registro guarda tempos e rótulo de rota. Consulta, valor, identificador e texto de erro ficam de fora. |
+| Janela do painel | a competência usa faixa indexável e o filtro de mês válido. Intervalos sobrepostos da mesma leitura são fundidos. O snapshot continua sendo a fonte do período. |
+| Índices | seis índices aditivos na subida: competência, revisão, evidência e auditoria. O ledger não é reescrito. |
+| Vendedor em lote | candidatos de pagamento e a página do extrato enriquecem a página com uma consulta, não uma por linha. |
+| Projeção inicial | abrir Compromissos não dispara `/v1/commitment-projection` de novo. Uma gravação ainda atualiza o gráfico. |
 
 ## Entrega 18/10/2026 — aba visível e contexto histórico
 
