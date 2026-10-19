@@ -8,6 +8,8 @@ media/
 audit_work/
 *.log
 *.err.log
+logs/
+*.jsonl
 *.jks
 *.keystore
 *.key

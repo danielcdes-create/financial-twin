@@ -10,6 +10,16 @@ Notificações separam aprovação/recusa/estorno do contexto da compra, comerci
 
 O backend permanece neste PC, conforme a escolha do usuário. PC, sessão Windows e Tailscale precisam estar ativos; suspensão ou desligamento interrompem o acesso. Não foram alteradas as preferências de bateria/suspensão, nem foi contratado um serviço externo.
 
+## Telemetria e janelas — 1.20.73
+
+O cliente mede troca de aba, o tempo até a aba visível, leituras, capturas e mutações. O buffer fica em SQLite (`perf_telemetry`) e sobe em lote autenticado para `POST /v1/telemetry/events`. `GET /v1/telemetry/report` devolve P50, P95 e P99 por rota e por evento do cliente. Os cabeçalhos `X-Trace-Id`, `Server-Timing` e `X-Perf-Metrics` separam rede, Python e MongoDB. Essas rotas não invalidam o cache de classificação e não entram no journal de mutação.
+
+A consulta, o identificador do documento, o valor e o texto de erro ficam fora do registro. O arquivo `logs/perf_telemetry.jsonl` guarda o rótulo da rota e os tempos.
+
+No painel, a competência usa uma faixa indexável de `competencia` e o mesmo filtro de mês válido. Intervalos sobrepostos da mesma leitura são fundidos. Seis índices novos, criados de forma idempotente na subida, cobrem competência, status de revisão, evidência e rótulos de auditoria. `taxonomy_overrides` reutiliza o cache de classificação por 300 segundos. Candidatos de pagamento e a página do extrato enriquecem o vendedor em lote. Abrir Compromissos não pede `/v1/commitment-projection` de novo: a projeção já carrega na montagem. Uma gravação ainda atualiza o gráfico.
+
+O painel continua calculando o período sobre o snapshot já lido. Não há tabela extra de totais por mês. O ledger não é reescrito.
+
 ## Abas e leituras — 1.20.72
 
 Trocar de aba não recria o `ScrollView`. Depois de gravar, só a aba visível busca de novo; as outras perdem a marca de carregadas e atualizam quando forem abertas. Confirmar uma captura ou uma revisão tira o item da lista na hora e recarrega a página em segundo plano, sem pedir de novo as opções de classificação. Mais, Capturar e Compromissos reutilizam contas e perfis já lidos na sessão. O recálculo de saldos fica na aba Contas.

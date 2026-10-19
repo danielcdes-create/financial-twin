@@ -35,7 +35,24 @@ from app.category_filter import ACTIVE_CAPTURES, catalog_category_names, categor
 from app.movement_filters import period_query, intersect, search_query, filter_key as movement_filter_key
 from app.document_validation import validate_document_extraction
 from app.pdf_input import PDFPasswordError, read_pdf
-from app.reference_cache import classification_cache
+from app.reference_cache import ReferenceCache, classification_cache
+from contextlib import nullcontext
+try:
+    from app.telemetry import install_telemetry, SpanTimer
+except Exception:
+    def install_telemetry(_app):
+        return None
+    def SpanTimer(*_args, **_kwargs):
+        return nullcontext()
+
+taxonomy_overrides_cache = ReferenceCache(ttl_seconds=300)
+classification_cache._dependents.append(taxonomy_overrides_cache)
+
+def cached_taxonomy_overrides(db):
+    raw_db = getattr(db, "db", db)
+    if isinstance(raw_db, Database):
+        return taxonomy_overrides_cache.get(raw_db, lambda: taxonomy_overrides(db))
+    return taxonomy_overrides(db)
 from app.upload_worker import persisted_event, run_upload
 from app.operation_identity import bind_upload, complete_upload
 from app.mutation_identity import durable_mutation
@@ -123,6 +140,13 @@ async def lifespan(app: FastAPI):
         app.state.db.provisional_transactions.create_index([("status",1),("fluxo",1),("valor",1),("data_evento",-1)],name="capture_payment_candidates")
         app.state.db.provisional_transactions.create_index([("merchant_raw","text"),("merchant_name","text"),("categoria_sugerida","text"),("subcategoria","text"),("tipo","text")],name="provisional_text_search",default_language="portuguese")
         app.state.db.review_queue.create_index([("status",1),("created_at",-1),("_id",-1)],name="review_status_page")
+        # Performance indexes for competence windows, review status pagination, evidence lookups, and audit labels
+        app.state.db.transactions.create_index([("competencia",-1),("data_evento",-1),("_id",-1)],name="transaction_competence_window")
+        app.state.db.transactions.create_index([("status_revisao",1),("data_evento",-1),("_id",-1)],name="transaction_review_status_page")
+        app.state.db.provisional_transactions.create_index([("status",1),("competencia",-1),("data_evento",-1)],name="provisional_competence_window")
+        app.state.db.provisional_transactions.create_index([("event_id",1)],name="provisional_by_event_id")
+        app.state.db.transaction_evidence.create_index([("transaction_id",1),("status",1)],name="evidence_by_transaction")
+        app.state.db.audit_log.create_index([("event",1),("transaction_id",1),("created_at",-1)],name="audit_reviewed_labels")
         for collection in ('financial_cases','saving_experiments'):
             app.state.db[collection].create_index([('created_at',-1),('_id',-1)],name='workflow_page')
         account_index=[('account_id',1),('data_evento',-1)]
@@ -149,6 +173,7 @@ async def lifespan(app: FastAPI):
         app.state.mongo_client.close()
 
 app = FastAPI(title="Financial Digital Twin API", version="0.4.0", lifespan=lifespan)
+install_telemetry(app)
 from app.account_auth import router as account_auth_router
 app.include_router(account_auth_router)
 @app.exception_handler(RequestValidationError)
@@ -191,7 +216,7 @@ def mongo_write_conflict(_request, exc):
         return JSONResponse(status_code=503,content={"detail":"O banco atingiu o limite de coleções. A operação foi abortada; o histórico permanece preservado. É necessário liberar capacidade no servidor antes de tentar novamente."})
     return JSONResponse(status_code=503,content={"detail":"Operação indisponível; nenhuma gravação parcial deve ser considerada confirmada."})
 
-app.add_middleware(CORSMiddleware,allow_origins=["http://localhost:19006","http://127.0.0.1:19006"],allow_methods=["GET","POST","PUT","PATCH","DELETE"],allow_headers=["Authorization","Content-Type"],expose_headers=['X-Operation-Pending','Retry-After','X-Session-Token','X-Session-Expires-In'])
+app.add_middleware(CORSMiddleware,allow_origins=["http://localhost:19006","http://127.0.0.1:19006"],allow_methods=["GET","POST","PUT","PATCH","DELETE"],allow_headers=["Authorization","Content-Type","X-Trace-Id","X-Client-Action","X-Client-Tab"],expose_headers=['X-Operation-Pending','Retry-After','X-Session-Token','X-Session-Expires-In','X-Trace-Id','Server-Timing','X-Perf-Metrics'])
 
 @app.middleware("http")
 async def private_response_headers(request: Request, call_next):
@@ -209,6 +234,7 @@ async def invalidate_reference_data(request: Request, call_next):
     mutates = (
         request.method in {"POST", "PUT", "PATCH", "DELETE"}
         and path != "/v1/capture-batches/file-status"
+        and not path.startswith("/v1/telemetry")
         and not path.endswith(("/preview", "/review"))
         and path.startswith(("/v1/commitment-profile", "/v1/capture-batches", "/v1/movements", "/v1/transactions", "/v1/categories", "/v1/subcategories", "/v1/provisional", "/v1/merchants", "/v1/reviews", "/v1/events", "/v1/import", "/v1/documents"))
     )
@@ -292,7 +318,7 @@ def with_merchant_name(document:dict[str,Any], db, *, include_historical:bool=Tr
         if platform and platform.get("nome_padrao"): result["plataforma"]=platform["nome_padrao"]
     elif detected:=platform_identity(document.get("merchant_raw") or document.get("estabelecimento_original") or document.get("descricao_original")):
         result["plataforma_sugerida"]=detected[1]
-    suggestion=infer_classification(document,taxonomy_overrides(db))
+    suggestion=infer_classification(document,cached_taxonomy_overrides(db))
     for field,value in suggestion.items():
         if not result.get(field): result['categoria_inferida' if field=='categoria' and document.get('provisional_id') else f"{field}_sugerida"]=value
     if include_historical and document.get("provisional_id") and document.get("status") in {"provisional","enriched"}:
@@ -304,7 +330,7 @@ def with_merchant_names(documents:list[dict[str,Any]], db):
     merchant_ids={item.get(key) for item in documents for key in ("merchant_id","platform_id") if item.get(key)}
     merchants={str(item["_id"]):item.get("nome_padrao") for item in db.merchants.find({"_id":{"$in":list(merchant_ids)}},{"nome_padrao":1})} if merchant_ids else {}
     results=[]
-    overrides=taxonomy_overrides(db)
+    overrides=cached_taxonomy_overrides(db)
     has_active_provisional=any(item.get("provisional_id") and item.get("status") in {"provisional","enriched"} for item in documents)
     history_cache=_historical_context(db) if has_active_provisional else None
     catalog_cache=history_cache["catalog"] if history_cache else None
@@ -578,6 +604,10 @@ def percentage_change(current:Decimal,previous:Decimal)->float|None:
     return float((current-previous)/abs(previous)*Decimal("100"))
 
 def dashboard_forecast(db):
+    with SpanTimer("dashboard.forecast"):
+        return _dashboard_forecast(db)
+
+def _dashboard_forecast(db):
     """Period-independent home figures. Overview must not repeat these scans per card."""
     pending=db.review_queue.count_documents({"status":"pending"})
     provisional=db.provisional_transactions.count_documents({"status":{"$in":["provisional","enriched"]}})
@@ -602,6 +632,10 @@ def dashboard_forecast(db):
     return {"pending":pending,"provisional":provisional,"ingested":ingested,"open_debt":open_debt,"future_financing":future_financing,"projected_installments":projected_installments,"projected_count":projected_count,"commitment_due_count":commitment_due_count,"commitment_due_total":commitment_due_total,"investment_count":investment_count}
 
 def _dashboard(period, date_from, date_to, db, snapshot=None, forecast=None):
+    with SpanTimer("dashboard.compute_period", period=period):
+        return _dashboard_impl(period, date_from, date_to, db, snapshot=snapshot, forecast=forecast)
+
+def _dashboard_impl(period, date_from, date_to, db, snapshot=None, forecast=None):
     if snapshot is None and isinstance(db,(Database,_SessionDatabase)):snapshot=snapshot_for(db,[(period,date_from,date_to)])
     txs=list(snapshot[0]) if snapshot is not None else list(db.transactions.find({}, PROJECTION).limit(0))
     dates=[tx["data_evento"] for tx in txs if tx.get("data_evento")]
@@ -912,6 +946,10 @@ def transaction_classification_options(db=Depends(database)):
     return classification_cache.get(db, lambda: build_classification_options(db))
 
 def build_classification_options(db):
+    with SpanTimer("options.build_classification_options"):
+        return _build_classification_options(db)
+
+def _build_classification_options(db):
     live_captures={"status":{"$in":ACTIVE_CAPTURES}}
     result={field:sorted({str(value) for value in db.transactions.distinct(field)
                          +db.provisional_transactions.distinct(field,live_captures)
@@ -1345,6 +1383,10 @@ def get_provisional(provisional_id:str,db=Depends(database)):
         return {'item':result,'read_consistency':consistency}
 
 def cursor_movements(limit, cursor, search, category, account_id, date_from, date_to, db, review_status=None, offset=0, period_basis='cash', spending_only=False):
+    with SpanTimer("movements.cursor_movements", limit=limit, period_basis=period_basis, spending_only=spending_only, review_status=review_status):
+        return _cursor_movements_impl(limit, cursor, search, category, account_id, date_from, date_to, db, review_status=review_status, offset=offset, period_basis=period_basis, spending_only=spending_only)
+
+def _cursor_movements_impl(limit, cursor, search, category, account_id, date_from, date_to, db, review_status=None, offset=0, period_basis='cash', spending_only=False):
     legacy_query={}
     capture_query={"status":"confirmed"} if review_status is not None or spending_only else {"status":{"$in":["provisional","enriched","confirmed"]}}
     legacy_query.update(category_query("categoria",category))
@@ -2517,22 +2559,26 @@ def commitment_payment_candidates(commitment_id:str,db=Depends(database)):
             if provider_pattern and re.search(provider_pattern, raw, re.I): related=True
             same_card=bool(item.get("card_id") and str(document.get("account_id"))==item["card_id"])
             if not automatic_suggestion(paid_day, due, related=related, amount=amount, expected=expected, same_card=same_card): continue
-            candidate=with_merchant_name(document,db)
-            candidate["source_kind"]=kind
-            candidate["match_reason"]="nome ou plataforma" if related else "cartão, data e valor"
-            occurrences=payment_occurrences(item,local_date(document["data_evento"]))
-            candidate["occurrence_options"]=occurrences
-            candidate["requires_occurrence_selection"]=len(occurrences)>1
-            next_occurrence=schedule(item,1)
-            candidate["next_occurrence_due_date"]=next_occurrence[0]["due_date"] if next_occurrence else None
-            candidates.append(candidate)
-    def suggestion_rank(value):
-        paid_day=local_date(value["data_evento"])
-        gap=abs(abs(Decimal(str(value["valor"]))) - expected)
-        named=0 if value.get("match_reason")=="nome ou plataforma" else 1
-        return (named, gap, abs((paid_day-due).days))
+            candidates.append((kind, document, "nome ou plataforma" if related else "cartão, data e valor", paid_day, abs(abs(amount) - expected)))
+    def suggestion_rank(entry):
+        _, _, match_reason, paid_day, gap = entry
+        named = 0 if match_reason == "nome ou plataforma" else 1
+        return (named, gap, abs((paid_day - due).days))
     candidates.sort(key=suggestion_rank)
-    return {"items":candidates[:25],"commitment_revision":item.get('revision',1),"truncated":truncated or len(candidates)>25,"scanned":len(transaction_docs)+len(capture_docs)}
+    top_entries = candidates[:25]
+    enriched_docs = with_merchant_names([doc for _, doc, _, _, _ in top_entries], db) if top_entries else []
+    next_occurrence = schedule(item, 1)
+    next_due_str = next_occurrence[0]["due_date"] if next_occurrence else None
+    enriched_items = []
+    for (kind, document, match_reason, paid_day, _), candidate in zip(top_entries, enriched_docs):
+        candidate["source_kind"] = kind
+        candidate["match_reason"] = match_reason
+        occurrences = payment_occurrences(item, paid_day)
+        candidate["occurrence_options"] = occurrences
+        candidate["requires_occurrence_selection"] = len(occurrences) > 1
+        candidate["next_occurrence_due_date"] = next_due_str
+        enriched_items.append(candidate)
+    return {"items":enriched_items,"commitment_revision":item.get('revision',1),"truncated":truncated or len(candidates)>25,"scanned":len(transaction_docs)+len(capture_docs)}
 
 
 _STATEMENT_TEXT_FIELDS = ("descricao_original", "estabelecimento_original", "merchant_raw", "merchant_name", "merchant_normalized")
@@ -2588,9 +2634,9 @@ def _statement_matches(document, text, money, exact, low, high, start, end):
     return named
 
 
-def _decorate_statement_row(item, document, kind, db, linked, *, with_occurrences=True):
+def _decorate_statement_row(item, document, kind, db, linked, *, with_occurrences=True, pre_enriched=None):
     source_id = str(document["_id"]) if kind == "transaction" else document.get("provisional_id")
-    candidate = with_merchant_name(document, db)
+    candidate = pre_enriched if pre_enriched is not None else with_merchant_name(document, db)
     candidate["source_kind"] = kind
     commitment = linked.get(source_id)
     if commitment:
@@ -2669,8 +2715,9 @@ def _statement_page(item, q, date_from, date_to, amount, amount_min, amount_max,
                     linked[key] = {"id": commitment.get("commitment_id"), "name": commitment.get("name") or "Compromisso", "kind": commitment.get("kind")}
     for key, owner in overlay_link_names(db, transaction_ids, capture_ids).items():
         linked.setdefault(key, owner)
+    enriched_page = with_merchant_names([document for _, document in page], db) if page else []
     return {
-        "items": [_decorate_statement_row(item, document, kind, db, linked, with_occurrences=with_occurrences) for kind, document in page],
+        "items": [_decorate_statement_row(item, document, kind, db, linked, with_occurrences=with_occurrences, pre_enriched=enriched) for (kind, document), enriched in zip(page, enriched_page)],
         "total": len(matched),
         "limit": limit,
         "offset": offset,

@@ -67,6 +67,7 @@ import { useQueueSync } from "./utils/useQueueSync";
 import {canReviewAsStatement, queueFailureLabel, reconcileImportedFiles, requeueAsStatement} from "./utils/queueRecovery";
 import { useForeground } from "./utils/useForeground";
 import { withDevicePrompt } from "./utils/devicePrompt";
+import { telemetry } from "./utils/telemetry";
 
 type Tab =
   | "Início"
@@ -193,11 +194,15 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
   const db = useSQLiteContext();
   const auth = useAuth();
   const captureScope = useAsyncScope(authState.sessionIdentity());
-  const [tab, setTab] = useState<Tab>(initialPurchaseImage||initialPurchaseError?"Comprar":"Início");
+  const [tab, setTabState] = useState<Tab>(initialPurchaseImage||initialPurchaseError?"Comprar":"Início");
+  const setTab = useCallback((nextTab: Tab, reason: 'user_tap' | 'programmatic' | 'back' = 'user_tap') => {
+    telemetry.startTabTransition(nextTab, reason);
+    setTabState(nextTab);
+  }, []);
   const route=usePathname();
   const activeRoute=route===navigationRoute;
   const localParent=tab==='Detalhe'?'Movimentações':['Decisões','Fechamento','Comprar','Rascunhos','Contas','Cartões','Categorias','Compromissos','Ajustes'].includes(tab)?'Mais':null;
-  useLocalBack(()=>setTab(localParent as Tab),Boolean(localParent)&&activeRoute,0);
+  useLocalBack(()=>setTab(localParent as Tab, 'back'),Boolean(localParent)&&activeRoute,0);
   useEffect(()=>{
     if(Platform.OS!=='android'||!activeRoute)return;
     const back=BackHandler.addEventListener('hardwareBackPress',dispatchLocalBack);
@@ -293,7 +298,13 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
   const handledSyncRevision = useRef(0);
   const visibleRefreshRef = useRef<(force?: boolean) => Promise<void>>(() => Promise.resolve());
   const foreground = useForeground();
-  useEffect(()=>{api.configureMutationStore(db);},[db]);
+  useEffect(()=>{
+    api.configureMutationStore(db);
+    void telemetry.configure({
+      db,
+      uploader: events => json("/v1/telemetry/events", { method: "POST", body: JSON.stringify({ events }) }).then(() => undefined),
+    });
+  },[db]);
   const [requests] = useState(
     () =>
       new LatestQueries((pending, errors, failed) => {
@@ -571,17 +582,32 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
     const dashboardPath = `/v1/dashboard/overview?period=${dashboardPeriod.current}&year_start=${window.yearStart}&month_start=${window.monthStart}&month_end=${window.monthEnd}`;
     const movementsPath = movementPath({search:movementQuery.current,category:movementCategory.current,
       account:movementAccount.current,range:movementDateRange.current,spendingOnly:movementSpendingOnly.current});
-    if (tab === "Início") return fresh("início", dashboardPath) ? Promise.resolve() : refresh("dashboard");
-    if (tab === "Movimentações") return fresh("movimentações", movementsPath) ? Promise.resolve() : refresh("movements");
-    if (tab === "Revisão") return fresh("revisão", "/v1/reviews") ? Promise.resolve() : refresh("reviews");
-    if (tab === "Contas")
-      return fresh("contas", "/v1/accounts") && fresh("saldos", "/v1/account-positions")
-        ? Promise.resolve() : refresh("accounts");
-    if (tab === "Compromissos" || tab === "Capturar" || tab === "Mais")
-      return (!force && loadedResources.contas && loadedResources.saldos) || (fresh("contas", "/v1/accounts") && fresh("saldos", "/v1/account-positions"))
-        ? Promise.resolve() : refresh("accounts");
-    if (tab === "Cartões") return fresh("cartões", "/v1/card-catalog") ? Promise.resolve() : refresh("cards");
-    return Promise.resolve();
+    let task: Promise<void>;
+    let fromCache = true;
+    if (tab === "Início") {
+      fromCache = fresh("início", dashboardPath);
+      task = fromCache ? Promise.resolve() : refresh("dashboard");
+    } else if (tab === "Movimentações") {
+      fromCache = fresh("movimentações", movementsPath);
+      task = fromCache ? Promise.resolve() : refresh("movements");
+    } else if (tab === "Revisão") {
+      fromCache = fresh("revisão", "/v1/reviews");
+      task = fromCache ? Promise.resolve() : refresh("reviews");
+    } else if (tab === "Contas") {
+      fromCache = fresh("contas", "/v1/accounts") && fresh("saldos", "/v1/account-positions");
+      task = fromCache ? Promise.resolve() : refresh("accounts");
+    } else if (tab === "Compromissos" || tab === "Capturar" || tab === "Mais") {
+      fromCache = Boolean((!force && loadedResources.contas && loadedResources.saldos) || (fresh("contas", "/v1/accounts") && fresh("saldos", "/v1/account-positions")));
+      task = fromCache ? Promise.resolve() : refresh("accounts");
+    } else if (tab === "Cartões") {
+      fromCache = fresh("cartões", "/v1/card-catalog");
+      task = fromCache ? Promise.resolve() : refresh("cards");
+    } else {
+      task = Promise.resolve();
+    }
+    return task.finally(() => {
+      telemetry.completeTabTransition(tab, { cached: fromCache, forced: force });
+    });
   }, [lastLoaded, loadedResources.contas, loadedResources.saldos, refresh, tab]);
   const resolveActiveRefreshScopes = useCallback((scopes: Parameters<typeof refresh>[0][]) => {
     const requested = scopes.length ? scopes : (["finance"] as const);
@@ -686,12 +712,12 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
     );
     updateAfterLocalCapture(valid);
   };
-  const runCaptureTask = async (task: () => Promise<void>) => {
+  const runCaptureTask = async (task: () => Promise<void>, captureKindLabel = "capture") => {
     const valid = captureScope();
     if (!valid() || captureSavingLock.current) return;
     captureSavingLock.current = true;
     setCaptureSaving(true);setCaptureError("");setCaptureMessage("");
-    try { await task(); }
+    try { await telemetry.measureSpan("data_capture", captureKindLabel, () => task()); }
     catch (error: any) { if (!valid() || error.name === 'AbortError') return;const message = error.message || "Não foi possível salvar. Seus campos continuam preenchidos para tentar novamente.";setCaptureError(message);if (tab !== "Capturar") Alert.alert("Não foi possível retomar o arquivo", message); }
     finally { captureSavingLock.current = false;if (valid()) setCaptureSaving(false); }
   };
@@ -716,7 +742,7 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
       await requeueAsStatement(db, row);
       captureMessageId.current = row.event_id;
       setCaptureMessage("Arquivo preservado. A extração preparará as linhas para revisão em Foto / arquivo.");
-      setTab("Capturar");
+      setTab("Capturar", "programmatic");
     } else await clearQueueFailure(db, row);
     setDeadLetters(await quarantinedQueue());
     setQueueCount((await queue()).length);
@@ -768,7 +794,7 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
     if (captureKind !== 'own_transfer' && captureAccount && !accountProfiles.some(item => item.key === captureAccount && selectableAccount(item)))
       throw new Error('Selecione uma conta aberta para esta movimentação.');
     await enqueueEvent(manualCapturePayload(manual.draft, key => accountLabel(accountProfiles.find(item => item.key === key),key)));
-  });
+  }, `manual:${captureKind}`);
   const applyMovementVoice = (draft:any, transcript:string) => {
     setCaptureError("");
     if(draft.amount!=null)setAmount(String(draft.amount).replace('.', ','));
@@ -887,17 +913,24 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
     setDetailLoading(false);
     setSelectedItem(item);
     setEditingItem(false);
-    setTab("Detalhe");
+    setTab("Detalhe", "user_tap");
     detailId.current = item.id || item.provisional_id || "";
-    if (!item.id || item.provisional_id) return;
+    if (!item.id || item.provisional_id) {
+      telemetry.completeTabTransition("Detalhe", { cached: true });
+      return;
+    }
     setDetailLoading(true);
-    await requests.run(
-      "detalhe",
-      `${item.id}:${api.getReadGeneration()}`,
-      (signal) => json(`/v1/transactions/${item.id}`, { signal }),
-      setSelectedItem,
-    );
-    if (detailId.current === item.id) setDetailLoading(false);
+    try {
+      await requests.run(
+        "detalhe",
+        `${item.id}:${api.getReadGeneration()}`,
+        (signal) => json(`/v1/transactions/${item.id}`, { signal }),
+        setSelectedItem,
+      );
+    } finally {
+      if (detailId.current === item.id) setDetailLoading(false);
+      telemetry.completeTabTransition("Detalhe", { cached: false });
+    }
   };
   const transactionSaved = async (updated: any, result?: any) => {
     setSelectedItem((current: any) => ({ ...current, ...updated }));
@@ -927,7 +960,7 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
     setMovementTotal(current => Math.max(0, current - 1));
     setSelectedItem(null);
     setEditingItem(false);
-    setTab("Movimentações");
+    setTab("Movimentações", "programmatic");
     setDeletionNotice("Registro excluído. Histórico preservado.");
     await refreshAfterMutation("finance", "reviews", "accounts", "cards");
   };
@@ -1729,7 +1762,7 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
                 secondary
                 onPress={() => {
                   setEditingItem(false);
-                  setTab("Movimentações");
+                  setTab("Movimentações", "back");
                 }}
               />
               {!detailLoading && !!(selectedItem.provisional_id || selectedItem.id) && <DeleteMovement
@@ -1751,10 +1784,10 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
               />
             </View>
           )}
-          {tab === "Decisões" && <FinancialLab api={json} onBack={()=>setTab("Mais")}/>}
-          {tab === "Fechamento" && <MonthClose api={json} money={money} onBack={()=>setTab("Mais")} onNavigate={setTab}/>}
-          {tab === "Comprar" && <PurchaseCheck api={json} upload={api.upload} ready={sessionReady} sharedImage={initialPurchaseImage} sharedError={initialPurchaseError} onBack={()=>setTab("Mais")}/>}
-          {tab === "Rascunhos" && <DraftManager onBack={() => setTab("Mais")} onPendingCreation={() => setTab("Compromissos")} />}
+          {tab === "Decisões" && <FinancialLab api={json} onBack={()=>setTab("Mais", "back")}/>}
+          {tab === "Fechamento" && <MonthClose api={json} money={money} onBack={()=>setTab("Mais", "back")} onNavigate={next => setTab(next, "programmatic")}/>}
+          {tab === "Comprar" && <PurchaseCheck api={json} upload={api.upload} ready={sessionReady} sharedImage={initialPurchaseImage} sharedError={initialPurchaseError} onBack={()=>setTab("Mais", "back")}/>}
+          {tab === "Rascunhos" && <DraftManager onBack={() => setTab("Mais", "back")} onPendingCreation={() => setTab("Compromissos", "programmatic")} />}
           {tab === "Mais" && (
             <>
               <Text style={s.section}>Organização financeira</Text>
@@ -1840,7 +1873,7 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
               installments={manual.draft.installments} onInstallments={value => manual.change('installments', value)}
               queueCount={queueCount} rejectedCount={deadLetters.length} syncError={[syncError,nativeInboxError].filter(Boolean).join(' ')} onSync={() => sync()} onReview={() => setTab('Revisão')} onQueueSettings={() => setTab('Ajustes')} onClearRejected={() => discardLocalItems(deadLetters)}
               transcript={voiceTranscript} onMovementVoice={applyMovementVoice} onEvidenceVoice={saveVoiceEvidence}
-              onSave={saveCapture} onPhoto={() => runCaptureTask(capturePhoto)}
+              onSave={saveCapture} onPhoto={() => runCaptureTask(capturePhoto, "camera_photo")}
               onDiscard={async () => {
                 const valid = captureScope();
                 if (!valid()) return;
@@ -1849,9 +1882,9 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
                 if (!valid()) return;
                 captureMessageId.current = ''; setCaptureMessage('Rascunho excluído.'); setCaptureError('');
               }}
-              onDocument={format => runCaptureTask(() => pickDocument("document", format))}
-              onStatement={() => runCaptureTask(() => pickDocument("statement"))}
-              onBatch={format => runCaptureTask(() => pickDocument("batch", format))}
+              onDocument={format => runCaptureTask(() => pickDocument("document", format), `document:${format || "any"}`)}
+              onStatement={() => runCaptureTask(() => pickDocument("statement"), "statement_file")}
+              onBatch={format => runCaptureTask(() => pickDocument("batch", format), `batch:${format || "any"}`)}
               onPdfCpfChanged={retryPdfCaptures}
               batchAccounts={accounts} batchRevision={syncRevision} onBatchUpdated={async () => {lastImportCheck.current = 0; void sync(); await refreshAfterMutation("finance", "reviews", "accounts", "cards");}}
               onBatchResolved={batchId => {if (captureMessageId.current === batchId) {captureMessageId.current = ""; setCaptureMessage("");}}}

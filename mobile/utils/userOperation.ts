@@ -1,3 +1,5 @@
+import type { telemetry as TelemetryInstance } from './telemetry';
+
 export type UserOperationSnapshot = Readonly<{busy: boolean; label: string; dialogOpen: boolean}>;
 type DeferredAction = {action: () => void; cancelled: boolean};
 
@@ -6,6 +8,25 @@ let active: symbol | null = null;
 let draining = false;
 const listeners = new Set<() => void>();
 const deferred: DeferredAction[] = [];
+
+declare const require: ((id: string) => any) | undefined;
+
+let cachedTelemetry: typeof TelemetryInstance | null | undefined;
+const resolveTelemetry = (): typeof TelemetryInstance | null => {
+  if (cachedTelemetry !== undefined) return cachedTelemetry ?? null;
+  try {
+    if (typeof require === 'function') {
+      const mod = require('./telemetry');
+      const resolved = mod?.telemetry ?? null;
+      cachedTelemetry = resolved;
+      return resolved;
+    }
+  } catch {
+    // Allow isolated VM unit tests without a module loader to run unchanged.
+  }
+  cachedTelemetry = null;
+  return null;
+};
 
 const publish = (busy: boolean, label: string, dialogOpen = snapshot.dialogOpen) => {
   if (snapshot.busy === busy && snapshot.label === label && snapshot.dialogOpen === dialogOpen) return;
@@ -50,11 +71,15 @@ const finish = (identity: symbol) => {
  */
 export function runUserAction<T>(action: () => T | PromiseLike<T>, label = 'Processando…',
   onError?: (error: unknown) => void): T | Promise<T | undefined> | undefined {
-  if (isUserInteractionBlocked()) return;
+  const tracker = resolveTelemetry();
+  if (isUserInteractionBlocked()) {
+    tracker?.trackUserAction(label, () => undefined, true);
+    return;
+  }
   const identity = Symbol('user-operation');
   active = identity;
   try {
-    const result = action();
+    const result = tracker ? tracker.trackUserAction(label, action, false) : action();
     if (result != null && typeof (result as PromiseLike<T>).then === 'function') {
       // The synchronous part may consume a selector option. Publishing before
       // it runs would let the overlay's busy subscription close that option

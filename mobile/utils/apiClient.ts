@@ -1,5 +1,6 @@
 import { ReferenceCache } from './classificationOptions';
 import {acknowledgeMutation,rejectMutation,journaledMutation,retainMutation,pendingMutations,type MutationDb,type MutationCommand} from './mutationJournal';
+import { telemetry } from './telemetry';
 
 export const READ_TIMEOUT_MS = 20_000;
 export const WRITE_TIMEOUT_MS = 45_000;
@@ -12,6 +13,7 @@ export const changesRemoteState = (path:string) => ![
   /^\/v1\/capture\/interpret$/,
   /^\/v1\/insights\/(?:simulate|liquidity|purchase-scan)$/,
   /^\/v1\/auth\/session$/,
+  /^\/v1\/telemetry\//,
 ].some(pattern=>pattern.test(path.split('?')[0]));
 export class ApiError extends Error {
   constructor(message: string, public status?: number, public retryable = false) { super(message); }
@@ -23,6 +25,11 @@ export const isTransientFailure = (error: unknown) => !isAbort(error) &&
 export type Availability = 'checking' | 'connected' | 'reconnecting';
 type Flight = { controller: AbortController; promise: Promise<any>; consumers: number; settled: boolean };
 type Settings = { baseUrl: string; token: () => string; sessionIdentity?: () => number; awaitSession?: (signal?: AbortSignal) => Promise<void> | null; fetch?: typeof fetch; uploadFetch?: typeof fetch; readTimeoutMs?: number; writeTimeoutMs?: number; uploadTimeoutMs?: number; referenceTtlMs?: number; readRetryDelaysMs?: readonly number[]; requireSession?: boolean; onUnauthorized?: () => void };
+
+const nowMs = () =>
+  typeof performance !== 'undefined' && typeof performance.now === 'function'
+    ? performance.now()
+    : Date.now();
 
 export function createApiClient(settings: Settings) {
   const fetcher = settings.fetch || fetch;
@@ -61,7 +68,7 @@ export function createApiClient(settings: Settings) {
     setAvailability('checking');
   };
   const checkSession = () => { if (session !== settings.token() || sessionIdentity !== settings.sessionIdentity?.()) reset(); };
-  const request = async (path: string, init: RequestInit, timeoutMs: number, uploading = false) => {
+  const request = async (path: string, init: RequestInit, timeoutMs: number, uploading = false, attempt = 1) => {
     if (!settings.baseUrl) throw new ApiError('Configure EXPO_PUBLIC_API_BASE_URL no ambiente mobile.');
     const token = settings.token();
     const identity = settings.sessionIdentity?.();
@@ -75,10 +82,19 @@ export function createApiClient(settings: Settings) {
     init.signal?.addEventListener('abort', cancel, { once: true });
     let timedOut = false;
     const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+    const startedAt = nowMs();
+    const isGet = !init.method || init.method.toUpperCase() === 'GET';
+    const isTelemetryEndpoint = path.startsWith('/v1/telemetry/');
+    const { traceId, headers: traceHeaders } = telemetry.createRequestHeaders();
     try {
       const headers = new Headers(init.headers);
       if (token) headers.set('Authorization', `Bearer ${token}`);
       if (!(init.body instanceof FormData)) headers.set('Content-Type', 'application/json');
+      if (!uploading && !isTelemetryEndpoint) {
+        Object.entries(traceHeaders).forEach(([k, v]) => {
+          if (!headers.has(k)) headers.set(k, v);
+        });
+      }
       const transport = uploading ? settings.uploadFetch || fetcher : fetcher;
       const response = await transport(settings.baseUrl + path, { ...init, headers, cache: 'no-store', signal: controller.signal });
       const text = await response.text();
@@ -87,11 +103,68 @@ export function createApiClient(settings: Settings) {
       try { body = text ? JSON.parse(text) : null; } catch { body = null; }
       if (!isPublic && (token !== settings.token() || identity !== settings.sessionIdentity?.())) throw aborted();
       if (response.status === 401 && !isPublic && token) settings.onUnauthorized?.();
+      const durationMs = nowMs() - startedAt;
+      const serverMetrics = telemetry.parseServerMetrics(response.headers);
+      if (!isTelemetryEndpoint) {
+        if (isGet) {
+          telemetry.recordDataFetch({
+            path,
+            durationMs,
+            status: response.ok ? 'ok' : 'error',
+            traceId,
+            payloadBytes: text.length,
+            attempt,
+            serverMetrics,
+            ...(response.ok ? {} : { error: `HTTP ${response.status}` }),
+          });
+        } else {
+          telemetry.record({
+            category: 'data_mutation',
+            name: `${(init.method || 'POST').toUpperCase()} ${path.split('?')[0]}`,
+            duration_ms: Math.round(durationMs * 100) / 100,
+            status: response.ok ? 'ok' : 'error',
+            trace_id: traceId,
+            metadata: {
+              uploading,
+              status_code: response.status,
+              payload_bytes: text.length,
+              server: serverMetrics,
+            },
+          });
+        }
+      }
       if (!response.ok) throw new ApiError(typeof body?.detail === 'string' ? body.detail : `Erro ${response.status} em ${path}`, response.status,response.headers?.get('X-Operation-Pending')==='1');
       if (body === null) throw new ApiError(`Resposta inválida em ${path}`, response.status);
       if(path==='/health')setAvailability(body.mongodb==='connected'?'connected':'reconnecting');
       return body;
     } catch (error) {
+      const durationMs = nowMs() - startedAt;
+      if (!isTelemetryEndpoint && !(error instanceof ApiError && error.status !== undefined)) {
+        const wasAborted = connection !== connectionGeneration || init.signal?.aborted || controller.signal.aborted;
+        if (isGet) {
+          telemetry.recordDataFetch({
+            path,
+            durationMs,
+            status: wasAborted && !timedOut ? 'aborted' : 'error',
+            traceId,
+            attempt,
+            error: timedOut ? 'timeout' : error instanceof Error ? error.message : String(error),
+          });
+        } else {
+          telemetry.record({
+            category: 'data_mutation',
+            name: `${(init.method || 'POST').toUpperCase()} ${path.split('?')[0]}`,
+            duration_ms: Math.round(durationMs * 100) / 100,
+            status: wasAborted && !timedOut ? 'aborted' : 'error',
+            trace_id: traceId,
+            metadata: {
+              uploading,
+              timed_out: timedOut,
+              error: error instanceof Error ? error.message : String(error),
+            },
+          });
+        }
+      }
       // A transport may ignore AbortSignal and settle after its timeout. Its
       // old timeout cannot change availability after focus/session reset.
       if (connection !== connectionGeneration || init.signal?.aborted) throw aborted();
@@ -118,7 +191,7 @@ export function createApiClient(settings: Settings) {
     const delays=settings.readRetryDelaysMs??[600,1200];
     const deadline=Date.now()+(settings.readTimeoutMs??READ_TIMEOUT_MS);
     for(let attempt=0;;attempt++){
-      try{return await request(path,init,Math.max(1,deadline-Date.now()))}
+      try{return await request(path,init,Math.max(1,deadline-Date.now()),false,attempt+1)}
       catch(error){
         if(!isTransientFailure(error)||attempt>=delays.length||Date.now()+delays[attempt]>=deadline)throw error;
         await pause(delays[attempt],init.signal||undefined);
@@ -130,6 +203,7 @@ export function createApiClient(settings: Settings) {
     const epoch = readGeneration;
     const key = JSON.stringify([session, sessionIdentity, epoch, path, generation, [...new Headers(init.headers).entries()]]);
     let flight = reads.get(key);
+    const deduped = Boolean(flight);
     if (!flight) {
       const controller = new AbortController();
       const created: Flight = { controller, consumers: 0, settled: false, promise: Promise.resolve() };
@@ -142,6 +216,14 @@ export function createApiClient(settings: Settings) {
     }
     const shared = flight;
     shared.consumers++;
+    if (deduped && !path.startsWith('/v1/telemetry/')) {
+      telemetry.recordDataFetch({
+        path,
+        durationMs: 0,
+        status: 'deduped',
+        sharedConsumers: shared.consumers,
+      });
+    }
     return new Promise((resolve, reject) => {
       let finished = false;
       const finish = (callback: (value: any) => void, value: any) => {
@@ -175,12 +257,21 @@ export function createApiClient(settings: Settings) {
       if (path === OPTIONS_PATH) {
         const token = session;
         const identity=sessionIdentity,epoch=readGeneration;
+        let fetchedFromNetwork = false;
         try{
           const result = await references.get(generation => {
             if (token !== settings.token() || identity!==settings.sessionIdentity?.()) throw aborted();
+            fetchedFromNetwork = true;
             return read(path, init, String(generation));
           });
           if (token !== settings.token() || identity!==settings.sessionIdentity?.()) throw aborted();
+          if (!fetchedFromNetwork) {
+            telemetry.recordDataFetch({
+              path,
+              durationMs: 0,
+              status: 'cache_hit',
+            });
+          }
           return result;
         }catch(error){
           // Reference controls must not become permanently empty when an
