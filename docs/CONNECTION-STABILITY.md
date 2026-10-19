@@ -10,6 +10,10 @@ Notificações separam aprovação/recusa/estorno do contexto da compra, comerci
 
 O backend permanece neste PC, conforme a escolha do usuário. PC, sessão Windows e Tailscale precisam estar ativos; suspensão ou desligamento interrompem o acesso. Não foram alteradas as preferências de bateria/suspensão, nem foi contratado um serviço externo.
 
+## Cabeçalhos de telemetria — 1.20.74
+
+`X-Client-Tab` e `X-Client-Action` saem só em ASCII. O OkHttp recusa o acento de `Início` (`char 0xed`) e a reticência de `Processando…`, e a rejeição acontece antes do pedido sair do aparelho. `Início` segue como `Inicio`. O nome da aba na interface não muda.
+
 ## Telemetria e janelas — 1.20.73
 
 O cliente mede troca de aba, o tempo até a aba visível, leituras, capturas e mutações. O buffer fica em SQLite (`perf_telemetry`) e sobe em lote autenticado para `POST /v1/telemetry/events`. `GET /v1/telemetry/report` devolve P50, P95 e P99 por rota e por evento do cliente. Os cabeçalhos `X-Trace-Id`, `Server-Timing` e `X-Perf-Metrics` separam rede, Python e MongoDB. Essas rotas não invalidam o cache de classificação e não entram no journal de mutação.

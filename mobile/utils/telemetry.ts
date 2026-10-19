@@ -74,6 +74,14 @@ const ID_IN_NAME = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 const redactTelemetryName = (name: string) =>
   name.split('?')[0].replace(new RegExp(ID_IN_NAME.source, 'gi'), '{id}').slice(0, 160);
 
+/** OkHttp rejects header values outside tab and ASCII printable. "Início" is char 0xed at index 2. */
+const asciiHeaderValue = (value: string) => {
+  const folded = typeof value.normalize === 'function'
+    ? value.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    : value;
+  return folded.replace(/\u2026/g, '...').replace(/[^\t\x20-\x7e]/g, '').slice(0, 40);
+};
+
 const CLIENT_META_KEYS = new Set([
   'from', 'to', 'reason', 'cached', 'forced', 'payload_bytes', 'attempt',
   'shared_consumers', 'network_overhead_ms', 'server_total_ms', 'server_db_ms',
@@ -146,14 +154,12 @@ class PerformanceTelemetryCollector {
     traceId: string;
     headers: Record<string, string>;
   } {
-    const traceId = customTraceId || this.activeTransition?.traceId || newTraceId();
-    const headers: Record<string, string> = {
-      'X-Trace-Id': traceId,
-      'X-Client-Tab': this.currentTab,
-    };
-    if (this.currentAction) {
-      headers['X-Client-Action'] = this.currentAction;
-    }
+    const traceId = asciiHeaderValue(customTraceId || this.activeTransition?.traceId || newTraceId());
+    const headers: Record<string, string> = { 'X-Trace-Id': traceId };
+    const tab = asciiHeaderValue(this.currentTab);
+    const action = asciiHeaderValue(this.currentAction);
+    if (tab) headers['X-Client-Tab'] = tab;
+    if (action) headers['X-Client-Action'] = action;
     return { traceId, headers };
   }
 
