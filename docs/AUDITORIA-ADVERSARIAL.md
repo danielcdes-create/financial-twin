@@ -1,6 +1,15 @@
 # Auditoria adversarial — 15/10/2026
 
-Julgamento da árvore local de `financial-app` a partir de `431aaf5`, com a correção de contagem dupla desta entrega, commit `cc7f562`. Dados sintéticos. O ledger ao vivo não foi lido, escrito, deduplicado nem reparado. O release privado no disco é Android 1.20.73 / versionCode 119, SHA-256 `DD0A21A417AA14E510E72B5F6D40437E91A78859FCA62036507BADFD69A59A60`, commit `5590258`, com o certificado de debug anterior. A instalação física permanece unverified.
+Julgamento da árvore local de `financial-app` a partir de `431aaf5`, com a correção de contagem dupla desta entrega, commit `cc7f562`. Dados sintéticos. O ledger ao vivo não foi lido, escrito, deduplicado nem reparado. O release privado no disco é Android 1.20.74 / versionCode 120, SHA-256 `B28EF887D6277DE39DAF977DF386333F0019DD919C06BAE4245E692D4A6A91F7`, commit `01f41d6`, com o certificado de debug anterior. A instalação física permanece unverified.
+
+## Entrega 18/10/2026 — cabeçalho ASCII
+
+Commit do recurso `c217222`, empacotado em `01f41d6`. APK ARM64 de 48114604 bytes, SHA-256 `B28EF887D6277DE39DAF977DF386333F0019DD919C06BAE4245E692D4A6A91F7`, assinante `FAC61745DC0903786FB9EDE62A962B399F7348F0BB6F899B8332667591033B9C`. O ledger ao vivo não foi lido nem escrito. Nesta passagem passou `mobile/scripts/test-telemetry-headers.cjs`. A suíte completa do cliente e a homologação física não foram repetidas.
+
+| Correção | Veredito |
+| --- | --- |
+| Login | `X-Client-Tab: Início` fazia o OkHttp rejeitar o pedido antes do envio (`char 0xed`). O cabeçalho sai como `Inicio`. |
+| Ação | `Processando…` e `Voltando…` saem sem a reticência Unicode. |
 
 ## Entrega 18/10/2026 — telemetria e janelas do painel
 
