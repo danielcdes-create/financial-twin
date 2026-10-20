@@ -15,7 +15,7 @@ from pydantic import Field, model_validator
 from pymongo.errors import DuplicateKeyError
 from app.auth import require_session
 from app.ai_admission import run_ai
-from app.atomic import mongo_transaction, mongo_snapshot, session_database
+from app.atomic import mongo_transaction, mongo_snapshot, session_database, with_batch_size
 from app.financial_time import date_filter, today, local_date
 from app.economic_policy import amount, effects, role
 from app.category_filter import matches_category
@@ -205,7 +205,7 @@ def _planning_context(start:date,end:date,db,purchase:bool=False):
         account_keys={p['legacy_account_id']:p['key'] for p in positions if p.get('legacy_account_id')}
         excluded.extend({'ref':'profile:'+p['key'],'label':p.get('apelido') or p.get('instituicao') or p['key'],'reason':'Conta encerrada ou arquivada não é oferecida para novas movimentações.'} for p in positions if p.get('archived') or p.get('status')=='encerrada')
         positions=[p for p in positions if not p.get('archived') and p.get('status')!='encerrada']
-        for commitment in effective_commitments(reading, reading.commitments.find({'status':'ativo'})):
+        for commitment in effective_commitments(reading, with_batch_size(reading.commitments.find({'status':'ativo'}), 2000)):
             if historical_occurrence_conflicts(commitment):
                 excluded.append({'ref':'commitment:'+commitment['commitment_id'],'label':commitment.get('name') or 'Compromisso','reason':'Pagamento histórico contradiz a próxima ocorrência. Confira o histórico e a agenda antes de projetar caixa.'})
                 continue
@@ -233,7 +233,7 @@ def _planning_context(start:date,end:date,db,purchase:bool=False):
                     flows.append({'id':identity,'source_ref':identity,'date':effective_due.isoformat(),**({'original_due_date':due.isoformat(),'overdue':True} if due<start else {}),'amount':money(-Decimal(str(occurrence['amount']))),'label':label,'account_key':key,'certainty':'assumed'})
         plan_ids=set()
         if purchase and getattr(reading,'installment_plans',None) is not None:
-            raw_plans=list(reading.installment_plans.find({'status':'ativo'}))
+            raw_plans=list(with_batch_size(reading.installment_plans.find({'status':'ativo'}), 2000))
             if raw_plans:
                 plans=effective_documents(reading,'installment',raw_plans)
                 try:
@@ -284,7 +284,7 @@ def _planning_context(start:date,end:date,db,purchase:bool=False):
                         flows.append({'id':identity,'source_ref':identity,'date':effective_due.isoformat(),**({'original_due_date':due.isoformat(),'overdue':True} if due<start else {}),'amount':money(-value),'label':name,'account_key':key,'certainty':'assumed'})
         # Imported obligations are offered once and require explicit overlap/account review.
         # Due dates in the legacy schema are civil dates stored at UTC midnight.
-        for obligation in effective_documents(reading, 'obligation', reading.obligations.find({'status':{'$in':list(OPEN_OBLIGATION_STATUSES)}})):
+        for obligation in effective_documents(reading, 'obligation', with_batch_size(reading.obligations.find({'status':{'$in':list(OPEN_OBLIGATION_STATUSES)}}), 2000)):
             if obligation.get('future_excluded') or obligation.get('payment_link'): continue
             if str(obligation.get('origem_id')) in plan_ids and str(obligation.get('tipo') or '').lower() not in {'fatura_cartao', 'fatura'}: continue
             if purchase and str(obligation.get('tipo') or '').lower() in {'fatura_cartao', 'fatura'}: continue

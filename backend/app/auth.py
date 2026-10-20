@@ -1,13 +1,15 @@
 """Authentication for one private ledger owner; financial accounts are unrelated."""
 import base64
+import contextvars
 import hashlib
 import hmac
 import json
 import secrets
 import time
 from collections import deque
-from threading import Lock
+from threading import Lock, Thread
 from fastapi import Header, HTTPException, Request
+from pymongo.database import Database
 from app.config import get_settings
 
 OWNER_ID = 'financial-twin-owner'
@@ -65,7 +67,7 @@ def owner(db):
 def hash_password(password: str) -> str:
     salt = secrets.token_bytes(16)
     digest = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, PASSWORD_ITERATIONS)
-    return f'pbkdf2_sha256${PASSWORD_ITERATIONS}${salt.hex()}${digest.hex()}'
+    return f'pbkdf2_sha256.{PASSWORD_ITERATIONS}${salt.hex()}${digest.hex()}'.replace('.', '$', 1)
 
 
 def verify_password(password: str, encoded: str) -> bool:
@@ -99,6 +101,21 @@ def create_session_token(identity: str, version: int, session_id: str, now: int 
     return f'{message}.{signature}'
 
 
+def _persist_sessions_in_background(db, query: dict, sessions_snapshot: list[dict]) -> None:
+    """Persist session activity asynchronously in a clean context so GET routes never block on account.update."""
+    def _worker():
+        try:
+            db.account.update_one(query, {'$set': {'sessions': sessions_snapshot}})
+        except Exception:
+            pass
+
+    if isinstance(db, Database):
+        ctx = contextvars.Context()
+        Thread(target=ctx.run, args=(_worker,), daemon=True).start()
+    else:
+        _worker()
+
+
 def session_response(db, account, label: str, ttl: int | None = None):
     now = int(time.time())
     duration = ttl if ttl is not None else (SESSION_SECONDS if label == 'Navegador' else BIOMETRIC_SESSION_SECONDS)
@@ -117,7 +134,7 @@ def session_response(db, account, label: str, ttl: int | None = None):
             'token_type': 'bearer', 'expires_in': duration, 'account': public_account(account)}
 
 
-def renew_session_token(db, account, jti: str, ttl: int = BIOMETRIC_SESSION_SECONDS):
+def renew_session_token(db, account, jti: str, ttl: int = BIOMETRIC_SESSION_SECONDS, *, persist_async: bool = False):
     if not jti or len(jti) != 43:
         return None
     now = int(time.time())
@@ -131,11 +148,14 @@ def renew_session_token(db, account, jti: str, ttl: int = BIOMETRIC_SESSION_SECO
             break
     if not updated:
         return None
-    try:
-        db.account.update_one({'_id': OWNER_ID, 'auth_version': account['auth_version']},
-                              {'$set': {'sessions': account['sessions']}})
-    except Exception:
-        pass
+    query = {'_id': OWNER_ID, 'auth_version': account['auth_version']}
+    if persist_async:
+        _persist_sessions_in_background(db, query, [dict(item) for item in account.get('sessions', [])])
+    else:
+        try:
+            db.account.update_one(query, {'$set': {'sessions': account['sessions']}})
+        except Exception:
+            pass
     return {'access_token': create_session_token(OWNER_ID, account['auth_version'], jti, now, ttl),
             'token_type': 'bearer', 'expires_in': ttl, 'account': public_account(account)}
 
@@ -164,18 +184,19 @@ def require_session(request: Request, authorization: str | None = Header(default
             raise ValueError()
     except (ValueError, TypeError, KeyError, UnicodeError):
         raise HTTPException(401, 'Sessão inválida ou expirada. Entre novamente.') from None
-    account = owner(auth_database(request))
+    db = auth_database(request)
+    account = owner(db)
     identity = session_hash(claims['jti'])
     if (not account or account.get('auth_version') != claims['ver']
             or not any(item['id'] == identity and item['expires_at'] > now for item in account.get('sessions', []))):
         raise HTTPException(401, 'Sessão encerrada. Entre novamente.')
+    method = str(getattr(request, 'method', 'GET') or 'GET').upper()
+    is_read = method in {'GET', 'HEAD', 'OPTIONS'}
     for s_item in account.get('sessions', []):
         if s_item.get('id') == identity:
             if now - int(s_item.get('last_seen_at') or 0) >= 60:
                 s_item['last_seen_at'] = now
-                try:
-                    auth_database(request).account.update_one({'_id': OWNER_ID}, {'$set': {'sessions': account['sessions']}})
-                except Exception:
-                    pass
+                if not is_read:
+                    _persist_sessions_in_background(db, {'_id': OWNER_ID}, [dict(item) for item in account.get('sessions', [])])
             break
     return {'account': account, 'session_id': identity, 'jti': claims['jti']}

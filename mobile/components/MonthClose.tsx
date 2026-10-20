@@ -38,17 +38,20 @@ export default function MonthClose({ api, money, onBack, onNavigate }: Props) {
   const [draftRevision,setDraftRevision] = useState<number | null>(null);
   const [draftConflict,setDraftConflict] = useState(false);
   const [readVersion,setReadVersion]=useState(0),[failedReadVersion,setFailedReadVersion]=useState(0);
-  const running = useRef(false), generation = useRef(0);
+  const running = useRef(false), generation = useRef(0), loadController = useRef<AbortController | null>(null);
   const path = `/v1/month-close/${month}`;
   const captureScope = useAsyncScope(month);
   const load = useCallback(async () => {
+    loadController.current?.abort();
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    loadController.current = controller;
     const current = ++generation.current;
     setLoading(true); setError('');
-    try { const response = await api(`/v1/month-close/${month}`); if (current === generation.current) {setData(response);setReadVersion(version=>version+1);} }
+    try { const response = await api(`/v1/month-close/${month}`, controller ? { signal: controller.signal } : undefined); if (current === generation.current) {setData(response);setReadVersion(version=>version+1);} }
     catch (failure: any) { if (current === generation.current) setError(failure.message || 'Não foi possível carregar o fechamento.'); }
-    finally { if (current === generation.current) setLoading(false); }
+    finally { if (loadController.current === controller) loadController.current = null; if (current === generation.current) setLoading(false); }
   }, [api, month]);
-  useEffect(() => { const counter = generation; const timer = setTimeout(() => load(), 0); return () => { clearTimeout(timer); counter.current++; }; }, [load]);
+  useEffect(() => { const counter = generation; const timer = setTimeout(() => load(), 0); return () => { clearTimeout(timer); counter.current++; loadController.current?.abort(); loadController.current = null; }; }, [load]);
   const resetForms = () => { setDraftRevision(null);setDraftConflict(false);setEditingItem(null); setBalanceEditing(null); setCustomGroup(null); setNote(''); setOpening('');setClosing('');setCustomTitle(''); setCustomId(newId()); };
   const dirty=Boolean(editingItem&&note!==editingItem.note||customGroup&&customTitle||balanceEditing&&(opening!==(balanceEditing.balance?.opening?.replace('.',',')||'')||closing!==(balanceEditing.balance?.closing?.replace('.',',')||'')));
   const back=()=>protectUnsavedBack(dirty,()=>{if(editingItem||balanceEditing||customGroup)resetForms();else onBack();});

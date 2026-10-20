@@ -10,6 +10,16 @@ Notificações separam aprovação/recusa/estorno do contexto da compra, comerci
 
 O backend permanece neste PC, conforme a escolha do usuário. PC, sessão Windows e Tailscale precisam estar ativos; suspensão ou desligamento interrompem o acesso. Não foram alteradas as preferências de bateria/suspensão, nem foi contratado um serviço externo.
 
+## Leituras — 1.20.75
+
+As leituras deixam de abrir uma transação Mongo só para consultar. `mongo_snapshot` devolve o banco já aberto. Num `Database` real o rótulo continua `snapshot`; num banco de teste continua `best_effort`. Não há `start_session` nem `commitTransaction` nesse caminho. As escritas seguem em `mongo_transaction`.
+
+Cursores de leitura pedem `batchSize` 2000. As opções de classificação saem de uma agregação por coleção, não de um `distinct` por campo. Contas, saldos, estimativas e o catálogo reutilizam as linhas já lidas na mesma consulta. O cache de classificação dura 300 segundos e também invalida o catálogo de subcategorias.
+
+Um GET não grava `last_seen` da sessão. Numa escrita, essa gravação segue numa thread e não segura a resposta. A renovação biométrica pode persistir a sessão do mesmo modo.
+
+No cliente, sair de uma aba aborta o GET que ela deixou aberto. Contas e saldos já frescos não são pedidos de novo. O desmonte de um editor aborta o controlador de leitura registrado no escopo. **Sincronizar agora** continua no refresh completo, que já chama a fila.
+
 ## Cabeçalhos de telemetria — 1.20.74
 
 `X-Client-Tab` e `X-Client-Action` saem só em ASCII. O OkHttp recusa o acento de `Início` (`char 0xed`) e a reticência de `Processando…`, e a rejeição acontece antes do pedido sair do aparelho. `Início` segue como `Inicio`. O nome da aba na interface não muda.

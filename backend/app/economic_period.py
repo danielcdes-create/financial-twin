@@ -2,6 +2,7 @@
 import re
 from datetime import date
 
+from app.atomic import with_batch_size
 from app.financial_time import date_filter, day_start, local_date
 
 
@@ -36,7 +37,7 @@ def economic_instant(item):
 def economic_rows(collection, start, end, query=None):
     """Use indexed competence and event windows, then deduplicate their union."""
     query = query or {}
-    declared = collection.find({**query, "competencia": {"$gte": start.strftime("%Y-%m"), "$lte": end.strftime("%Y-%m")}})
-    dated = collection.find({**query, "data_evento": date_filter(start, end)})
+    declared = with_batch_size(collection.find({**query, "competencia": {"$gte": start.strftime("%Y-%m"), "$lte": end.strftime("%Y-%m")}}))
+    dated = with_batch_size(collection.find({**query, "data_evento": date_filter(start, end)}))
     rows = {str(row.get("_id")): row for row in [*declared, *dated] if economic_in_period(row, start, end)}
     return list(rows.values())

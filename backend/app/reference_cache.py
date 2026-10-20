@@ -23,12 +23,13 @@ class ReferenceCache:
             dependent.invalidate()
 
     def get(self, scope, build):
-        key = id(scope)
+        raw_scope = getattr(scope, "db", scope)
+        key = id(raw_scope)
         while True:
             with self._lock:
                 generation = self._generation
                 cached = self._values.get(key)
-                if cached and cached[0] is scope and cached[1] > monotonic():
+                if cached and cached[0] is raw_scope and cached[1] > monotonic():
                     return cached[2]
                 future = self._pending.get((key, generation))
                 owner = future is None
@@ -42,7 +43,7 @@ class ReferenceCache:
                         if generation == self._generation:
                             if len(self._values) >= 16:
                                 self._values.pop(next(iter(self._values)))
-                            self._values[key] = (scope, monotonic() + self.ttl_seconds, value)
+                            self._values[key] = (raw_scope, monotonic() + self.ttl_seconds, value)
                     future.set_result(value)
                 except BaseException as error:
                     future.set_exception(error)
@@ -56,4 +57,8 @@ class ReferenceCache:
 
 
 historical_context_cache = ReferenceCache(ttl_seconds=120)
-classification_cache = ReferenceCache(dependents=(historical_context_cache,))
+subcategory_catalog_cache = ReferenceCache(ttl_seconds=300)
+classification_cache = ReferenceCache(
+    ttl_seconds=300,
+    dependents=(historical_context_cache, subcategory_catalog_cache),
+)

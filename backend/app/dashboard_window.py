@@ -1,6 +1,8 @@
 """Fetch only windows consumed by dashboard cards, preserving global freshness."""
 from contextlib import nullcontext
 from datetime import datetime, timezone, timedelta
+import re
+from app.atomic import with_batch_size
 from app.financial_time import day_start, today, local_date
 from app.economic_period import economic_instant
 
@@ -21,13 +23,22 @@ PROJECTION = {
     'descricao_original': 1,
     'estabelecimento_original': 1,
     'merchant_raw': 1,
+    'merchant_name': 1,
     'data_evento': 1,
     'competencia': 1,
     'recorrencia': 1,
     'transfer': 1,
     'classification.migration_reason': 1,
     'linked_transaction_id': 1,
+    'account_id': 1,
+    'account_profile_id': 1,
+    'moeda': 1,
+    'currency': 1,
+    'status': 1,
+    'provisional_id': 1,
 }
+
+_COMPETENCE_RE = re.compile(r'^\d{4}-(0[1-9]|1[0-2])$')
 
 
 def _merge_intervals(intervals):
@@ -45,45 +56,56 @@ def _merge_intervals(intervals):
     return merged
 
 
+def _row_matches_intervals(row, date_ranges, comp_ranges, normalized_datetime):
+    dt = row.get('data_evento')
+    if isinstance(dt, datetime):
+        ndt = normalized_datetime(dt)
+        if any(start_dt <= ndt < end_dt for start_dt, end_dt in date_ranges):
+            return True
+    comp = row.get('competencia')
+    if isinstance(comp, str) and any(start_c <= comp <= end_c for start_c, end_c in comp_ranges):
+        return True
+    return False
+
+
 def snapshot_for(db, windows):
     from app.main import period_start, shift_months, normalized_datetime
 
     with SpanTimer("dashboard.snapshot_for", windows=len(windows)):
-        latest = db.transactions.find_one(
-            {'data_evento': {'$type': 'date'}},
-            {'data_evento': 1},
-            sort=[('data_evento', -1)],
-        )
-        captured = db.provisional_transactions.find_one(
-            {'status': 'confirmed', 'data_evento': {'$type': 'date'}},
-            {'data_evento': 1},
-            sort=[('data_evento', -1)],
-        )
-        timestamps = [normalized_datetime(row['data_evento']) for row in (latest, captured) if row]
+        # Load transactions and confirmed captures in a single batched query per collection
+        # (eliminates the 4 separate find_one roundtrips and getMore pagination overhead).
+        all_txs = list(with_batch_size(db.transactions.find({}, PROJECTION), 2000))
+        all_captures = list(with_batch_size(db.provisional_transactions.find({'status': 'confirmed'}, PROJECTION), 2000))
 
-        # Bounded prefix range + regex enables reverse index scan on `competencia` instead of COLLSCAN.
-        competence_query = {
-            'competencia': {
-                '$gte': '0001-01',
-                '$lte': '9999-12',
-                '$regex': r'^\d{4}-(0[1-9]|1[0-2])$',
-            }
-        }
-        economic_latest = db.transactions.find_one(
-            competence_query,
-            {'competencia': 1},
-            sort=[('competencia', -1)],
+        latest_dt = max(
+            (row['data_evento'] for row in all_txs if isinstance(row.get('data_evento'), datetime)),
+            key=normalized_datetime,
+            default=None,
         )
-        economic_capture = db.provisional_transactions.find_one(
-            {'status': 'confirmed', **competence_query},
-            {'competencia': 1},
-            sort=[('competencia', -1)],
+        captured_dt = max(
+            (row['data_evento'] for row in all_captures if isinstance(row.get('data_evento'), datetime)),
+            key=normalized_datetime,
+            default=None,
         )
-        economic_timestamps = [
-            economic_instant(row)
-            for row in (economic_latest, economic_capture)
-            if row and economic_instant(row)
-        ]
+        timestamps = [normalized_datetime(dt) for dt in (latest_dt, captured_dt) if dt is not None]
+
+        economic_timestamps = []
+        for rows in (all_txs, all_captures):
+            best_comp_row = max(
+                (
+                    row for row in rows
+                    if isinstance(row.get('competencia'), str)
+                    and '0001-01' <= row['competencia'] <= '9999-12'
+                    and _COMPETENCE_RE.match(row['competencia'])
+                ),
+                key=lambda r: r['competencia'],
+                default=None,
+            )
+            if best_comp_row is not None:
+                inst = economic_instant(best_comp_row)
+                if inst is not None:
+                    economic_timestamps.append(inst)
+
         timestamps.extend(economic_timestamps)
         anchor = max(timestamps, default=datetime.now(timezone.utc))
 
@@ -105,23 +127,19 @@ def snapshot_for(db, windows):
             comp_end = local_date(ending - timedelta(microseconds=1)).strftime('%Y-%m')
             competence_intervals.append((comp_start, comp_end))
 
-        ranges = [
-            {'data_evento': {'$gte': start_dt, '$lt': end_dt}}
-            for start_dt, end_dt in _merge_intervals(date_intervals)
-        ] + [
-            {'competencia': {'$gte': start_comp, '$lte': end_comp}}
-            for start_comp, end_comp in _merge_intervals(competence_intervals)
-        ]
-        query = {'$or': ranges}
-        txs = list(db.transactions.find(query, PROJECTION))
-        captures = list(db.provisional_transactions.find({'status': 'confirmed', **query}, PROJECTION))
+        merged_dates = _merge_intervals(date_intervals)
+        merged_comps = _merge_intervals(competence_intervals)
+        txs = [row for row in all_txs if _row_matches_intervals(row, merged_dates, merged_comps, normalized_datetime)]
+        captures = [row for row in all_captures if _row_matches_intervals(row, merged_dates, merged_comps, normalized_datetime)]
         return (
             txs,
             captures,
             {
-                'legacy': latest.get('data_evento') if latest else None,
-                'captured': captured.get('data_evento') if captured else None,
+                'legacy': latest_dt,
+                'captured': captured_dt,
                 'anchor': anchor,
                 'economic_anchor': max(economic_timestamps, default=None),
+                'all_txs': all_txs,
+                'all_captures': all_captures,
             },
         )

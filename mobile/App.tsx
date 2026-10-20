@@ -294,6 +294,8 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
     () => new Map<string, { key: string; at: number; generation: number }>(),
   );
   const [loadedResources, setLoadedResources] = useState<Record<string, boolean>>({});
+  const loadedResourcesRef = useRef<Record<string, boolean>>({});
+  const accountsCountRef = useRef(0);
   const manualLoads = useRef(0);
   const handledSyncRevision = useRef(0);
   const visibleRefreshRef = useRef<(force?: boolean) => Promise<void>>(() => Promise.resolve());
@@ -484,10 +486,20 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
             (value) => {
               publish(value);
               lastLoaded.set(resource, { key: path, at: Date.now(), generation: readGeneration });
+              loadedResourcesRef.current = { ...loadedResourcesRef.current, [resource]: true };
               setLoadedResources((current) => ({ ...current, [resource]: true }));
             },
           ),
         );
+      const isResourceFresh = (resource: string, key: string) => {
+        if (showLoading) return false;
+        const loaded = lastLoaded.get(resource);
+        return Boolean(
+          loaded?.key === key &&
+            loaded.generation === readGeneration &&
+            Date.now() - loaded.at < VISIBLE_DATA_MAX_AGE_MS,
+        );
+      };
       const synced = () => {
         setLastSyncedAt(new Date());
       };
@@ -536,6 +548,7 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
               });
               synced();
               lastLoaded.set("movimentações", { key: path, at: Date.now(), generation: readGeneration });
+              loadedResourcesRef.current = { ...loadedResourcesRef.current, movimentações: true };
               setLoadedResources((current) => ({ ...current, movimentações: true }));
             },
           ),
@@ -547,14 +560,22 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
           {setReviews(result.items || []);setReviewPage({total:result.total||0,next_cursor:result.next_cursor||null})},
         );
       }
-      if (scope === "all" || scope === "accounts" || scope === "account-catalog" || (scope === "movements" && accounts.length === 0))
-        run("contas", "/v1/accounts", (result) =>
-          setAccounts(result.items || []),
-        );
-      if (scope === "all" || scope === "accounts")
-        run("saldos", "/v1/account-positions", (result) =>
-          setAccountProfiles(result.items || []),
-        );
+      if (scope === "all" || scope === "accounts" || scope === "account-catalog" || (scope === "movements" && accountsCountRef.current === 0)) {
+        if (scope === "all" || scope === "account-catalog" || !isResourceFresh("contas", "/v1/accounts")) {
+          run("contas", "/v1/accounts", (result) => {
+            const nextAccounts = result.items || [];
+            accountsCountRef.current = nextAccounts.length;
+            setAccounts(nextAccounts);
+          });
+        }
+      }
+      if (scope === "all" || scope === "accounts") {
+        if (scope === "all" || !isResourceFresh("saldos", "/v1/account-positions")) {
+          run("saldos", "/v1/account-positions", (result) =>
+            setAccountProfiles(result.items || []),
+          );
+        }
+      }
       if (scope === "all" || scope === "cards")
         run("cartões", "/v1/card-catalog", (result) => setCards(result.items || []));
       if (scope === "all") void sync();
@@ -569,8 +590,30 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
         }
       });
     },
-    [accounts.length, lastLoaded, requests, sync],
+    [lastLoaded, requests, sync],
   );
+  const cancelAbandonedTabRequests = useCallback((activeTab: Tab) => {
+    if (manualLoads.current > 0) return;
+    if (activeTab !== "Início") requests.cancel("início");
+    if (activeTab !== "Movimentações" && activeTab !== "Detalhe") {
+      requests.cancel("movimentações");
+      requests.cancel("movimentações-página");
+    }
+    if (activeTab !== "Revisão") {
+      requests.cancel("revisão");
+      requests.cancel("revisão-página");
+    }
+    if (activeTab !== "Cartões" && activeTab !== "Compromissos") {
+      requests.cancel("cartões");
+    }
+    if (!["Contas", "Compromissos", "Capturar", "Mais", "Movimentações", "Detalhe"].includes(activeTab)) {
+      requests.cancel("contas");
+      requests.cancel("saldos");
+    }
+  }, [requests]);
+  useEffect(() => {
+    cancelAbandonedTabRequests(tab);
+  }, [tab, cancelAbandonedTabRequests]);
   const refreshVisible = useCallback((force = false) => {
     const fresh = (resource: string, key: string) => {
       const loaded = lastLoaded.get(resource);
@@ -597,7 +640,7 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
       fromCache = fresh("contas", "/v1/accounts") && fresh("saldos", "/v1/account-positions");
       task = fromCache ? Promise.resolve() : refresh("accounts");
     } else if (tab === "Compromissos" || tab === "Capturar" || tab === "Mais") {
-      fromCache = Boolean((!force && loadedResources.contas && loadedResources.saldos) || (fresh("contas", "/v1/accounts") && fresh("saldos", "/v1/account-positions")));
+      fromCache = Boolean((!force && loadedResourcesRef.current.contas && loadedResourcesRef.current.saldos) || (fresh("contas", "/v1/accounts") && fresh("saldos", "/v1/account-positions")));
       task = fromCache ? Promise.resolve() : refresh("accounts");
     } else if (tab === "Cartões") {
       fromCache = fresh("cartões", "/v1/card-catalog");
@@ -608,7 +651,7 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
     return task.finally(() => {
       telemetry.completeTabTransition(tab, { cached: fromCache, forced: force });
     });
-  }, [lastLoaded, loadedResources.contas, loadedResources.saldos, refresh, tab]);
+  }, [lastLoaded, refresh, tab]);
   const resolveActiveRefreshScopes = useCallback((scopes: Parameters<typeof refresh>[0][]) => {
     const requested = scopes.length ? scopes : (["finance"] as const);
     const active: Parameters<typeof refresh>[0][] = [];
@@ -1916,7 +1959,7 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
               <Button
                 title={manualLoading ? "Sincronizando…" : "Sincronizar agora"}
                 disabled={manualLoading || captureSaving}
-                onPress={() => { void Promise.all([refresh("all", true), sync()]).catch(() => {}); }}
+                onPress={() => { void refresh("all", true).catch(() => {}); }}
               />
               <Button title="Minha conta e privacidade" secondary onPress={() => router.push('/account')} />
               <Button title="Bloquear agora" secondary onPress={auth.lock} />

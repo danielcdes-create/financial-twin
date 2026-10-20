@@ -120,7 +120,13 @@ def account_info(request: Request, response: Response, session=Depends(require_s
     jti = session.get('jti', '')
     if jti:
         try:
-            renewed = renew_session_token(auth_database(request), session['account'], jti, BIOMETRIC_SESSION_SECONDS)
+            renewed = renew_session_token(
+                auth_database(request),
+                session['account'],
+                jti,
+                BIOMETRIC_SESSION_SECONDS,
+                persist_async=True,
+            )
             if renewed:
                 response.headers['X-Session-Token'] = renewed['access_token']
                 response.headers['X-Session-Expires-In'] = str(renewed['expires_in'])

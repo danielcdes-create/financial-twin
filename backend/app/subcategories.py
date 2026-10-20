@@ -8,7 +8,8 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from app.auth import require_session
-from app.atomic import mongo_snapshot, mongo_transaction, session_database
+from app.atomic import mongo_snapshot, mongo_transaction, session_database, with_batch_size
+from app.reference_cache import classification_cache
 from app.taxonomy import normalized, subcategory_catalog
 from app.movement_insert_lock import lock_movement_insert
 from app.category_filter import ACTIVE_CAPTURES, catalog_category_names
@@ -44,23 +45,45 @@ def clean_name(name):
 
 
 def context(db, category):
-    names = catalog_category_names(db)
+    all_categories = list(with_batch_size(db.categories.find({})))
+    commitments_rows = list(with_batch_size(db.commitments.find({}))) if _has_collection(db, "commitments") else None
+    overrides_rows = list(with_batch_size(db.future_schedule_overrides.find({}))) if _has_collection(db, "future_schedule_overrides") else None
+    experiments_rows = list(with_batch_size(db.saving_experiments.find({}))) if _has_collection(db, "saving_experiments") else None
+    names = catalog_category_names(
+        db,
+        all_categories=all_categories,
+        commitments_rows=commitments_rows,
+        overrides_rows=overrides_rows,
+        experiments_rows=experiments_rows,
+    )
     name = next((value for value in reversed(names) if normalized(value) == normalized(category)), None)
     if not name:
         raise HTTPException(404, "Categoria não encontrada.")
-    catalog = subcategory_catalog(db)
+    tx_rows = list(with_batch_size(db.transactions.find(
+        {"categoria": {"$nin": [None, ""]}, "subcategoria": {"$nin": [None, ""]}},
+        {"categoria": 1, "subcategoria": 1, "status": 1, "revision": 1},
+    )))
+    prov_rows = list(with_batch_size(db.provisional_transactions.find(
+        {"categoria_sugerida": {"$nin": [None, ""]}, "subcategoria": {"$nin": [None, ""]}},
+        {"categoria_sugerida": 1, "subcategoria": 1, "status": 1, "revision": 1},
+    )))
+    catalog = subcategory_catalog(
+        db,
+        all_categories=all_categories,
+        preloaded_transactions=tx_rows,
+        preloaded_captures=prov_rows,
+    )
     items = next((items for parent, items in catalog.items() if normalized(parent) == normalized(name)), {})
-    overrides = {normalized(item["name"]): item for doc in db.categories.find({})
+    overrides = {normalized(item["name"]): item for doc in all_categories
                  if normalized(doc.get("name", "")) == normalized(name) for item in doc.get("subcategories", [])}
     usage = {}
-    for collection, field in ((db.transactions, "categoria"), (db.provisional_transactions, "categoria_sugerida")):
-        for row in collection.find({field: {"$nin": [None, ""]}, "subcategoria": {"$nin": [None, ""]}},
-                                   {field: 1, "subcategoria": 1, "status": 1, "revision": 1}):
+    for rows_list, field in ((tx_rows, "categoria"), (prov_rows, "categoria_sugerida")):
+        for row in rows_list:
             if normalized(row.get(field, "")) != normalized(name): continue
             if field == "categoria_sugerida" and row.get("status") not in ACTIVE_CAPTURES: continue
             usage.setdefault(normalized(row["subcategoria"]), []).append([field, str(row["_id"]), row.get("revision"), row.get("status")])
-    if _has_collection(db, "commitments"):
-        for row in db.commitments.find({}):
+    if commitments_rows is not None:
+        for row in commitments_rows:
             cat = row.get("category") or row.get("categoria") or ""
             sub = row.get("subcategoria") or ""
             if normalized(cat) == normalized(name) and normalized(sub):
@@ -68,8 +91,8 @@ def context(db, category):
                 if key in items:
                     items[key]["usage_count"] = items[key].get("usage_count", 0) + 1
                 usage.setdefault(key, []).append(["commitment", str(row.get("_id")), row.get("revision")])
-    if _has_collection(db, "future_schedule_overrides"):
-        for row in db.future_schedule_overrides.find({}):
+    if overrides_rows is not None:
+        for row in overrides_rows:
             profile = row.get("profile") if isinstance(row.get("profile"), dict) else {}
             cat = profile.get("categoria") or ""
             sub = profile.get("subcategoria") or ""
@@ -93,6 +116,7 @@ def override(db, category, name, active, now, replacement=None):
         "$set": {"name": category, "key": key, "active": True, "subcategories": items, "updated_at": now},
         "$setOnInsert": {"created_at": now, "source": "mobile_manual"},
     }, upsert=True)
+    classification_cache.invalidate()
 
 
 def check_review(old, expected_token):
@@ -110,7 +134,7 @@ def relabel(db, category, name, replacement, now):
         query = {field: {"$nin": [None, ""]}, "subcategoria": {"$nin": [None, ""]}}
         if field == "categoria_sugerida":
             query["status"] = {"$in": ACTIVE_CAPTURES}
-        identities = [row["_id"] for row in collection.find(query, {field: 1, "subcategoria": 1})
+        identities = [row["_id"] for row in with_batch_size(collection.find(query, {field: 1, "subcategoria": 1}))
                       if normalized(row[field]) == normalized(category) and normalized(row["subcategoria"]) == normalized(name)]
         count = 0
         if identities:
@@ -127,13 +151,13 @@ def relabel(db, category, name, replacement, now):
                 count += collection.update_many(pair_query, update).modified_count
         counts.append(count)
     if _has_collection(db, "commitments"):
-        for row in list(db.commitments.find({})):
+        for row in list(with_batch_size(db.commitments.find({}))):
             cat = row.get("category") or row.get("categoria") or ""
             sub = row.get("subcategoria") or ""
             if normalized(cat) == normalized(category) and normalized(sub) == normalized(name):
                 db.commitments.update_one({"_id": row["_id"]}, {"$set": {"subcategoria": replacement, "updated_at": now}, "$inc": {"revision": 1}})
     if _has_collection(db, "future_schedule_overrides"):
-        for row in list(db.future_schedule_overrides.find({})):
+        for row in list(with_batch_size(db.future_schedule_overrides.find({}))):
             profile = dict(row.get("profile") or {}) if isinstance(row.get("profile"), dict) else {}
             if normalized(profile.get("categoria") or "") == normalized(category) and normalized(profile.get("subcategoria") or "") == normalized(name):
                 if replacement:
@@ -141,6 +165,7 @@ def relabel(db, category, name, replacement, now):
                 else:
                     profile.pop("subcategoria", None)
                 db.future_schedule_overrides.update_one({"_id": row["_id"]}, {"$set": {"profile": profile, "updated_at": now}, "$inc": {"revision": 1}})
+    classification_cache.invalidate()
     return counts
 
 

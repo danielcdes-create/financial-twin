@@ -11,6 +11,7 @@ from bson.decimal128 import Decimal128
 from pymongo.database import Database
 
 from app.account_profiles import account_profiles
+from app.atomic import with_batch_size
 from app.reference_cache import historical_context_cache
 from app.taxonomy import CURATED_SUBCATEGORIES, NATURES, category_subcategories
 
@@ -127,7 +128,7 @@ def _safe_find(collection, query: dict[str, Any], limit: int = 800) -> list[dict
     if collection is None or not hasattr(collection, "find"):
         return []
     try:
-        cursor = collection.find(query)
+        cursor = with_batch_size(collection.find(query), max(limit, 2000))
         if hasattr(cursor, "sort"):
             try:
                 cursor = cursor.sort([("data_evento", -1)])
@@ -142,18 +143,22 @@ def _safe_find(collection, query: dict[str, Any], limit: int = 800) -> list[dict
     return rows[:limit]
 
 
-def _safe_category_subcategories(db) -> dict[str, list[str]]:
+def _safe_category_subcategories(db, *, preloaded_transactions=None, preloaded_captures=None) -> dict[str, list[str]]:
     try:
-        return category_subcategories(db)
+        return category_subcategories(
+            db,
+            preloaded_transactions=preloaded_transactions,
+            preloaded_captures=preloaded_captures,
+        )
     except Exception:
         return {k: list(v) for k, v in CURATED_SUBCATEGORIES.items()}
 
 
-def _selectable_account_keys(db) -> set[str]:
+def _selectable_account_keys(db, profiles=None) -> set[str]:
     try:
         return {
             str(profile["key"])
-            for profile in account_profiles(db)
+            for profile in account_profiles(db, profiles=profiles)
             if profile.get("key") and not profile.get("archived") and profile.get("status") != "encerrada"
         }
     except Exception:
@@ -237,18 +242,36 @@ def _row_has_user_review(row: dict[str, Any]) -> bool:
     return False
 
 
-def _build_historical_context(db, catalog_cache: tuple | None = None, allowed_subcats: dict[str, list[str]] | None = None) -> dict[str, Any]:
+def _build_historical_context(
+    db,
+    catalog_cache: tuple | None = None,
+    allowed_subcats: dict[str, list[str]] | None = None,
+    profiles=None,
+) -> dict[str, Any]:
     by_id, platform_ids, platforms_by_key = catalog_cache or _merchant_catalog(db)
     by_id = dict(by_id)
     platform_ids = set(platform_ids)
     platforms_by_key = dict(platforms_by_key)
-    confirmed_captures = _safe_find(getattr(db, "provisional_transactions", None), {"status": "confirmed"}, limit=600)
-    active_edited = [
-        row
-        for row in _safe_find(getattr(db, "provisional_transactions", None), {"status": "provisional"}, limit=200)
-        + _safe_find(getattr(db, "provisional_transactions", None), {"status": "enriched"}, limit=200)
-        if _row_has_user_review(row)
-    ]
+    all_live_captures = _safe_find(
+        getattr(db, "provisional_transactions", None),
+        {"status": {"$in": ["confirmed", "provisional", "enriched"]}},
+        limit=1000,
+    )
+    if all_live_captures:
+        confirmed_captures = [row for row in all_live_captures if row.get("status") == "confirmed"][:600]
+        active_edited = [
+            row
+            for row in all_live_captures
+            if row.get("status") in {"provisional", "enriched"} and _row_has_user_review(row)
+        ][:400]
+    else:
+        confirmed_captures = _safe_find(getattr(db, "provisional_transactions", None), {"status": "confirmed"}, limit=600)
+        active_edited = [
+            row
+            for row in _safe_find(getattr(db, "provisional_transactions", None), {"status": "provisional"}, limit=200)
+            + _safe_find(getattr(db, "provisional_transactions", None), {"status": "enriched"}, limit=200)
+            if _row_has_user_review(row)
+        ]
     ledger_rows = _safe_find(getattr(db, "transactions", None), {}, limit=800)
     raw_candidates: list[tuple[dict[str, Any], bool, bool, str, str]] = []
     for row in confirmed_captures + active_edited:
@@ -265,21 +288,41 @@ def _build_historical_context(db, catalog_cache: tuple | None = None, allowed_su
             platforms_by_key[_norm(by_id[pid].get("nome_padrao"))] = by_id[pid]
         cand_raw = str(row.get("merchant_raw") or row.get("estabelecimento_original") or row.get("descricao_original") or "").strip()
         raw_candidates.append((row, False, _row_has_user_review(row), _row_flow(row), _norm(cand_raw)))
+    resolved_subcats = (
+        allowed_subcats
+        if allowed_subcats is not None
+        else _safe_category_subcategories(
+            db,
+            preloaded_transactions=ledger_rows,
+            preloaded_captures=all_live_captures or (confirmed_captures + active_edited),
+        )
+    )
     return {
         "catalog": (by_id, platform_ids, platforms_by_key),
         "confirmed_captures": confirmed_captures,
         "ledger_rows": ledger_rows,
         "raw_candidates": raw_candidates,
-        "selectable_accounts": _selectable_account_keys(db),
-        "allowed_subcats": allowed_subcats if allowed_subcats is not None else _safe_category_subcategories(db),
+        "selectable_accounts": _selectable_account_keys(db, profiles=profiles),
+        "allowed_subcats": resolved_subcats,
     }
 
 
-def _historical_context(db, catalog_cache: tuple | None = None, allowed_subcats: dict[str, list[str]] | None = None) -> dict[str, Any]:
+def _historical_context(
+    db,
+    catalog_cache: tuple | None = None,
+    allowed_subcats: dict[str, list[str]] | None = None,
+    profiles=None,
+) -> dict[str, Any]:
     raw_db = getattr(db, "db", db)
-    if catalog_cache is None and allowed_subcats is None and isinstance(raw_db, Database):
-        return historical_context_cache.get(raw_db, lambda: _build_historical_context(db))
-    return _build_historical_context(db, catalog_cache=catalog_cache, allowed_subcats=allowed_subcats)
+    if catalog_cache is None and isinstance(raw_db, Database):
+        ctx = historical_context_cache.get(
+            raw_db,
+            lambda: _build_historical_context(db, allowed_subcats=allowed_subcats, profiles=profiles),
+        )
+        if allowed_subcats is not None and ctx.get("allowed_subcats") != allowed_subcats:
+            return {**ctx, "allowed_subcats": allowed_subcats}
+        return ctx
+    return _build_historical_context(db, catalog_cache=catalog_cache, allowed_subcats=allowed_subcats, profiles=profiles)
 
 
 def historical_capture_profile(
@@ -289,6 +332,7 @@ def historical_capture_profile(
     require_reviewed: bool = False,
     catalog_cache: tuple | None = None,
     history_cache: dict[str, Any] | None = None,
+    profiles=None,
 ) -> dict[str, Any]:
     """Infer pre-fillable fields for a capture from confirmed/reviewed history."""
     if not document or document.get("natureza") == "TRANSFERENCIA":
@@ -305,7 +349,7 @@ def historical_capture_profile(
     if not source_key:
         return {}
 
-    ctx = history_cache or _historical_context(db, catalog_cache=catalog_cache)
+    ctx = history_cache or _historical_context(db, catalog_cache=catalog_cache, profiles=profiles)
     by_id, platform_ids, platforms_by_key = ctx["catalog"]
     detected_platform_doc, detected_platform_name, plat_tokens = _detect_platform(raw, platforms_by_key)
     store_tokens = _store_tokens(source_key, plat_tokens)
@@ -410,10 +454,6 @@ def historical_capture_profile(
                 w += 0.2 / (1.0 + idx * 0.1)
                 vendor_history_rows.append((row, w, is_capture))
 
-            # Accept vendor prefix history when either:
-            # (a) the vendor was used with the same platform, or
-            # (b) only one vendor in history matches the store prefix, or
-            # (c) one vendor dominates (>= 75% of historical occurrences for that prefix)
             total_prefix_occurrences = sum(vendor_counts.values())
             dominant_vendor_id = None
             if len(vendor_Platform_hits) == 1:
@@ -470,8 +510,6 @@ def historical_capture_profile(
     winning_vendor = _pick_winner(vendor_votes) if has_specific_store else None
     winning_merchant_id = vendor_id_by_name.get(winning_vendor) if winning_vendor else None
 
-    # If we identified a winning vendor, also include secondary historical records of that vendor
-    # to enrich missing classification fields (category, subcategory, locality, payment method).
     all_enrichment_rows = list(matched_rows)
     if winning_merchant_id is not None:
         seen_ids = {id(r) for r, _, _ in all_enrichment_rows}
@@ -575,6 +613,7 @@ def apply_historical_capture_defaults(
     *,
     base_item: dict[str, Any] | None = None,
     include_account_profile: bool = False,
+    profiles=None,
 ) -> list[str]:
     """Populate missing capture fields on `draft` from reviewed historical records."""
     source = {**(base_item or {}), **draft}
@@ -583,7 +622,7 @@ def apply_historical_capture_defaults(
         target_fields = (*target_fields, "account_profile_id")
     if all(source.get(field) for field in target_fields):
         return []
-    profile = historical_capture_profile(db, source, require_reviewed=True)
+    profile = historical_capture_profile(db, source, require_reviewed=True, profiles=profiles)
     if not profile:
         return []
     prefilled: list[str] = []
@@ -623,9 +662,14 @@ def apply_historical_capture_defaults(
     return prefilled
 
 
-def build_vendor_defaults(db, *, allowed_subcats: dict[str, list[str]] | None = None) -> dict[str, dict[str, str]]:
+def build_vendor_defaults(
+    db,
+    *,
+    allowed_subcats: dict[str, list[str]] | None = None,
+    history_cache: dict[str, Any] | None = None,
+) -> dict[str, dict[str, str]]:
     """Build per-vendor most frequent classification defaults for interactive form pre-fill."""
-    ctx = _historical_context(db, allowed_subcats=allowed_subcats)
+    ctx = history_cache or _historical_context(db, allowed_subcats=allowed_subcats)
     by_id, platform_ids, _ = ctx["catalog"]
     confirmed_captures = ctx["confirmed_captures"]
     ledger_rows = ctx["ledger_rows"]

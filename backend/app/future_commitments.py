@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 from pymongo.errors import DuplicateKeyError
 from app.auth import require_session
-from app.atomic import mongo_snapshot, mongo_transaction, session_database
+from app.atomic import mongo_snapshot, mongo_transaction, session_database, with_batch_size
 from app.commitment_estimates import effective_commitments
 from app.commitments import commitment_cutoff, as_date, linked_due_dates, schedule_from
 from app.economic_policy import amount, eligible_payment
@@ -163,7 +163,7 @@ def overlay_link_names(db, transaction_ids, capture_ids):
 def effective_documents(db, source, documents):
     documents = list(documents)
     if not documents: return []
-    overrides = {item['_id']: item for item in db.future_schedule_overrides.find({'_id': {'$in': [f'{source}:{row["_id"]}' for row in documents]}})}
+    overrides = {item['_id']: item for item in with_batch_size(db.future_schedule_overrides.find({'_id': {'$in': [f'{source}:{row["_id"]}' for row in documents]}}), 2000)}
     linked = obligation_links(db, [row for row in documents if f'{source}:{row["_id"]}' in overrides]) if source == 'obligation' else None
     return [effective_document(db, source, document, overrides.get(f'{source}:{document["_id"]}', {}), linked) for document in documents]
 
@@ -252,7 +252,7 @@ def obligation_series_key(document):
     return f"obligation|{document.get('tipo') or 'obrigacao'}|{document.get('origem_id')}|{str(document.get('descricao') or '').strip()}"
 
 def future_obligations_view(db):
-    candidates = list(db.obligations.find({'status': 'futura'}).sort('data_vencimento', 1).limit(1001))
+    candidates = list(with_batch_size(db.obligations.find({'status': 'futura'}), 2000).sort('data_vencimento', 1).limit(1001))
     if len(candidates) > 1000: raise HTTPException(409, 'Há mais de mil obrigações; restrinja o cadastro antes de gerenciar.')
     items = []
     linked = obligation_links(db, candidates)

@@ -17,12 +17,13 @@ export default function CategoryManager({api,money,spending,periodLabel='períod
   const [expanded,setExpanded]=useState<string|null>(null);
   const [loadError,setLoadError]=useState('');
   const loadGeneration=useRef(0);
+  const loadController=useRef<AbortController|null>(null);
   const lifecycle=useRef(0);
   useLocalBack(()=>protectUnsavedBack(Boolean(newName||replacement),()=>{setDeleting(null);setExpanded(null);}),Boolean(newName||deleting||expanded),20);
-  useLayoutEffect(()=>{const owner=lifecycle;owner.current++;return()=>{owner.current++;}},[]);
+  useLayoutEffect(()=>{const owner=lifecycle;owner.current++;return()=>{owner.current++;loadController.current?.abort();loadController.current=null;}},[]);
   const guarded=(callback:()=>Promise<void>)=>{const owner=lifecycle.current;return()=>owner===lifecycle.current?callback():undefined};
-  const load=useCallback(async()=>{const generation=++loadGeneration.current;setLoading(true);setLoadError('');try{const result=await api('/v1/categories');if(generation===loadGeneration.current)setItems(result.details||[])}catch(error:any){if(generation===loadGeneration.current)setLoadError(isAbort(error)?'Atualização interrompida. Tente atualizar a lista.':error.message)}finally{if(generation===loadGeneration.current)setLoading(false)}},[api]);
-  useEffect(()=>{const loads=loadGeneration;const task=setTimeout(()=>load(),0);return()=>{clearTimeout(task);loads.current++;}},[load]);
+  const load=useCallback(async()=>{loadController.current?.abort();const controller=typeof AbortController!=='undefined'?new AbortController():null;loadController.current=controller;const generation=++loadGeneration.current;setLoading(true);setLoadError('');try{const result=await api('/v1/categories',controller?{signal:controller.signal}:undefined);if(generation===loadGeneration.current)setItems(result.details||[])}catch(error:any){if(generation===loadGeneration.current)setLoadError(isAbort(error)?'Atualização interrompida. Tente atualizar a lista.':error.message)}finally{if(loadController.current===controller)loadController.current=null;if(generation===loadGeneration.current)setLoading(false)}},[api]);
+  useEffect(()=>{const loads=loadGeneration;const task=setTimeout(()=>load(),0);return()=>{clearTimeout(task);loads.current++;loadController.current?.abort();loadController.current=null;}},[load]);
   const updated=useCallback(async()=>{await Promise.all([load(),onUpdated()])},[load,onUpdated]);
   const create=async()=>{
     const name=newName.trim();if(!name){Alert.alert('Informe o nome','Digite o nome da nova categoria.');return}

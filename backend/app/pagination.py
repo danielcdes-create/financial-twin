@@ -2,6 +2,7 @@
 import base64, hashlib, json
 from bson import ObjectId
 from fastapi import HTTPException
+from app.atomic import with_batch_size
 from app.financial_time import utc_instant
 
 def page(collection, query, field, limit=100, cursor=None):
@@ -14,7 +15,8 @@ def page(collection, query, field, limit=100, cursor=None):
             stamp=utc_instant(value['date']);key=ObjectId(value['id']) if value['object_id'] else value['id']
         except Exception as exc: raise HTTPException(422,'Cursor inválido para esta consulta.') from exc
         bounded={'$and':[query,{'$or':[{field:{'$lt':stamp}},{field:stamp,'_id':{'$lt':key}}]}]}
-    rows=list(collection.find(bounded).sort([(field,-1),('_id',-1)]).limit(limit+1 if limit else 0))
+    batch=max((limit or 0)+1, 2000)
+    rows=list(with_batch_size(collection.find(bounded), batch).sort([(field,-1),('_id',-1)]).limit(limit+1 if limit else 0))
     more=bool(limit and len(rows)>limit); rows=rows[:limit] if limit else rows
     token=None
     if more:

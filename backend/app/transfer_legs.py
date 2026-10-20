@@ -1,14 +1,22 @@
 """Resolve transfer evidence independently of a consumer's cash/date window."""
 from bson import ObjectId
+from app.atomic import with_batch_size
 from app.economic_policy import amount
 
 
-def resolved_transfer_legs(db, captures, legacy_by_key):
+def resolved_transfer_legs(db, captures, legacy_by_key, *, posted_by_id=None):
     ids = {str((row.get("transfer") or {}).get(field)) for row in captures
            for field in ("source_transaction_id", "destination_transaction_id")
            if (row.get("transfer") or {}).get(field)}
-    lookup = [ObjectId(value) if ObjectId.is_valid(value) else value for value in ids]
-    posted = {str(row["_id"]): row for row in db.transactions.find({"_id": {"$in": lookup}})} if lookup else {}
+    if posted_by_id is not None:
+        posted = dict(posted_by_id)
+        missing = [ObjectId(value) if ObjectId.is_valid(value) else value for value in ids if value not in posted]
+        if missing:
+            for row in with_batch_size(db.transactions.find({"_id": {"$in": missing}})):
+                posted[str(row["_id"])] = row
+    else:
+        lookup = [ObjectId(value) if ObjectId.is_valid(value) else value for value in ids]
+        posted = {str(row["_id"]): row for row in with_batch_size(db.transactions.find({"_id": {"$in": lookup}}))} if lookup else {}
     result = {}
     for capture in captures:
         transfer = capture.get("transfer") or {}

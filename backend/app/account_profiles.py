@@ -10,6 +10,7 @@ from uuid import UUID
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing import Literal
+from app.atomic import with_batch_size
 
 ACCOUNT_CATALOG = (
     ("itau", "Itaú", "conta_corrente", "BRL"),
@@ -56,27 +57,32 @@ class AccountProfileCreate(AccountProfileIn):
 
 
 class AccountProfileUpdate(AccountProfileIn):
-    request_id:UUID|None=None
+    request_id: UUID | None = None
     expected_revision: int = Field(ge=1)
 
 
 class AccountProfileDelete(BaseModel):
     model_config = ConfigDict(extra="forbid")
     expected_revision: int = Field(ge=1)
-    request_id:UUID|None=None
+    request_id: UUID | None = None
 
 
 def profile_document_id(key):
     return "account-profile:" + key
 
 
-def account_profiles(db):
+def account_profiles(db, profiles=None):
+    if profiles is not None:
+        return list(profiles)
+    cached = getattr(db, "__dict__", {}).get("_account_profiles_cache") if db is not None else None
+    if isinstance(cached, list):
+        return list(cached)
     defaults = {key: {"key": key, "instituicao": institution, "apelido": "", "tipo": kind,
         "moeda": currency, "status": "aberta", "archived": False, "revision": 1,
         "agencia": "", "agencia_digito": "", "numero": "", "numero_digito": "",
         "data_abertura": None, "data_encerramento": None, "observacoes": ""}
         for key, institution, kind, currency in ACCOUNT_CATALOG}
-    for stored in db.account_profiles.find({}):
+    for stored in with_batch_size(db.account_profiles.find({})):
         if stored.get("entity_type") in {"card", "bill", "month_close"}:
             continue
         key = stored["key"]
@@ -88,9 +94,13 @@ def account_profiles(db):
     return list(defaults.values())
 
 
-def validate_account_key(key, db=None, *, selectable=False):
-    profiles = account_profiles(db) if db is not None else [{"key": k} for k in ACCOUNT_KEYS]
-    profile = next((item for item in profiles if item["key"] == key), None)
+def validate_account_key(key, db=None, *, selectable=False, profiles=None):
+    resolved_profiles = (
+        account_profiles(db, profiles=profiles)
+        if (db is not None or profiles is not None)
+        else [{"key": k} for k in ACCOUNT_KEYS]
+    )
+    profile = next((item for item in resolved_profiles if item["key"] == key), None)
     if profile is None:
         raise HTTPException(422, "Selecione uma conta cadastrada.")
     if selectable and (profile.get("archived") or profile.get("status") == "encerrada"):
@@ -98,22 +108,28 @@ def validate_account_key(key, db=None, *, selectable=False):
     return profile
 
 
-def legacy_accounts_by_profile(db):
+def legacy_accounts_by_profile(db, rows=None):
     from app.account_positions import account_key_for_legacy
+    cached = getattr(db, "__dict__", {}).get("_legacy_accounts_by_profile_cache") if (rows is None and db is not None) else None
+    if isinstance(cached, dict):
+        return dict(cached)
     grouped = {}
-    for row in db.accounts.find({"tipo": "conta_corrente"}):
+    source_rows = rows if rows is not None else with_batch_size(db.accounts.find({"tipo": "conta_corrente"}))
+    for row in source_rows:
         key = account_key_for_legacy(row)
         if key:
             grouped.setdefault(key, []).append(row)
     # Ambiguity must never assign two accounts in a bank to the same balance.
-    return {key: rows[0] for key, rows in grouped.items() if len(rows) == 1}
+    return {key: group[0] for key, group in grouped.items() if len(group) == 1}
 
 
-def profile_for_legacy(db, account):
+def profile_for_legacy(db, account, *, profiles=None, legacy_by_profile=None):
     from app.account_positions import account_key_for_legacy
     key = account_key_for_legacy(account) if account else None
-    matched = legacy_accounts_by_profile(db).get(key)
-    return key if matched and matched["_id"] == account["_id"] and any(p["key"] == key for p in account_profiles(db)) else None
+    by_profile = legacy_by_profile if legacy_by_profile is not None else legacy_accounts_by_profile(db)
+    matched = by_profile.get(key)
+    resolved_profiles = account_profiles(db, profiles=profiles)
+    return key if matched and matched["_id"] == account["_id"] and any(p["key"] == key for p in resolved_profiles) else None
 
 
 def movement_account_context(db, reference):
@@ -153,7 +169,7 @@ def capture_account_query(identity, key):
 
 def account_usage(db, key):
     from app.account_positions import account_key_for_legacy
-    legacy = [row for row in db.accounts.find({"tipo":"conta_corrente"}) if account_key_for_legacy(row)==key]
+    legacy = [row for row in with_batch_size(db.accounts.find({"tipo": "conta_corrente"})) if account_key_for_legacy(row) == key]
     references = ["profile:" + key]
     for row in legacy:
         references.extend([row['_id'], str(row['_id'])])
@@ -175,7 +191,7 @@ def account_usage(db, key):
     }
     identity = "account:" + key
     monthly = 0
-    for state in db.account_profiles.find({"entity_type": "month_close"}):
+    for state in with_batch_size(db.account_profiles.find({"entity_type": "month_close"})):
         snapshot = state.get("closed_snapshot") or {}
         if (identity in state.get("balances", {})
             or any(item.startswith(identity + ":") for item in state.get("items", {}))
@@ -197,9 +213,15 @@ def _stored_values(body):
     return values
 
 
+def _clear_profile_cache(db):
+    if db is not None and "_account_profiles_cache" in getattr(db, "__dict__", {}):
+        db.__dict__.pop("_account_profiles_cache", None)
+
+
 def create_profile(db, body):
     from app.movement_insert_lock import lock_movement_insert
     lock_movement_insert(db)
+    _clear_profile_cache(db)
     key = "account_" + body.request_id.hex
     identity = profile_document_id(key)
     previous = db.account_profiles.find_one({"_id": identity})
@@ -218,6 +240,7 @@ def create_profile(db, body):
 def update_profile(db, key, body):
     from app.movement_insert_lock import lock_movement_insert
     lock_movement_insert(db)
+    _clear_profile_cache(db)
     before = validate_account_key(key, db)
     if before["revision"] != body.expected_revision:
         raise HTTPException(409, "A conta mudou. Reabra os detalhes antes de salvar.")
@@ -241,6 +264,7 @@ def update_profile(db, key, body):
 def delete_profile(db, key, body):
     from app.movement_insert_lock import lock_movement_insert
     lock_movement_insert(db)
+    _clear_profile_cache(db)
     before = validate_account_key(key, db)
     if before["revision"] != body.expected_revision:
         raise HTTPException(409, "A conta mudou. Reabra os detalhes antes de excluir.")
@@ -251,7 +275,7 @@ def delete_profile(db, key, body):
     now = datetime.now(timezone.utc)
     tombstone = {"deleted": True, "revision": before["revision"] + 1, "updated_at": now}
     if db.account_profiles.find_one({"_id": identity}):
-        result=db.account_profiles.update_one({"_id": identity, "revision": before["revision"]},
+        result = db.account_profiles.update_one({"_id": identity, "revision": before["revision"]},
             {"$set": tombstone, "$unset": {"profile": "", "creation_values": ""}})
         if result is not None and result.matched_count != 1:
             raise HTTPException(409, "A conta mudou. Reabra os detalhes antes de excluir.")

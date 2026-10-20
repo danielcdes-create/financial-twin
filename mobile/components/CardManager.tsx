@@ -48,26 +48,30 @@ export default function CardManager({ api, cards, money, onUpdated }: Props) {
   const [form, setForm] = useState<Record<string, string>>({});
   const [comparisonBase,setComparisonBase]=useState<Record<string,string>>({});
   const [conflict, setConflict] = useState(false), [differences, setDifferences] = useState<string[]>([]);
-  const generation = useRef(0), running = useRef(false);
+  const generation = useRef(0), running = useRef(false), loadController = useRef<AbortController | null>(null);
   const selectedId = selected?.id;
   const queryKey = `${selectedId || 'catalog'}:${showDeleted}`;
   const captureScope = useAsyncScope(queryKey);
   const [resultKey, setResultKey] = useState('catalog:false');
   const load = useCallback(async () => {
+    loadController.current?.abort();
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    loadController.current = controller;
     const current = ++generation.current;
     setLoading(true); setError('');
     try {
+      const init = controller ? { signal: controller.signal } : undefined;
       const response = selectedId
-        ? await api(`/v1/card-catalog/${selectedId}/bills?include_deleted=${showDeleted}`)
-        : await api(`/v1/card-catalog?include_deleted=${showDeleted}`);
+        ? await api(`/v1/card-catalog/${selectedId}/bills?include_deleted=${showDeleted}`, init)
+        : await api(`/v1/card-catalog?include_deleted=${showDeleted}`, init);
       if (current !== generation.current) return;
       if (selectedId) { setSelected(old => ({ ...old, ...response.card })); setBills(response.items || []); }
       else setCatalog(response.items || []);
       setResultKey(`${selectedId || 'catalog'}:${showDeleted}`);
     } catch (failure: any) { if (current === generation.current) setError(failure.message || 'Não foi possível carregar os cartões.'); }
-    finally { if (current === generation.current) setLoading(false); }
+    finally { if (loadController.current === controller) loadController.current = null; if (current === generation.current) setLoading(false); }
   }, [api, selectedId, showDeleted]);
-  useEffect(() => { const counter = generation; const timer = setTimeout(() => load(), 0); return () => { clearTimeout(timer); counter.current++; }; }, [load, cards]);
+  useEffect(() => { const counter = generation; const timer = setTimeout(() => load(), 0); return () => { clearTimeout(timer); counter.current++; loadController.current?.abort(); loadController.current = null; }; }, [load, cards]);
   const update = (key: string, value: string) => setForm(current => ({ ...current, [key]: value }));
   const blankCardFields = () => ({instituicao: '', apelido: '', cartao_final: '', validade: '', dia_vencimento: '', dia_fechamento: '', melhor_dia_compra: '', observacoes: ''});
   const closeForm = () => { setCreatingCard(false); setEditingCard(null); setEditingBill(null); setForm({}); setComparisonBase({}); setConflict(false); setDifferences([]); };

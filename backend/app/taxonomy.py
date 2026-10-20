@@ -10,7 +10,8 @@ from typing import Any
 
 from pymongo.database import Database
 
-from app.atomic import mongo_transaction, session_database
+from app.atomic import mongo_transaction, session_database, with_batch_size
+from app.reference_cache import subcategory_catalog_cache
 
 
 NATURES = (
@@ -405,7 +406,7 @@ def _infer_classification(record: dict[str, Any]) -> dict[str, str]:
 def taxonomy_overrides(db, **kwargs) -> dict[str, dict[str, dict]]:
     return {
         normalized(category["name"]): {normalized(item["name"]): item for item in category.get("subcategories", [])}
-        for category in db.categories.find({"active": {"$ne": False}}, **kwargs)
+        for category in with_batch_size(db.categories.find({"active": {"$ne": False}}, **kwargs))
         if category.get("name")
     }
 
@@ -438,7 +439,20 @@ def infer_classification(record: dict[str, Any], overrides=None) -> dict[str, st
     return suggestion
 
 
-def subcategory_catalog(db) -> dict[str, dict[str, dict]]:
+def _find_category_pairs(collection, query: dict, projection: dict):
+    try:
+        return with_batch_size(collection.find(query, projection))
+    except TypeError:
+        return with_batch_size(collection.find(query))
+
+
+def subcategory_catalog(
+    db,
+    *,
+    all_categories=None,
+    preloaded_transactions=None,
+    preloaded_captures=None,
+) -> dict[str, dict[str, dict]]:
     """Merge defaults, live usage and user overrides without resurrecting deletions."""
     values: dict[str, dict[str, dict]] = {}
     category_names = {}
@@ -454,21 +468,37 @@ def subcategory_catalog(db) -> dict[str, dict[str, dict]]:
     for category, items in CURATED_SUBCATEGORIES.items():
         for name in items:
             add(category, name, "default")
-    for collection, category_field in ((db.transactions, "categoria"), (db.provisional_transactions, "categoria_sugerida")):
+    for collection, category_field, preloaded in (
+        (db.transactions, "categoria", preloaded_transactions),
+        (db.provisional_transactions, "categoria_sugerida", preloaded_captures),
+    ):
+        count_key = "transaction_count" if category_field == "categoria" else "provisional_count"
+        if preloaded is not None:
+            for row in preloaded:
+                if category_field == "categoria_sugerida" and row.get("status") not in {"provisional", "enriched", "confirmed"}:
+                    continue
+                category = str(row.get(category_field) or "").strip()
+                subcategory = str(row.get("subcategoria") or "").strip()
+                if category and subcategory:
+                    item = add(category, subcategory, "usage")
+                    item[count_key] += 1
+            continue
         query = {category_field: {"$nin": [None, ""]}, "subcategoria": {"$nin": [None, ""]}}
         if category_field == "categoria_sugerida":
             query["status"] = {"$in": ["provisional", "enriched", "confirmed"]}
-        for row in collection.find(
-            query,
-            {category_field: 1, "subcategoria": 1},
-        ):
+        for row in _find_category_pairs(collection, query, {category_field: 1, "subcategoria": 1}):
             category = str(row.get(category_field) or "").strip()
             subcategory = str(row.get("subcategoria") or "").strip()
             if category and subcategory:
                 item = add(category, subcategory, "usage")
-                item["transaction_count" if category_field == "categoria" else "provisional_count"] += 1
+                item[count_key] += 1
     # Keep the catalog in the existing categories collection (no new collection).
-    for category in db.categories.find({"active": {"$ne": False}}):
+    category_docs = (
+        [c for c in all_categories if c.get("active") is not False]
+        if all_categories is not None
+        else with_batch_size(db.categories.find({"active": {"$ne": False}}))
+    )
+    for category in category_docs:
         name = category.get("name")
         if not name:
             continue
@@ -489,11 +519,48 @@ def subcategory_catalog(db) -> dict[str, dict[str, dict]]:
     }
 
 
-def category_subcategories(db) -> dict[str, list[str]]:
+def _compute_category_subcategories(
+    db,
+    *,
+    all_categories=None,
+    preloaded_transactions=None,
+    preloaded_captures=None,
+) -> dict[str, list[str]]:
     return {
         category: sorted((item["name"] for item in items.values()), key=str.casefold)
-        for category, items in sorted(subcategory_catalog(db).items(), key=lambda pair: pair[0].casefold())
+        for category, items in sorted(
+            subcategory_catalog(
+                db,
+                all_categories=all_categories,
+                preloaded_transactions=preloaded_transactions,
+                preloaded_captures=preloaded_captures,
+            ).items(),
+            key=lambda pair: pair[0].casefold(),
+        )
     }
+
+
+def category_subcategories(
+    db,
+    *,
+    all_categories=None,
+    preloaded_transactions=None,
+    preloaded_captures=None,
+) -> dict[str, list[str]]:
+    raw_db = getattr(db, "db", db)
+    if (
+        all_categories is None
+        and preloaded_transactions is None
+        and preloaded_captures is None
+        and isinstance(raw_db, Database)
+    ):
+        return subcategory_catalog_cache.get(raw_db, lambda: _compute_category_subcategories(db))
+    return _compute_category_subcategories(
+        db,
+        all_categories=all_categories,
+        preloaded_transactions=preloaded_transactions,
+        preloaded_captures=preloaded_captures,
+    )
 
 
 def _read_pair(document: dict[str, Any], target: dict[str, Any]) -> tuple[Any, Any, list[str]]:
@@ -571,7 +638,7 @@ def _metadata(node: dict[str, Any]) -> dict[str, Any]:
 def _store_groups(db) -> int:
     written = 0
     existing = {}
-    for document in db.categories.find({}):
+    for document in with_batch_size(db.categories.find({})):
         if document.get("name"):
             existing[normalized(document["name"])] = document
     for node in _CATALOG:
@@ -650,7 +717,7 @@ def _scan(target_db, *, write: bool) -> dict[str, Any]:
             continue
         collection = getattr(target_db, target["collection"])
         projection = {"_id": 1, "categoria": 1, "subcategoria": 1, "category": 1, "categoria_sugerida": 1, "profile": 1, PRIOR_FIELD: 1}
-        for document in list(collection.find({}, projection)):
+        for document in list(with_batch_size(collection.find({}, projection))):
             plan = conversion_plan(document, target)
             destination = plan["status"] == "converted"
             key = (
@@ -696,7 +763,7 @@ def apply_taxonomy_conversion(db, *, dry_run: bool = False) -> dict[str, Any]:
     jobs = []
     for target in _TARGETS:
         collection = getattr(db, target["collection"])
-        for document in collection.find({}, {"_id": 1, "categoria": 1, "subcategoria": 1, "category": 1, "categoria_sugerida": 1, "profile": 1, PRIOR_FIELD: 1}):
+        for document in with_batch_size(collection.find({}, {"_id": 1, "categoria": 1, "subcategoria": 1, "category": 1, "categoria_sugerida": 1, "profile": 1, PRIOR_FIELD: 1})):
             if conversion_plan(document, target)["changed"]:
                 jobs.append((target["collection"], document["_id"]))
     _commit_live(db, jobs)

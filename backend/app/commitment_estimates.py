@@ -4,9 +4,9 @@ import re
 from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
 from bson import ObjectId
+from app.atomic import with_batch_size
 from app.economic_policy import amount, eligible_payment
 from app.financial_time import local_date, today
-from app.account_positions import account_key_for_legacy
 from app.account_profiles import legacy_accounts_by_profile
 
 PATTERNS = {
@@ -22,10 +22,11 @@ def estimate_account(db, account, legacy_map=None):
     """Profile-only captures require an unambiguous imported bank account."""
     if not ObjectId.is_valid(account):
         return None
-    key = account_key_for_legacy(db.accounts.find_one({'_id': ObjectId(account)}) or {})
     by_profile = legacy_map if legacy_map is not None else legacy_accounts_by_profile(db)
-    matched = by_profile.get(key)
-    return key if matched and str(matched['_id']) == account else None
+    for key, matched in by_profile.items():
+        if matched and str(matched.get('_id')) == str(account):
+            return key
+    return None
 
 
 def same_estimate_account(row, account, profile_key, captured=False):
@@ -35,7 +36,7 @@ def same_estimate_account(row, account, profile_key, captured=False):
     return str(row.get('account_id')) == account
 
 
-def estimate(db, item, rule, as_of=None, legacy_map=None):
+def estimate(db, item, rule, as_of=None, legacy_map=None, *, preloaded_transactions=None, preloaded_captures=None):
     """Average the last three actual bills, not three calendar-month slots."""
     result = copy.deepcopy(item)
     result['amount_rule_available'] = True
@@ -59,22 +60,28 @@ def estimate(db, item, rule, as_of=None, legacy_map=None):
     profile_key = estimate_account(db, account, legacy_map=legacy_map)
     merchant_query = {'$or': [{field: {'$regex': pattern.pattern, '$options': 'i'}} for field in FIELDS]}
     sources = []
-    for collection, captured in [('transactions', False), ('provisional_transactions', True)]:
-        accounts = [{'account_id': {'$in': [ObjectId(account), account]}}]
-        if captured and profile_key:
-            accounts.append({'account_profile_id': profile_key})
-        query = {'$and': [{'$or': accounts}, merchant_query]}
-        cursor = db[collection].find(query)
-        if hasattr(cursor, 'sort'):
-            try:
-                cursor = cursor.sort([('data_evento', -1)])
-            except Exception:
-                pass
-        if hasattr(cursor, 'limit'):
-            try:
-                cursor = cursor.limit(60)
-            except Exception:
-                pass
+    for collection, captured, preloaded in [
+        ('transactions', False, preloaded_transactions),
+        ('provisional_transactions', True, preloaded_captures),
+    ]:
+        if preloaded is not None:
+            cursor = preloaded
+        else:
+            accounts = [{'account_id': {'$in': [ObjectId(account), account]}}]
+            if captured and profile_key:
+                accounts.append({'account_profile_id': profile_key})
+            query = {'$and': [{'$or': accounts}, merchant_query]}
+            cursor = with_batch_size(db[collection].find(query))
+            if hasattr(cursor, 'sort'):
+                try:
+                    cursor = cursor.sort([('data_evento', -1)])
+                except Exception:
+                    pass
+            if hasattr(cursor, 'limit'):
+                try:
+                    cursor = cursor.limit(60)
+                except Exception:
+                    pass
         for row in cursor:
             if not same_estimate_account(row, account, profile_key, captured) or not eligible_payment(row, captured):
                 continue
@@ -97,7 +104,7 @@ def estimate(db, item, rule, as_of=None, legacy_map=None):
                             '_instant': str(row['data_evento'])})
     sources.sort(key=lambda x: (x['paid_date'], x['_instant'], x['source_id']), reverse=True)
     selected = sources[:3]
-    metadata['sources'] = [{k:v for k,v in row.items() if k != '_instant'} for row in selected]
+    metadata['sources'] = [{k: v for k, v in row.items() if k != '_instant'} for row in selected]
     metadata['sample_count'] = len(selected)
     if len(selected) < 3:
         metadata['reason'] = 'Ainda não há três contas confirmadas; valor de referência mantido.'
@@ -110,7 +117,7 @@ def estimate(db, item, rule, as_of=None, legacy_map=None):
     return result
 
 
-def effective_commitments(db, documents, as_of=None):
+def effective_commitments(db, documents, as_of=None, *, preloaded_transactions=None, preloaded_captures=None):
     documents = list(documents)
     if not documents:
         return []
@@ -118,8 +125,48 @@ def effective_commitments(db, documents, as_of=None):
     collection = getattr(db, 'commitment_amount_rules', None)
     if not identities or collection is None:
         return documents
-    rules = {x['_id']: x for x in collection.find({'_id': {'$in': identities}})}
-    needs_estimate = any(item.get('commitment_id') in rules or item.get('amount_mode') == 'last_three_bills' for item in documents)
-    legacy_map = legacy_accounts_by_profile(db) if needs_estimate else None
-    return [estimate(db, item, rules.get(item.get('commitment_id'), {}), as_of, legacy_map=legacy_map) if item.get('commitment_id') in rules or item.get('amount_mode') == 'last_three_bills'
-            else item for item in documents]
+    rules = {x['_id']: x for x in with_batch_size(collection.find({'_id': {'$in': identities}}))}
+    estimate_items = [
+        item for item in documents
+        if item.get('commitment_id') in rules or item.get('amount_mode') == 'last_three_bills'
+    ]
+    if not estimate_items:
+        return documents
+    legacy_map = legacy_accounts_by_profile(db)
+    # When multiple commitments need bill estimates and no preloaded snapshot was passed,
+    # batch-fetch matching transactions and captures in one query per collection instead of N+1.
+    if preloaded_transactions is None and preloaded_captures is None and len(estimate_items) > 1:
+        tx_clauses = []
+        cap_clauses = []
+        for item in estimate_items:
+            rule = rules.get(item.get('commitment_id'), {})
+            provider = rule.get('provider')
+            account = str(item.get('account_id') or '')
+            if (rule.get('method') == 'last_three_bills' and provider in PATTERNS
+                    and rule.get('account_id') == account and ObjectId.is_valid(account)
+                    and item.get('kind') == 'assinatura' and item.get('frequency') == 'mensal'
+                    and not item.get('card_id') and (item.get('amount_mode') or 'last_three_bills') != 'fixed'):
+                pat = PATTERNS[provider]
+                m_query = {'$or': [{field: {'$regex': pat, '$options': 'i'}} for field in FIELDS]}
+                acc_clause = {'account_id': {'$in': [ObjectId(account), account]}}
+                tx_clauses.append({'$and': [acc_clause, m_query]})
+                prof_key = estimate_account(db, account, legacy_map=legacy_map)
+                cap_accs = [acc_clause] + ([{'account_profile_id': prof_key}] if prof_key else [])
+                cap_clauses.append({'$and': [{'$or': cap_accs}, m_query]})
+        if len(tx_clauses) > 1:
+            preloaded_transactions = list(with_batch_size(db['transactions'].find({'$or': tx_clauses})))
+            preloaded_captures = list(with_batch_size(db['provisional_transactions'].find({'$or': cap_clauses})))
+    return [
+        estimate(
+            db,
+            item,
+            rules.get(item.get('commitment_id'), {}),
+            as_of,
+            legacy_map=legacy_map,
+            preloaded_transactions=preloaded_transactions,
+            preloaded_captures=preloaded_captures,
+        )
+        if item.get('commitment_id') in rules or item.get('amount_mode') == 'last_three_bills'
+        else item
+        for item in documents
+    ]
