@@ -82,7 +82,7 @@ def safe_client_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
 SLOW_REQUEST_THRESHOLD_MS = float(os.getenv("PERF_SLOW_REQUEST_MS", "300"))
 SLOW_QUERY_THRESHOLD_MS = float(os.getenv("PERF_SLOW_QUERY_MS", "50"))
 N_PLUS_ONE_THRESHOLD = int(os.getenv("PERF_N_PLUS_ONE_COUNT", "4"))
-TELEMETRY_LOG_PATH = Path(os.getenv("PERF_LOG_PATH", "logs/perf_telemetry.jsonl"))
+TELEMETRY_LOG_PATH = Path(os.getenv("PERF_LOG_PATH", "logs/perf_telemetry.live.jsonl"))
 
 
 @dataclass
