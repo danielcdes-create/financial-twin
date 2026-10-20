@@ -1,6 +1,17 @@
 # Auditoria adversarial — 15/10/2026
 
-Julgamento da árvore local de `financial-app` a partir de `431aaf5`, com a correção de contagem dupla desta entrega, commit `cc7f562`. Dados sintéticos. O ledger ao vivo não foi lido, escrito, deduplicado nem reparado. O release privado no disco é Android 1.20.74 / versionCode 120, SHA-256 `B28EF887D6277DE39DAF977DF386333F0019DD919C06BAE4245E692D4A6A91F7`, commit `01f41d6`, com o certificado de debug anterior. A instalação física permanece unverified.
+Julgamento da árvore local de `financial-app` a partir de `431aaf5`, com a correção de contagem dupla desta entrega, commit `cc7f562`. Dados sintéticos. O ledger ao vivo não foi lido, escrito, deduplicado nem reparado. O release privado no disco é Android 1.20.75 / versionCode 121, SHA-256 `4649AB9546727392941366A510E36C3C72D80599553059339966A71C401B4FF4`, commit `76bde2f`, com o certificado de debug anterior. A instalação física permanece unverified.
+
+## Entrega 20/10/2026 — leituras sem transação de consulta
+
+Commit do recurso `03a8ce0`, empacotado em `76bde2f`. APK ARM64 de 48116960 bytes, SHA-256 `4649AB9546727392941366A510E36C3C72D80599553059339966A71C401B4FF4`, assinante `FAC61745DC0903786FB9EDE62A962B399F7348F0BB6F899B8332667591033B9C`. O ledger ao vivo não foi lido nem escrito. Nesta passagem passaram `backend/tests/test_performance_plan.py` (6), `backend/tests/test_auth.py` (14), `backend/tests/test_commitment_estimates.py` (15) e `mobile/scripts/test-overlay-transitions.cjs`. A suíte completa do cliente e a homologação física não foram repetidas.
+
+| Correção | Veredito |
+| --- | --- |
+| Consulta | `mongo_snapshot` não abre sessão nem `commitTransaction`. Num `Database` real o rótulo continua `snapshot`. Escritas seguem em `mongo_transaction`. |
+| Cursor e classificação | Cursores de leitura pedem `batchSize` 2000. As opções de classificação saem de uma agregação por coleção. |
+| Sessão | Um GET não grava `last_seen`. Numa escrita, a sessão segue numa thread e não segura a resposta. |
+| Aba | Trocar de aba aborta o GET anterior. Contas e saldos já frescos não são pedidos de novo. No aparelho: unverified. |
 
 ## Entrega 18/10/2026 — cabeçalho ASCII
 
