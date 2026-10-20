@@ -8,8 +8,10 @@ media/
 audit_work/
 *.log
 *.err.log
-logs/
+logs/*
+!logs/perf_telemetry.jsonl
 *.jsonl
+!logs/perf_telemetry.jsonl
 *.jks
 *.keystore
 *.key

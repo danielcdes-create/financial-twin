@@ -28,7 +28,7 @@ No cliente, sair de uma aba aborta o GET que ela deixou aberto. Contas e saldos 
 
 O cliente mede troca de aba, o tempo até a aba visível, leituras, capturas e mutações. O buffer fica em SQLite (`perf_telemetry`) e sobe em lote autenticado para `POST /v1/telemetry/events`. `GET /v1/telemetry/report` devolve P50, P95 e P99 por rota e por evento do cliente. Os cabeçalhos `X-Trace-Id`, `Server-Timing` e `X-Perf-Metrics` separam rede, Python e MongoDB. Essas rotas não invalidam o cache de classificação e não entram no journal de mutação.
 
-A consulta, o identificador do documento, o valor e o texto de erro ficam fora do registro. O arquivo `logs/perf_telemetry.jsonl` guarda o rótulo da rota e os tempos.
+A consulta, o identificador do documento, o valor e o texto de erro ficam fora do registro. O arquivo `logs/perf_telemetry.jsonl` guarda o rótulo da rota e os tempos e entra no Git. Os demais arquivos de `logs/` e os outros `*.jsonl` continuam de fora.
 
 No painel, a competência usa uma faixa indexável de `competencia` e o mesmo filtro de mês válido. Intervalos sobrepostos da mesma leitura são fundidos. Seis índices novos, criados de forma idempotente na subida, cobrem competência, status de revisão, evidência e rótulos de auditoria. `taxonomy_overrides` reutiliza o cache de classificação por 300 segundos. Candidatos de pagamento e a página do extrato enriquecem o vendedor em lote. Abrir Compromissos não pede `/v1/commitment-projection` de novo: a projeção já carrega na montagem. Uma gravação ainda atualiza o gráfico.
 
