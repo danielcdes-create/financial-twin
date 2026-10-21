@@ -171,27 +171,36 @@ class MongoPerformanceListener(monitoring.CommandListener):
     }
 
     def __init__(self) -> None:
-        self._collections_by_req_id: dict[int, str] = {}
+        self._collections_by_req_id: dict[tuple[Any, int], str] = {}
         self._lock = Lock()
+
+    @staticmethod
+    def _event_key(event: Any) -> tuple[Any, int]:
+        return (getattr(event, "connection_id", None), event.request_id)
 
     def started(self, event: monitoring.CommandStartedEvent) -> None:
         if event.command_name not in self._MONITORED_COMMANDS:
             return
-        trace = _current_trace.get()
-        if trace is None:
-            return
-        collection = str(event.command.get(event.command_name) or "session")
+        if event.command_name == "getMore":
+            collection = str(event.command.get("collection") or event.command.get("getMore") or "cursor")
+        else:
+            collection = str(event.command.get(event.command_name) or event.command.get("collection") or "session")
         with self._lock:
-            self._collections_by_req_id[event.request_id] = collection
+            if len(self._collections_by_req_id) >= 4096:
+                self._collections_by_req_id.pop(next(iter(self._collections_by_req_id)), None)
+            self._collections_by_req_id[self._event_key(event)] = collection
 
     def succeeded(self, event: monitoring.CommandSucceededEvent) -> None:
         if event.command_name not in self._MONITORED_COMMANDS:
             return
+        with self._lock:
+            collection = self._collections_by_req_id.pop(
+                self._event_key(event),
+                self._collections_by_req_id.pop((None, event.request_id), "unknown"),
+            )
         trace = _current_trace.get()
         if trace is None:
             return
-        with self._lock:
-            collection = self._collections_by_req_id.pop(event.request_id, "unknown")
         duration_ms = round(event.duration_micros / 1000.0, 2)
         docs_returned = None
         cursor = event.reply.get("cursor")
@@ -213,11 +222,14 @@ class MongoPerformanceListener(monitoring.CommandListener):
     def failed(self, event: monitoring.CommandFailedEvent) -> None:
         if event.command_name not in self._MONITORED_COMMANDS:
             return
+        with self._lock:
+            collection = self._collections_by_req_id.pop(
+                self._event_key(event),
+                self._collections_by_req_id.pop((None, event.request_id), "unknown"),
+            )
         trace = _current_trace.get()
         if trace is None:
             return
-        with self._lock:
-            collection = self._collections_by_req_id.pop(event.request_id, "unknown")
         duration_ms = round(event.duration_micros / 1000.0, 2)
         trace.db_commands.append(
             DbCommandMetric(

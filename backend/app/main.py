@@ -35,7 +35,7 @@ from app.category_filter import ACTIVE_CAPTURES, catalog_category_names, categor
 from app.movement_filters import period_query, intersect, search_query, filter_key as movement_filter_key
 from app.document_validation import validate_document_extraction
 from app.pdf_input import PDFPasswordError, read_pdf
-from app.reference_cache import ReferenceCache, classification_cache
+from app.reference_cache import ReferenceCache, classification_cache, unwrap_database
 from contextlib import nullcontext
 try:
     from app.telemetry import install_telemetry, SpanTimer
@@ -49,7 +49,7 @@ taxonomy_overrides_cache = ReferenceCache(ttl_seconds=300)
 classification_cache._dependents.append(taxonomy_overrides_cache)
 
 def cached_taxonomy_overrides(db):
-    raw_db = getattr(db, "db", db)
+    raw_db = unwrap_database(db)
     if isinstance(raw_db, Database):
         return taxonomy_overrides_cache.get(raw_db, lambda: taxonomy_overrides(db))
     return taxonomy_overrides(db)
@@ -1022,7 +1022,7 @@ def _build_classification_options(db):
     by_id,_,_=ctx["catalog"]
     known_platform_ids=[value for value in tx_distinct.get("platform_id",[])+prov_distinct.get("platform_id",[]) if value]
     known_platform_id_strs={str(value) for value in known_platform_ids}
-    if by_id or isinstance(getattr(db,"db",db),Database):
+    if by_id or isinstance(unwrap_database(db),Database):
         platform_names=(
             {name for _,name in PLATFORMS.values()}
             | {
@@ -1695,23 +1695,21 @@ def validate_signed_flow(item:dict[str,Any]) -> None:
     if value is not None and value < 0 and (item.get('natureza')=='ESTORNO' or item.get('tipo')=='estorno'):
         raise HTTPException(422,'Estorno recebido exige valor positivo e fluxo de entrada. Registre uma reversão como saída explícita, sem a natureza Estorno.')
 
-def validate_confirmed_provisional(item:dict[str,Any], db=None) -> None:
+def validate_confirmed_provisional(item:dict[str,Any], db=None, *, profiles=None) -> None:
     value=decimal_amount(item.get("valor"))
     if value is None or not value.is_finite() or value == 0 or abs(value)>Decimal("100000000"):
         raise HTTPException(422,"Informe um valor financeiro válido e diferente de zero.")
     validate_signed_flow(item)
     if item.get("account_profile_id"):
-        validate_account_key(item["account_profile_id"],db)
+        validate_account_key(item["account_profile_id"],db,profiles=profiles)
     if not str(item.get("tipo") or "").strip() or item.get("fluxo") not in {"entrada","saida"}:
         raise HTTPException(status_code=422,detail="Informe tipo e fluxo antes de confirmar a captura.")
     if item.get("natureza")=="TRANSFERENCIA":
         transfer=item.get("transfer") or {}
         origin=transfer.get("from_account_key");destination=transfer.get("to_account_key")
-        validate_account_key(origin,db);validate_account_key(destination,db)
+        validate_account_key(origin,db,profiles=profiles);validate_account_key(destination,db,profiles=profiles)
         if origin==destination: raise HTTPException(status_code=422,detail="Origem e destino devem ser contas diferentes.")
 
-@app.patch("/v1/provisional/{provisional_id}", dependencies=[Depends(require_session)])
-@durable_mutation('capture_update',('provisional_id',),'update')
 @app.patch("/v1/provisional/{provisional_id}", dependencies=[Depends(require_session)])
 @durable_mutation('capture_update',('provisional_id',),'update')
 def update_provisional(provisional_id:str, update:ProvisionalUpdate, db=Depends(database)):
@@ -1721,11 +1719,13 @@ def update_provisional(provisional_id:str, update:ProvisionalUpdate, db=Depends(
         if update.action is not None:
             raw_updated=result.pop('_raw_item',None)
             merchants_cache=result.pop('_merchants_by_id',None)
+            profiles_cache=result.pop('_profiles',None)
             decision_result=_atomic_decide_provisional(
                 provisional_id,
                 ProvisionalAction(action=update.action,expected_revision=result['item'].get('revision',1)),
                 writing,
                 current_item=raw_updated,
+                profiles=profiles_cache,
             )
             decided_doc=decision_result.pop('_decided_item',None) or writing.provisional_transactions.find_one({'provisional_id':provisional_id})
             result['decision']=decision_result
@@ -1733,6 +1733,7 @@ def update_provisional(provisional_id:str, update:ProvisionalUpdate, db=Depends(
         else:
             result.pop('_raw_item',None)
             result.pop('_merchants_by_id',None)
+            result.pop('_profiles',None)
         result.update({'persisted':True,'provisional_id':provisional_id,'action':update.action})
         return result
 
@@ -1804,7 +1805,7 @@ def _atomic_update_provisional(provisional_id:str, update:ProvisionalUpdate, db=
     if nature!="TRANSFERENCIA": final.pop("transfer",None)
     if clear_account_profile: final.pop("account_profile_id",None)
     validate_signed_flow(final)
-    if item.get("status")=="confirmed": validate_confirmed_provisional(final,db)
+    if item.get("status")=="confirmed": validate_confirmed_provisional(final,db,profiles=profiles_cache)
     effective_category=values.get("categoria_sugerida",item.get("categoria_sugerida"))
     if "categoria_sugerida" in values and rejects_direct_level1_posting(values.get("categoria_sugerida"), values.get("subcategoria", item.get("subcategoria"))):
         raise HTTPException(422, "Este grupo não aceita lançamento direto. Escolha uma subcategoria.")
@@ -1896,13 +1897,13 @@ def _atomic_update_provisional(provisional_id:str, update:ProvisionalUpdate, db=
         if item.get('status')=='confirmed':
             historical=historical_statement_reviews(db,{'provisional_id':provisional_id,'status':'confirmed'})
             display_capture_review(result,historical)
-        return {"item":result,"changed":False,"_raw_item":item,"_merchants_by_id":merchants_by_id}
+        return {"item":result,"changed":False,"_raw_item":item,"_merchants_by_id":merchants_by_id,"_profiles":profiles_cache}
     changed["updated_at"]=now
     changed["revision"]=item.get("revision",1)+1
     db.provisional_transactions.update_one({"_id":item["_id"]},{"$set":changed,**({"$unset":unset_values} if unset_values else {})})
     db.audit_log.insert_one({"event":"provisional_transaction_updated","provisional_id":provisional_id,"source":"mobile_manual_review","before":before,"after":{**json_safe(changed),**{key:None for key in unset_values if key not in {'merchant_id','merchant_name','platform_id'}},**({'plataforma':None} if 'platform_id' in unset_values else {}),**({"vendedor":None} if 'merchant_id' in unset_values or 'merchant_name' in unset_values else {"vendedor":supplier} if supplier and "merchant_id" in changed else {})},"change_reason":"user_review","created_at":now})
     updated_doc={k:v for k,v in {**item,**changed}.items() if k not in unset_values}
-    return {"item":with_merchant_name(updated_doc,db,include_historical=(update.action is None),merchants_by_id=merchants_by_id),"changed":True,"_raw_item":updated_doc,"_merchants_by_id":merchants_by_id}
+    return {"item":with_merchant_name(updated_doc,db,include_historical=(update.action is None),merchants_by_id=merchants_by_id),"changed":True,"_raw_item":updated_doc,"_merchants_by_id":merchants_by_id,"_profiles":profiles_cache}
 
 class ProvisionalAction(BaseModel):
     request_id:UUID|None=None
@@ -1917,7 +1918,7 @@ def decide_provisional(provisional_id:str, decision:ProvisionalAction, db=Depend
         res.pop("_decided_item",None)
         return res
 
-def _atomic_decide_provisional(provisional_id:str, decision:ProvisionalAction, db=Depends(database), *, current_item:dict|None=None):
+def _atomic_decide_provisional(provisional_id:str, decision:ProvisionalAction, db=Depends(database), *, current_item:dict|None=None, profiles=None):
     lock_movement_insert(db)
     item=current_item if current_item is not None else db.provisional_transactions.find_one({"provisional_id":provisional_id})
     if not item: raise HTTPException(status_code=404,detail="Active provisional transaction not found")
@@ -1928,8 +1929,8 @@ def _atomic_decide_provisional(provisional_id:str, decision:ProvisionalAction, d
     if decision.expected_revision is not None and decision.expected_revision!=item.get("revision",1): raise HTTPException(409,"A captura mudou. Recarregue.")
     extra_set:dict[str,Any]={}
     if decision.action=="confirm":
-        apply_historical_capture_defaults(db,extra_set,base_item=item)
-        validate_confirmed_provisional({**item,**extra_set},db)
+        apply_historical_capture_defaults(db,extra_set,base_item=item,profiles=profiles)
+        validate_confirmed_provisional({**item,**extra_set},db,profiles=profiles)
     if decision.action=='cancel':
         reasons=movement_blockers(db,'capture',provisional_id,item)
         if reasons:raise HTTPException(409,' '.join(reasons)+' Revise os vínculos antes de descartar.')

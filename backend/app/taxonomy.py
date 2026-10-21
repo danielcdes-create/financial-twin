@@ -11,7 +11,7 @@ from typing import Any
 from pymongo.database import Database
 
 from app.atomic import mongo_transaction, session_database, with_batch_size
-from app.reference_cache import subcategory_catalog_cache
+from app.reference_cache import subcategory_catalog_cache, unwrap_database
 
 
 NATURES = (
@@ -547,7 +547,7 @@ def category_subcategories(
     preloaded_transactions=None,
     preloaded_captures=None,
 ) -> dict[str, list[str]]:
-    raw_db = getattr(db, "db", db)
+    raw_db = unwrap_database(db)
     if (
         all_categories is None
         and preloaded_transactions is None

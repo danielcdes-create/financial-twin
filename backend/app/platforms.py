@@ -12,7 +12,7 @@ from pymongo.database import Database
 
 from app.account_profiles import account_profiles
 from app.atomic import with_batch_size
-from app.reference_cache import historical_context_cache
+from app.reference_cache import historical_context_cache, unwrap_database
 from app.taxonomy import CURATED_SUBCATEGORIES, NATURES, category_subcategories
 
 
@@ -313,7 +313,7 @@ def _historical_context(
     allowed_subcats: dict[str, list[str]] | None = None,
     profiles=None,
 ) -> dict[str, Any]:
-    raw_db = getattr(db, "db", db)
+    raw_db = unwrap_database(db)
     if catalog_cache is None and isinstance(raw_db, Database):
         ctx = historical_context_cache.get(
             raw_db,

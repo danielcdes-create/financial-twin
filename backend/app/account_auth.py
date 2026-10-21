@@ -7,8 +7,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field, field_validator
 from pymongo.errors import DuplicateKeyError
 from app.auth import (BIOMETRIC_SESSION_SECONDS, OWNER_ID, auth_database, auth_settings, get_settings, hash_password,
-                      login_attempts, owner, public_account, renew_session_token, require_session, session_response,
-                      verify_password)
+                      login_attempts, owner, owner_cache, public_account, renew_session_token, require_session,
+                      session_response, verify_password)
 
 router = APIRouter(prefix='/v1/auth', tags=['account'])
 
@@ -82,6 +82,8 @@ def setup(body: SetupInput, request: Request):
         db.account.insert_one(account)
     except DuplicateKeyError:
         raise HTTPException(409, 'A conta já foi configurada. Use Entrar.') from None
+    finally:
+        owner_cache.invalidate()
     login_attempts.reset('private-owner')
     return session_response(db, account, body.device_label)
 
@@ -105,6 +107,8 @@ def login(body: LoginInput, request: Request):
             db.account.insert_one(account)
         except DuplicateKeyError:
             raise HTTPException(409, 'A conta foi configurada. Entre com as novas credenciais.') from None
+        finally:
+            owner_cache.invalidate()
     else:
         password_ok = verify_password(body.password, account['password_hash']) if account else False
         if not account:
@@ -153,6 +157,7 @@ def account_update(body: AccountInput, request: Request, session=Depends(require
     db = auth_database(request)
     result = db.account.update_one({'_id': OWNER_ID, 'auth_version': account['auth_version']},
                                   {'$set': {'username': body.username, 'display_name': body.display_name, 'auth_version': version}})
+    owner_cache.invalidate()
     if result.matched_count != 1:
         raise HTTPException(409, 'A conta mudou. Entre novamente.')
     db.audit_log.insert_one({'event': 'account_profile_updated', 'actor': 'owner', 'before': before, 'after': after,
@@ -174,6 +179,7 @@ def password_change(body: PasswordInput, request: Request, session=Depends(requi
     db = auth_database(request)
     result = db.account.update_one({'_id': OWNER_ID, 'auth_version': account['auth_version']},
                                   {'$set': {'password_hash': encoded, 'auth_version': version, 'sessions': []}})
+    owner_cache.invalidate()
     if result.matched_count != 1:
         raise HTTPException(409, 'A senha já foi alterada. Entre novamente.')
     login_attempts.reset('private-owner')
@@ -192,6 +198,7 @@ def revoke(session_id: str, request: Request, session=Depends(require_session)):
     if not re.fullmatch('[a-f0-9]{64}', session_id):
         raise HTTPException(422, 'Sessão inválida.')
     auth_database(request).account.update_one({'_id': OWNER_ID}, {'$pull': {'sessions': {'id': session_id}}})
+    owner_cache.invalidate()
     return {'revoked': True}
 
 
@@ -203,4 +210,5 @@ def logout(request: Request, session=Depends(require_session)):
 @router.post('/logout-all')
 def logout_all(request: Request, session=Depends(require_session)):
     auth_database(request).account.update_one({'_id': OWNER_ID}, {'$inc': {'auth_version': 1}, '$set': {'sessions': []}})
+    owner_cache.invalidate()
     return {'revoked': True}

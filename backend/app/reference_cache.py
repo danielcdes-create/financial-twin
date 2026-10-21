@@ -4,6 +4,13 @@ from threading import Lock
 from time import monotonic
 
 
+def unwrap_database(scope):
+    """Unwrap _SessionDatabase wrappers without triggering PyMongo Database.__getattr__('db')."""
+    while type(scope).__name__ == "_SessionDatabase":
+        scope = scope.__dict__.get("db", scope)
+    return scope
+
+
 class ReferenceCache:
     def __init__(self, ttl_seconds=300, dependents=()):
         self.ttl_seconds = ttl_seconds
@@ -23,7 +30,7 @@ class ReferenceCache:
             dependent.invalidate()
 
     def get(self, scope, build):
-        raw_scope = getattr(scope, "db", scope)
+        raw_scope = unwrap_database(scope)
         key = id(raw_scope)
         while True:
             with self._lock:

@@ -10,6 +10,12 @@ Notificações separam aprovação/recusa/estorno do contexto da compra, comerci
 
 O backend permanece neste PC, conforme a escolha do usuário. PC, sessão Windows e Tailscale precisam estar ativos; suspensão ou desligamento interrompem o acesso. Não foram alteradas as preferências de bateria/suspensão, nem foi contratado um serviço externo.
 
+## Cache de leitura — 1.20.76
+
+`unwrap_database` tira o invólucro `_SessionDatabase` lendo o atributo `db` no dicionário da instância. O acesso anterior `getattr(db, "db", db)` fazia o PyMongo devolver uma coleção nova chamada `db` a cada chamada, e o cache de referência nunca reconhecia o mesmo banco. Com isso passam a valer `classification_cache`, `historical_context_cache`, `subcategory_catalog_cache` e `taxonomy_overrides_cache`.
+
+O `PATCH /v1/provisional/{provisional_id}` deixa de registrar o mesmo caminho duas vezes e reaproveita os perfis de conta já lidos na confirmação. A identidade do dono fica em `owner_cache` por 15 segundos, com cópia na saída e descarte imediato em login, logout, renovação de sessão e troca de conta ou senha. A projeção mensal pede `batchSize` 2000 em compromissos, parcelamentos e obrigações. A telemetria guarda a coleção pelo par conexão e pedido e nomeia o `getMore` pela coleção, em vez de `unknown` ou do identificador do cursor.
+
 ## Leituras — 1.20.75
 
 As leituras deixam de abrir uma transação Mongo só para consultar. `mongo_snapshot` devolve o banco já aberto. Num `Database` real o rótulo continua `snapshot`; num banco de teste continua `best_effort`. Não há `start_session` nem `commitTransaction` nesse caminho. As escritas seguem em `mongo_transaction`.

@@ -2,14 +2,17 @@ import sys
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from bson.decimal128 import Decimal128
+from pymongo.database import Database
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
-from app.atomic import mongo_snapshot, with_batch_size
-from app.main import CLASSIFICATION_FIELDS, _build_classification_options, dashboard, dashboard_overview, movements
-from app.reference_cache import classification_cache, historical_context_cache
+from app.atomic import _SessionDatabase, mongo_snapshot, with_batch_size
+from app.auth import OWNER_ID, owner, owner_cache
+from app.main import CLASSIFICATION_FIELDS, _build_classification_options, cached_taxonomy_overrides, dashboard, dashboard_overview, movements, taxonomy_overrides_cache
+from app.reference_cache import classification_cache, historical_context_cache, subcategory_catalog_cache, unwrap_database
 
 
 def dashboard_db(transactions, captures=(), commitments=(), accounts=()):
@@ -33,6 +36,9 @@ class PerformancePlanTests(unittest.TestCase):
     def setUp(self):
         classification_cache.invalidate()
         historical_context_cache.invalidate()
+        subcategory_catalog_cache.invalidate()
+        taxonomy_overrides_cache.invalidate()
+        owner_cache.invalidate()
 
     def test_dashboard_has_no_ten_thousand_record_cutoff(self):
         stamp = datetime(2026, 9, 1, tzinfo=timezone.utc)
@@ -105,6 +111,36 @@ class PerformancePlanTests(unittest.TestCase):
         returned = with_batch_size(cursor)
         self.assertIs(returned, cursor)
         self.assertEqual(cursor.applied_size, 2000)
+
+    def test_unwrap_database_preserves_pymongo_database_identity(self):
+        class FakeMongoDatabase(Database):
+            def __init__(self):
+                self.categories = MagicMock()
+                self.categories.find.return_value = [
+                    {"name": "Alimentação", "active": True, "subcategories": [{"name": "Padaria", "active": True}]}
+                ]
+                self.account = MagicMock()
+                self.account.find_one.return_value = {"_id": OWNER_ID, "kind": "app_identity", "auth_version": 1, "sessions": []}
+
+            def __getattr__(self, name):
+                # Emulate PyMongo Database.__getattr__ returning a new Collection object on .db access
+                return SimpleNamespace(collection_name=name)
+
+        raw_db = FakeMongoDatabase()
+        session_db = _SessionDatabase(raw_db, session=object())
+        self.assertIs(unwrap_database(raw_db), raw_db)
+        self.assertIs(unwrap_database(session_db), raw_db)
+
+        first = cached_taxonomy_overrides(raw_db)
+        second = cached_taxonomy_overrides(session_db)
+        self.assertEqual(first, second)
+        self.assertEqual(raw_db.categories.find.call_count, 1)
+
+        acc1 = owner(raw_db)
+        acc2 = owner(session_db)
+        self.assertEqual(acc1["_id"], OWNER_ID)
+        self.assertEqual(acc2["_id"], OWNER_ID)
+        self.assertEqual(raw_db.account.find_one.call_count, 1)
 
     def test_classification_options_uses_single_aggregation_per_collection(self):
         db = MagicMock()

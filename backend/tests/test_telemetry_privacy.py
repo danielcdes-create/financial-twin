@@ -2,10 +2,11 @@
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
 from app.dashboard_window import _merge_intervals
-from app.telemetry import RequestTrace, SpanTimer, _current_trace, public_route, safe_client_metadata
+from app.telemetry import MongoPerformanceListener, RequestTrace, SpanTimer, _current_trace, public_route, safe_client_metadata
 
 
 class TelemetryPrivacyTests(unittest.TestCase):
@@ -48,6 +49,30 @@ class TelemetryPrivacyTests(unittest.TestCase):
             _merge_intervals([('2026-01', '2026-02'), ('2026-04', '2026-05')]),
             [('2026-01', '2026-02'), ('2026-04', '2026-05')],
         )
+
+    def test_mongo_listener_tracks_getmore_collection_and_connection_id(self):
+        listener = MongoPerformanceListener()
+        trace = RequestTrace(trace_id='t2', method='GET', path='/v1/commitment-projection')
+        token = _current_trace.set(trace)
+        try:
+            listener.started(SimpleNamespace(
+                command_name='getMore',
+                command={'getMore': 160975888853370636, 'collection': 'obligations'},
+                request_id=42,
+                connection_id=('atlas-shard-0', 27017),
+            ))
+            listener.succeeded(SimpleNamespace(
+                command_name='getMore',
+                request_id=42,
+                connection_id=('atlas-shard-0', 27017),
+                duration_micros=531000,
+                reply={'cursor': {'nextBatch': [{}, {}]}},
+            ))
+        finally:
+            _current_trace.reset(token)
+        self.assertEqual(len(trace.db_commands), 1)
+        self.assertEqual(trace.db_commands[0].collection, 'obligations')
+        self.assertEqual(trace.db_commands[0].docs_returned, 2)
 
 
 if __name__ == '__main__':

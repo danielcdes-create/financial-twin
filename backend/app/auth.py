@@ -1,6 +1,7 @@
 """Authentication for one private ledger owner; financial accounts are unrelated."""
 import base64
 import contextvars
+import copy
 import hashlib
 import hmac
 import json
@@ -11,12 +12,14 @@ from threading import Lock, Thread
 from fastapi import Header, HTTPException, Request
 from pymongo.database import Database
 from app.config import get_settings
+from app.reference_cache import ReferenceCache, unwrap_database
 
 OWNER_ID = 'financial-twin-owner'
 SESSION_SECONDS = 12 * 60 * 60
 BIOMETRIC_SESSION_SECONDS = 30 * 24 * 60 * 60
 MAX_SESSIONS = 10
 PASSWORD_ITERATIONS = 600_000
+owner_cache = ReferenceCache(ttl_seconds=15)
 
 
 class LoginAttempts:
@@ -61,6 +64,13 @@ def auth_settings():
 
 
 def owner(db):
+    raw_db = unwrap_database(db)
+    if isinstance(raw_db, Database):
+        cached = owner_cache.get(
+            raw_db,
+            lambda: db.account.find_one({'_id': OWNER_ID, 'kind': 'app_identity'}),
+        )
+        return copy.deepcopy(cached) if isinstance(cached, dict) else cached
     return db.account.find_one({'_id': OWNER_ID, 'kind': 'app_identity'})
 
 
@@ -103,11 +113,14 @@ def create_session_token(identity: str, version: int, session_id: str, now: int 
 
 def _persist_sessions_in_background(db, query: dict, sessions_snapshot: list[dict]) -> None:
     """Persist session activity asynchronously in a clean context so GET routes never block on account.update."""
+    owner_cache.invalidate()
     def _worker():
         try:
             db.account.update_one(query, {'$set': {'sessions': sessions_snapshot}})
         except Exception:
             pass
+        finally:
+            owner_cache.invalidate()
 
     if isinstance(db, Database):
         ctx = contextvars.Context()
@@ -128,6 +141,7 @@ def session_response(db, account, label: str, ttl: int | None = None):
             {'$filter': {'input': {'$ifNull': ['$sessions', []]}, 'as': 'session',
                          'cond': {'$gt': ['$$session.expires_at', now]}}}, {'$literal': [item]}]}, -MAX_SESSIONS]}}}
     ])
+    owner_cache.invalidate()
     if result.matched_count != 1:
         raise HTTPException(401, 'A conta mudou. Entre novamente.')
     return {'access_token': create_session_token(OWNER_ID, account['auth_version'], identity, now, duration),
@@ -156,6 +170,8 @@ def renew_session_token(db, account, jti: str, ttl: int = BIOMETRIC_SESSION_SECO
             db.account.update_one(query, {'$set': {'sessions': account['sessions']}})
         except Exception:
             pass
+        finally:
+            owner_cache.invalidate()
     return {'access_token': create_session_token(OWNER_ID, account['auth_version'], jti, now, ttl),
             'token_type': 'bearer', 'expires_in': ttl, 'account': public_account(account)}
 

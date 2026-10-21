@@ -4,7 +4,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from app.atomic import mongo_snapshot
+from app.atomic import mongo_snapshot, with_batch_size
 from app.auth import require_session
 from app.commitments import commitment_cutoff, advance, linked_due_dates, schedule_from, historical_occurrence_conflicts
 from app.commitment_estimates import effective_commitments
@@ -65,7 +65,10 @@ def monthly_projection(db, months=None, as_of: date | None = None):
         (charges if destination is None else destination).append(entry)
 
     with mongo_snapshot(db) as (reading, consistency):
-        managed = effective_commitments(reading, reading.commitments.find({'status': 'ativo'}))
+        managed = effective_commitments(
+            reading,
+            with_batch_size(reading.commitments.find({'status': 'ativo'}), 2000),
+        )
         for item in managed:
             name = item['name']
             if historical_occurrence_conflicts(item):
@@ -94,7 +97,14 @@ def monthly_projection(db, months=None, as_of: date | None = None):
                         'account_id': item.get('account_id'), 'category_name': item.get('category'),
                     })
 
-        plans = attach_cards(reading, effective_documents(reading, 'installment', reading.installment_plans.find({'status': 'ativo'})))
+        plans = attach_cards(
+            reading,
+            effective_documents(
+                reading,
+                'installment',
+                with_batch_size(reading.installment_plans.find({'status': 'ativo'}), 2000),
+            ),
+        )
         plan_labels = {str(item['_id']): item.get('display_name') for item in plans if item.get('display_name')}
         plan_ids = {str(item['_id']) for item in plans}
         for item in plans:
@@ -112,8 +122,11 @@ def monthly_projection(db, months=None, as_of: date | None = None):
                     details={'source_type': 'installment_plan', 'occurrence_number': part.get('numero') or part.get('parcela_numero'),
                              'occurrence_total': total_parts, 'card_label': item.get('card_label')})
 
-        obligations = effective_documents(reading, 'obligation', reading.obligations.find({
-            'status': {'$in': list(OPEN_OBLIGATION_STATUSES)}}))
+        obligations = effective_documents(
+            reading,
+            'obligation',
+            with_batch_size(reading.obligations.find({'status': {'$in': list(OPEN_OBLIGATION_STATUSES)}}), 2000),
+        )
         for item in obligations:
             # An explicitly linked installment must not also enter as an obligation.
             if str(item.get('origem_id')) in plan_ids and item.get('tipo') != 'fatura_cartao':
