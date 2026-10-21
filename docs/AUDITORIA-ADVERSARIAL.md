@@ -1,6 +1,16 @@
 # Auditoria adversarial — 15/10/2026
 
-Julgamento da árvore local de `financial-app` a partir de `431aaf5`, com a correção de contagem dupla desta entrega, commit `cc7f562`. Dados sintéticos. O ledger ao vivo não foi lido, escrito, deduplicado nem reparado. O release privado no disco é Android 1.20.76 / versionCode 122, SHA-256 `5510F7F1D48F2064A7D2E9958E24809E4C25D6087B1B6E4A79204C34778806F8`, commit `f6b35e2`, com o certificado de debug anterior. A instalação física permanece unverified.
+Julgamento da árvore local de `financial-app` a partir de `431aaf5`, com a correção de contagem dupla desta entrega, commit `cc7f562`. Dados sintéticos. O ledger ao vivo não foi lido, escrito, deduplicado nem reparado. O release privado no disco é Android 1.20.77 / versionCode 123, SHA-256 `B11A12A91149FA8EBE713726A3E33B88492C0D169AE6BB86935E15CE337039EE`, commit `c9b6d64`, com o certificado de debug anterior. A instalação física permanece unverified.
+
+## Entrega 20/10/2026 — alias do vendedor
+
+Commit do recurso `3fd8862`, empacotado em `c9b6d64`. APK ARM64 de 48116960 bytes, SHA-256 `B11A12A91149FA8EBE713726A3E33B88492C0D169AE6BB86935E15CE337039EE`, assinante `FAC61745DC0903786FB9EDE62A962B399F7348F0BB6F899B8332667591033B9C`. O ledger ao vivo não foi lido nem escrito. Nesta passagem passaram `backend/tests/test_performance_plan.py` (8) e `backend/tests/test_auth.py` (14). A suíte completa do cliente e a homologação física não foram repetidas.
+
+| Correção | Veredito |
+| --- | --- |
+| Alias | A busca do vendedor traz o alias inteiro. Lista incompleta faz a gravação reler o fornecedor antes de acrescentar o nome. |
+| Conflito | Os códigos 24, 244 e 251 repetem o comando já gravado e respondem 409 com `X-Operation-Pending`. |
+| Cache na escrita | Taxonomia, subcategorias, contexto histórico e identidade do dono leem fora da sessão da transação. |
 
 ## Entrega 20/10/2026 — cache de leitura
 
