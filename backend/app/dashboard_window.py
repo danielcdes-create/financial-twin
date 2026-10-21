@@ -2,9 +2,11 @@
 from contextlib import nullcontext
 from datetime import datetime, timezone, timedelta
 import re
+from pymongo.database import Database
 from app.atomic import with_batch_size
 from app.financial_time import day_start, today, local_date
 from app.economic_period import economic_instant
+from app.reference_cache import dashboard_snapshot_cache, unwrap_database
 
 try:
     from app.telemetry import SpanTimer
@@ -68,14 +70,26 @@ def _row_matches_intervals(row, date_ranges, comp_ranges, normalized_datetime):
     return False
 
 
+def _load_raw_ledger_snapshot(db):
+    all_txs = list(with_batch_size(db.transactions.find({}, PROJECTION), 2000))
+    all_captures = list(with_batch_size(db.provisional_transactions.find({'status': 'confirmed'}, PROJECTION), 2000))
+    return all_txs, all_captures
+
+
 def snapshot_for(db, windows):
     from app.main import period_start, shift_months, normalized_datetime
 
     with SpanTimer("dashboard.snapshot_for", windows=len(windows)):
         # Load transactions and confirmed captures in a single batched query per collection
-        # (eliminates the 4 separate find_one roundtrips and getMore pagination overhead).
-        all_txs = list(with_batch_size(db.transactions.find({}, PROJECTION), 2000))
-        all_captures = list(with_batch_size(db.provisional_transactions.find({'status': 'confirmed'}, PROJECTION), 2000))
+        # and reuse the 30s process-local snapshot cache when reading from a MongoDB Database.
+        raw_db = unwrap_database(db)
+        if isinstance(raw_db, Database):
+            all_txs, all_captures = dashboard_snapshot_cache.get(
+                raw_db,
+                lambda: _load_raw_ledger_snapshot(raw_db),
+            )
+        else:
+            all_txs, all_captures = _load_raw_ledger_snapshot(db)
 
         latest_dt = max(
             (row['data_evento'] for row in all_txs if isinstance(row.get('data_evento'), datetime)),

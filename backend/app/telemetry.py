@@ -190,20 +190,42 @@ class MongoPerformanceListener(monitoring.CommandListener):
                 self._collections_by_req_id.pop(next(iter(self._collections_by_req_id)), None)
             self._collections_by_req_id[self._event_key(event)] = collection
 
+    @staticmethod
+    def _extract_reply_collection(reply: Any) -> str | None:
+        if not isinstance(reply, dict):
+            return None
+        cursor = reply.get("cursor")
+        if isinstance(cursor, dict):
+            ns = cursor.get("ns")
+            if isinstance(ns, str) and "." in ns:
+                return ns.split(".", 1)[1]
+        return None
+
+    def _pop_collection(self, event: Any, reply: Any = None) -> str:
+        key = self._event_key(event)
+        with self._lock:
+            if key in self._collections_by_req_id:
+                collection = self._collections_by_req_id.pop(key)
+            else:
+                collection = self._collections_by_req_id.pop((None, event.request_id), "unknown")
+        collection_from_ns = self._extract_reply_collection(reply)
+        if collection_from_ns and (
+            collection in {"unknown", "cursor", "session"}
+            or event.command_name in {"find", "aggregate", "getMore"}
+        ):
+            return collection_from_ns
+        return collection
+
     def succeeded(self, event: monitoring.CommandSucceededEvent) -> None:
         if event.command_name not in self._MONITORED_COMMANDS:
             return
-        with self._lock:
-            collection = self._collections_by_req_id.pop(
-                self._event_key(event),
-                self._collections_by_req_id.pop((None, event.request_id), "unknown"),
-            )
+        collection = self._pop_collection(event, getattr(event, "reply", None))
         trace = _current_trace.get()
         if trace is None:
             return
         duration_ms = round(event.duration_micros / 1000.0, 2)
         docs_returned = None
-        cursor = event.reply.get("cursor")
+        cursor = event.reply.get("cursor") if isinstance(event.reply, dict) else None
         if isinstance(cursor, dict):
             batch = cursor.get("firstBatch") or cursor.get("nextBatch")
             if isinstance(batch, list):
@@ -222,11 +244,7 @@ class MongoPerformanceListener(monitoring.CommandListener):
     def failed(self, event: monitoring.CommandFailedEvent) -> None:
         if event.command_name not in self._MONITORED_COMMANDS:
             return
-        with self._lock:
-            collection = self._collections_by_req_id.pop(
-                self._event_key(event),
-                self._collections_by_req_id.pop((None, event.request_id), "unknown"),
-            )
+        collection = self._pop_collection(event)
         trace = _current_trace.get()
         if trace is None:
             return

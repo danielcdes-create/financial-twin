@@ -10,6 +10,12 @@ Notificações separam aprovação/recusa/estorno do contexto da compra, comerci
 
 O backend permanece neste PC, conforme a escolha do usuário. PC, sessão Windows e Tailscale precisam estar ativos; suspensão ou desligamento interrompem o acesso. Não foram alteradas as preferências de bateria/suspensão, nem foi contratado um serviço externo.
 
+## Painel e revisão — 1.20.78
+
+O catálogo de subcategorias fica no cache mesmo quando a leitura já trouxe os lançamentos. Gravar uma captura só descarta a classificação se o vendedor, o alias, a plataforma ou a subcategoria realmente mudou. O painel descarta o retrato do extrato em qualquer escrita que altere lançamento, captura, compromisso, evento, transferência ou comando repetido.
+
+O retrato do extrato usado pelo painel dura 30 segundos. No mês e no ano correntes, a segunda montagem reaproveita a visão já calculada. Depois de salvar na Revisão, a lista troca o item na hora e a releitura da página não segura o aviso de processamento. A telemetria lê a coleção em `cursor.ns` e envia os tempos do servidor em campos próprios no evento de gravação.
+
 ## Confirmação de compra — 1.20.77
 
 A projeção do vendedor passa a trazer o alias inteiro, com `valor`, `normalizado`, `status` e `source_record_ids`. Antes, `aliases.normalizado` fazia o MongoDB devolver o alias sem os campos obrigatórios. Ao acrescentar um nome novo, a gravação reenviava essa lista incompleta, o validador recusava com código 121 e a Revisão mostrava “Operação indisponível; nenhuma gravação parcial deve ser considerada confirmada.” Se a lista recebida estiver incompleta, a função relê o fornecedor antes de gravar.

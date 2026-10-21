@@ -118,6 +118,7 @@ export function createApiClient(settings: Settings) {
             ...(response.ok ? {} : { error: `HTTP ${response.status}` }),
           });
         } else {
+          const serverTotal = serverMetrics?.total_ms ?? null;
           telemetry.record({
             category: 'data_mutation',
             name: `${(init.method || 'POST').toUpperCase()} ${path.split('?')[0]}`,
@@ -128,7 +129,19 @@ export function createApiClient(settings: Settings) {
               uploading,
               status_code: response.status,
               payload_bytes: text.length,
-              server: serverMetrics,
+              ...(serverMetrics
+                ? {
+                    ...serverMetrics,
+                    network_overhead_ms:
+                      serverTotal !== null
+                        ? Math.max(0, Math.round((durationMs - serverTotal) * 100) / 100)
+                        : null,
+                    server_total_ms: serverTotal,
+                    server_db_ms: serverMetrics.db_ms ?? null,
+                    server_app_ms: serverMetrics.app_ms ?? null,
+                    server_db_calls: serverMetrics.db_calls ?? null,
+                  }
+                : {}),
             },
           });
         }

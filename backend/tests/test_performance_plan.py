@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).parents[1]))
 from app.atomic import _SessionDatabase, mongo_snapshot, with_batch_size
 from app.auth import OWNER_ID, owner, owner_cache
 from app.main import CLASSIFICATION_FIELDS, _build_classification_options, cached_taxonomy_overrides, dashboard, dashboard_overview, movements, taxonomy_overrides_cache
-from app.reference_cache import classification_cache, historical_context_cache, subcategory_catalog_cache, unwrap_database
+from app.reference_cache import classification_cache, dashboard_snapshot_cache, historical_context_cache, subcategory_catalog_cache, unwrap_database
 
 
 def dashboard_db(transactions, captures=(), commitments=(), accounts=()):
@@ -37,6 +37,7 @@ class PerformancePlanTests(unittest.TestCase):
         classification_cache.invalidate()
         historical_context_cache.invalidate()
         subcategory_catalog_cache.invalidate()
+        dashboard_snapshot_cache.invalidate()
         taxonomy_overrides_cache.invalidate()
         owner_cache.invalidate()
 
@@ -305,6 +306,96 @@ class PerformancePlanTests(unittest.TestCase):
         stripped = {"_id": vendor_id, "nome_padrao": "Lanche Bem", "aliases": [{"normalizado": "LANCHE BEM"}]}
         _sync_merchant_alias(db, stripped, "CAPPTA LANCHE BEM 3", "Lanche Bem", True, "Cappta", None, stamp)
         self.assertEqual(len(merchant_doc["aliases"]), 3)
+
+
+
+    def test_category_subcategories_populates_cache_when_preloaded(self):
+        from app.taxonomy import category_subcategories
+
+        class FakeMongoDatabase(Database):
+            def __init__(self):
+                self.categories = MagicMock()
+                self.categories.find.return_value = [
+                    {"name": "Alimentação", "active": True, "subcategories": [{"name": "Padaria", "active": True}]}
+                ]
+                self.transactions = MagicMock()
+                self.transactions.find.return_value = []
+                self.provisional_transactions = MagicMock()
+                self.provisional_transactions.find.return_value = []
+
+            def __getattr__(self, name):
+                return SimpleNamespace(collection_name=name)
+
+        raw_db = FakeMongoDatabase()
+        preloaded_txs = [{"categoria": "Alimentação", "subcategoria": "Supermercado/Feira/Açougue"}]
+        first = category_subcategories(raw_db, preloaded_transactions=preloaded_txs, preloaded_captures=[])
+        second = category_subcategories(raw_db)
+        self.assertEqual(first, second)
+        self.assertEqual(raw_db.transactions.find.call_count, 0)
+        self.assertEqual(raw_db.provisional_transactions.find.call_count, 0)
+
+    def test_dashboard_snapshot_cache_and_month_view_deduplication(self):
+        from datetime import date
+
+        class FakeMongoDatabase(Database):
+            def __init__(self):
+                stamp = datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc)
+                self.transactions = MagicMock()
+                self.transactions.find.return_value = [
+                    {
+                        "_id": 1,
+                        "data_evento": stamp,
+                        "valor": Decimal128("-50.00"),
+                        "fluxo": "saida",
+                        "categoria": "Alimentação",
+                        "classification": {"migration_reason": "despesa_real"},
+                    }
+                ]
+                self.provisional_transactions = MagicMock()
+                self.provisional_transactions.find.return_value = []
+                self.provisional_transactions.count_documents.return_value = 0
+                self.review_queue = MagicMock()
+                self.review_queue.count_documents.return_value = 0
+                self.obligations = MagicMock()
+                self.obligations.find.return_value = []
+                self.installment_plans = MagicMock()
+                self.installment_plans.find.return_value = []
+                self.commitments = MagicMock()
+                self.commitments.find.return_value = []
+                self.accounts = MagicMock()
+                self.accounts.find.return_value = []
+                self.account_profiles = MagicMock()
+                self.account_profiles.find.return_value = []
+                self.future_schedule_overrides = MagicMock()
+                self.future_schedule_overrides.find.return_value = []
+                self.investments = MagicMock()
+                self.investments.count_documents.return_value = 0
+                self.source_records = MagicMock()
+                self.source_records.find_one.return_value = None
+
+            def __getattr__(self, name):
+                return SimpleNamespace(collection_name=name)
+
+        raw_db = FakeMongoDatabase()
+        res1 = dashboard_overview(
+            period="month",
+            year_start=date(2026, 1, 1),
+            month_start=date(2026, 10, 1),
+            month_end=date(2026, 10, 21),
+            db=raw_db,
+        )
+        res2 = dashboard_overview(
+            period="month",
+            year_start=date(2026, 1, 1),
+            month_start=date(2026, 10, 1),
+            month_end=date(2026, 10, 21),
+            db=raw_db,
+        )
+        self.assertEqual(raw_db.transactions.find.call_count, 1)
+        self.assertEqual(raw_db.provisional_transactions.find.call_count, 1)
+        self.assertEqual(res1["month"]["period_end"], "2026-10-21")
+        self.assertEqual(res1["month"]["expenses"], 50.0)
+        self.assertEqual(res2["month"]["expenses"], 50.0)
 
 
 if __name__ == "__main__":

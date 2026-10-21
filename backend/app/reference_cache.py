@@ -35,9 +35,13 @@ class ReferenceCache:
         while True:
             with self._lock:
                 generation = self._generation
+                now = monotonic()
                 cached = self._values.get(key)
-                if cached and cached[0] is raw_scope and cached[1] > monotonic():
+                if cached and cached[0] is raw_scope and cached[1] > now:
                     return cached[2]
+                catalog_cached = self._values.get("catalog") if not isinstance(scope, str) else None
+                if catalog_cached and catalog_cached[1] > now:
+                    return catalog_cached[2]
                 future = self._pending.get((key, generation))
                 owner = future is None
                 if owner:
@@ -62,10 +66,20 @@ class ReferenceCache:
                 if generation == self._generation:
                     return value
 
+    def set(self, scope, value):
+        raw_scope = unwrap_database(scope)
+        key = scope if isinstance(scope, str) else id(raw_scope)
+        with self._lock:
+            if len(self._values) >= 16 and key not in self._values:
+                self._values.pop(next(iter(self._values)))
+            self._values[key] = (raw_scope, monotonic() + self.ttl_seconds, value)
+        return value
+
 
 historical_context_cache = ReferenceCache(ttl_seconds=120)
 subcategory_catalog_cache = ReferenceCache(ttl_seconds=300)
+dashboard_snapshot_cache = ReferenceCache(ttl_seconds=30)
 classification_cache = ReferenceCache(
     ttl_seconds=300,
-    dependents=(historical_context_cache, subcategory_catalog_cache),
+    dependents=(historical_context_cache, subcategory_catalog_cache, dashboard_snapshot_cache),
 )

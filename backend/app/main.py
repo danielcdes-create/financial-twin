@@ -35,7 +35,7 @@ from app.category_filter import ACTIVE_CAPTURES, catalog_category_names, categor
 from app.movement_filters import period_query, intersect, search_query, filter_key as movement_filter_key
 from app.document_validation import validate_document_extraction
 from app.pdf_input import PDFPasswordError, read_pdf
-from app.reference_cache import ReferenceCache, classification_cache, unwrap_database
+from app.reference_cache import ReferenceCache, classification_cache, dashboard_snapshot_cache, unwrap_database
 from contextlib import nullcontext
 try:
     from app.telemetry import install_telemetry, SpanTimer
@@ -231,17 +231,32 @@ async def private_response_headers(request: Request, call_next):
 @app.middleware("http")
 async def invalidate_reference_data(request: Request, call_next):
     path = request.url.path
-    mutates = (
+    is_write = (
         request.method in {"POST", "PUT", "PATCH", "DELETE"}
         and path != "/v1/capture-batches/file-status"
         and not path.startswith("/v1/telemetry")
         and not path.endswith(("/preview", "/review"))
-        and path.startswith(("/v1/commitment-profile", "/v1/capture-batches", "/v1/movements", "/v1/transactions", "/v1/categories", "/v1/subcategories", "/v1/provisional", "/v1/merchants", "/v1/reviews", "/v1/import", "/v1/documents"))
     )
+    mutates_dashboard = is_write and path.startswith((
+        "/v1/commitment-profile", "/v1/capture-batches", "/v1/movements",
+        "/v1/transactions", "/v1/categories", "/v1/subcategories",
+        "/v1/provisional", "/v1/merchants", "/v1/reviews",
+        "/v1/import", "/v1/documents", "/v1/events",
+        "/v1/commitments", "/v1/future-commitments", "/v1/transfers",
+        "/v1/batch-commands",
+    ))
+    mutates_classification = is_write and path.startswith((
+        "/v1/commitment-profile", "/v1/capture-batches", "/v1/movements",
+        "/v1/transactions", "/v1/categories", "/v1/subcategories",
+        "/v1/merchants", "/v1/reviews", "/v1/import", "/v1/documents",
+    ))
     try:
         return await call_next(request)
     finally:
-        if mutates: classification_cache.invalidate()
+        if mutates_dashboard:
+            dashboard_snapshot_cache.invalidate()
+        if mutates_classification:
+            classification_cache.invalidate()
 from app.release_manifest import verified_release
 # Compatibility symbols: the API uses the verified APK manifest, never these values.
 ANDROID_VERSION_NAME=None
@@ -780,8 +795,14 @@ def dashboard_overview(period:Literal["month","3m","6m","12m","year","all"]="mon
         snapshot=snapshot_for(reading,[(period,None,None),("year",year_begin,end),("month",month_begin,end)]) if isinstance(reading,(Database,_SessionDatabase)) else (list(with_batch_size(reading.transactions.find({},PROJECTION), 2000).limit(0)),list(with_batch_size(reading.provisional_transactions.find({'status':'confirmed'},PROJECTION), 2000)))
         forecast=dashboard_forecast(reading, snapshot=snapshot)
         selected_view=_dashboard(period,None,None,reading,snapshot,forecast)
-        year_view=selected_view if period=="year" and selected_view.get("period_start")==year_begin.isoformat() and selected_view.get("period_end")==end.isoformat() else _dashboard("year",year_begin,end,reading,snapshot,forecast)
-        month_view=selected_view if period=="month" and selected_view.get("period_start")==month_begin.isoformat() and selected_view.get("period_end")==end.isoformat() else _dashboard("month",month_begin,end,reading,snapshot,forecast)
+        if period=="year" and selected_view.get("period_start")==year_begin.isoformat() and (selected_view.get("period_end") or "")<=end.isoformat():
+            year_view=selected_view if selected_view.get("period_end")==end.isoformat() else {**selected_view,"period_end":end.isoformat()}
+        else:
+            year_view=_dashboard("year",year_begin,end,reading,snapshot,forecast)
+        if period=="month" and selected_view.get("period_start")==month_begin.isoformat() and (selected_view.get("period_end") or "")<=end.isoformat():
+            month_view=selected_view if selected_view.get("period_end")==end.isoformat() else {**selected_view,"period_end":end.isoformat()}
+        else:
+            month_view=_dashboard("month",month_begin,end,reading,snapshot,forecast)
         result={
             "selected":selected_view,
             "year":year_view,
@@ -1848,6 +1869,11 @@ def _atomic_update_provisional(provisional_id:str, update:ProvisionalUpdate, db=
     previous_display=with_merchant_name(item,db,include_historical=False,merchants_by_id=merchants_by_id)
     previous_vendor=previous_display.get("vendedor")
     previous_platform=previous_display.get("plataforma") if platform_name is not None else None
+    taxonomy_mutated=False
+    if "subcategoria" in values and values["subcategoria"]:
+        known_subcats=set(category_subcategories(db).get(effective_category, []))
+        if values["subcategoria"] not in known_subcats:
+            taxonomy_mutated=True
     if supplier and supplier!=previous_vendor:
         raw_source=item.get("merchant_raw")
         platform_active=bool(platform_name or item.get("platform_id") or platform_identity(raw_source))
@@ -1859,6 +1885,7 @@ def _atomic_update_provisional(provisional_id:str, update:ProvisionalUpdate, db=
             merchant={"_id":ObjectId(),"external_key":f"merchant-user-{uuid4()}","schema_version":2,"created_at":now,"updated_at":now,"tipo_entidade":"marca","nome_padrao":supplier,"aliases":[{"valor":raw,"normalizado":normalized,"status":"confirmado","source_record_ids":[]}]}
             db.merchants.insert_one(merchant)
         _sync_merchant_alias(db,merchant,raw_source,supplier,platform_active,platform_name,item.get("merchant_id"),now)
+        taxonomy_mutated=True
         merchants_by_id[merchant["_id"]]=merchant
         merchants_by_id[str(merchant["_id"])]=merchant
         changed.update({"merchant_id":merchant["_id"],"merchant_name":merchant["nome_padrao"]})
@@ -1867,7 +1894,9 @@ def _atomic_update_provisional(provisional_id:str, update:ProvisionalUpdate, db=
         platform=find_or_create_platform(db,platform_name,now)
         merchants_by_id[platform["_id"]]=platform
         merchants_by_id[str(platform["_id"])]=platform
-        if item.get("platform_id")!=platform["_id"]: changed["platform_id"]=platform["_id"]
+        if item.get("platform_id")!=platform["_id"]:
+            changed["platform_id"]=platform["_id"]
+            taxonomy_mutated=True
         if previous_vendor and not supplier and canonical_key(previous_vendor)==canonical_key(platform["nome_padrao"]): clear_supplier=True
         if "platform_id" in changed: before["plataforma"]=previous_platform
     unset_values={}
@@ -1911,6 +1940,9 @@ def _atomic_update_provisional(provisional_id:str, update:ProvisionalUpdate, db=
     changed["revision"]=item.get("revision",1)+1
     db.provisional_transactions.update_one({"_id":item["_id"]},{"$set":changed,**({"$unset":unset_values} if unset_values else {})})
     db.audit_log.insert_one({"event":"provisional_transaction_updated","provisional_id":provisional_id,"source":"mobile_manual_review","before":before,"after":{**json_safe(changed),**{key:None for key in unset_values if key not in {'merchant_id','merchant_name','platform_id'}},**({'plataforma':None} if 'platform_id' in unset_values else {}),**({"vendedor":None} if 'merchant_id' in unset_values or 'merchant_name' in unset_values else {"vendedor":supplier} if supplier and "merchant_id" in changed else {})},"change_reason":"user_review","created_at":now})
+    if taxonomy_mutated:
+        classification_cache.invalidate()
+    dashboard_snapshot_cache.invalidate()
     updated_doc={k:v for k,v in {**item,**changed}.items() if k not in unset_values}
     return {"item":with_merchant_name(updated_doc,db,include_historical=(update.action is None),merchants_by_id=merchants_by_id),"changed":True,"_raw_item":updated_doc,"_merchants_by_id":merchants_by_id,"_profiles":profiles_cache}
 

@@ -555,12 +555,17 @@ def category_subcategories(
         and isinstance(raw_db, Database)
     ):
         return subcategory_catalog_cache.get(raw_db, lambda: _compute_category_subcategories(raw_db))
-    return _compute_category_subcategories(
+    result = _compute_category_subcategories(
         db,
         all_categories=all_categories,
         preloaded_transactions=preloaded_transactions,
         preloaded_captures=preloaded_captures,
     )
+    if all_categories is None:
+        subcategory_catalog_cache.set("catalog", result)
+        if isinstance(raw_db, Database):
+            subcategory_catalog_cache.set(raw_db, result)
+    return result
 
 
 def _read_pair(document: dict[str, Any], target: dict[str, Any]) -> tuple[Any, Any, list[str]]:

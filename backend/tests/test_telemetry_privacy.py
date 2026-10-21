@@ -75,5 +75,37 @@ class TelemetryPrivacyTests(unittest.TestCase):
         self.assertEqual(trace.db_commands[0].docs_returned, 2)
 
 
+
+    def test_mongo_listener_extracts_cursor_ns_and_does_not_eager_pop(self):
+        listener = MongoPerformanceListener()
+        listener.started(SimpleNamespace(
+            command_name='find',
+            command={'find': 'accounts'},
+            connection_id=None,
+            request_id=99,
+        ))
+        listener.started(SimpleNamespace(
+            command_name='find',
+            command={'find': 'wrong_collection'},
+            connection_id=('127.0.0.1', 27017),
+            request_id=99,
+        ))
+        trace = RequestTrace(trace_id='t2', method='GET', path='/v1/dashboard/overview')
+        token = _current_trace.set(trace)
+        try:
+            listener.succeeded(SimpleNamespace(
+                command_name='find',
+                connection_id=('127.0.0.1', 27017),
+                request_id=99,
+                duration_micros=156000,
+                reply={'cursor': {'firstBatch': [{'_id': 1}], 'ns': 'financial_twin.transactions'}},
+            ))
+        finally:
+            _current_trace.reset(token)
+        self.assertEqual(len(trace.db_commands), 1)
+        self.assertEqual(trace.db_commands[0].collection, 'transactions')
+        self.assertEqual(listener._collections_by_req_id.get((None, 99)), 'accounts')
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -211,15 +211,16 @@ export default function ProvisionalReview({api,money,onUpdated,initialItem,initi
     if(!pending&&[409,428].includes(error.status))setNeedsCurrent(true);
     Alert.alert(title,`${error.message}\n\nA tentativa e seus campos permanecem salvos.`);
   };
-  const finishConfirmed=async(provisionalId:string,confirmed:boolean,valid:()=>boolean,removedFromActive=confirmed)=>{
+  const finishConfirmed=async(provisionalId:string,confirmed:boolean,valid:()=>boolean,removedFromActive=confirmed,updatedItem?:any)=>{
     setCommandPending(false);setConflict(null);
     let notice='';
     try{await forgetDraft(provisionalId)}catch{notice=' O rascunho foi preservado porque a limpeza local não terminou.'}
     if(!valid())return;setResumable(current=>current?.provisional_id===provisionalId?null:current);setHasDraft(false);setSelected(null);
     if(removedFromActive){setItems(current=>current.filter(row=>row.provisional_id!==provisionalId));setPage(current=>({...current,total:Math.max(0,current.total-1)}));}
+    else if(updatedItem){setItems(current=>current.map(row=>row.provisional_id===provisionalId?{...row,...updatedItem}:row));}
     Alert.alert(confirmed?'Captura confirmada':'Captura atualizada',(confirmed?'A movimentação foi confirmada e entrou nos totais financeiros.':'As correções foram salvas.')+notice);
     void Promise.resolve().then(onUpdated).catch(()=>{if(valid())Alert.alert('Captura salva','A gravação foi confirmada. Atualize a tela para conferir os dados atuais.');});
-    if(initialItem)onExit?.();else await load(true);
+    if(initialItem)onExit?.();else void load(true);
   };
   const save=async(confirm=false)=>{
     if(running.current||!selected?.provisional_id||conflict||needsCurrent)return;
@@ -232,8 +233,8 @@ export default function ProvisionalReview({api,money,onUpdated,initialItem,initi
     running.current=true;setSaving(true);const valid=captureScope();
     try{
       await draftWrites.current;
-      await runReviewCommand(db,api,provisionalId,`/v1/provisional/${provisionalId}`,{...parsed,...(confirm?{action:'confirm'}:{}),...(reviewRecord?{validate_review:(draft.status_revisao||selected.status_revisao)==='validado'}:{}),expected_revision:selected.revision||1});
-      if(valid())await finishConfirmed(provisionalId,confirm,valid);
+      const saved=await runReviewCommand(db,api,provisionalId,`/v1/provisional/${provisionalId}`,{...parsed,...(confirm?{action:'confirm'}:{}),...(reviewRecord?{validate_review:(draft.status_revisao||selected.status_revisao)==='validado'}:{}),expected_revision:selected.revision||1});
+      if(valid())await finishConfirmed(provisionalId,confirm,valid,confirm,saved?.item);
     }catch(error:any){if(valid())await failedCommand(error,provisionalId,valid,'Não foi possível salvar')}
     finally{running.current=false;if(valid())setSaving(false)}
   };
@@ -243,13 +244,14 @@ export default function ProvisionalReview({api,money,onUpdated,initialItem,initi
     try{
       await draftWrites.current;if(selected?.provisional_id===id)await preserveConflictingDraft(db,'provisional',provisionalId,{item:selected,draft});
       const saved=await runReviewCommand(db,api,provisionalId);
-      if(valid())await finishConfirmed(provisionalId,saved.item?.status==='confirmed'||saved.action==='confirm',valid);
+      const isConfirmed=saved.item?.status==='confirmed'||saved.action==='confirm';
+      if(valid())await finishConfirmed(provisionalId,isConfirmed,valid,isConfirmed,saved?.item);
     }catch(error:any){if(valid())await failedCommand(error,provisionalId,valid,'Tentativa preservada')}finally{running.current=false;if(valid())setSaving(false)}
   };
   const reparse=async()=>{
     if(running.current||!selected?.provisional_id||conflict||needsCurrent)return;
     running.current=true;const provisionalId=selected.provisional_id;setSaving(true);const valid=captureScope();
-    try{await runReviewCommand(db,api,provisionalId,`/v1/provisional/${provisionalId}/reparse`,{expected_revision:selected.revision||1});if(valid())await finishConfirmed(provisionalId,false,valid);}
+    try{const saved=await runReviewCommand(db,api,provisionalId,`/v1/provisional/${provisionalId}/reparse`,{expected_revision:selected.revision||1});if(valid())await finishConfirmed(provisionalId,false,valid,false,saved?.item);}
     catch(error:any){if(valid())await failedCommand(error,provisionalId,valid,'Não foi possível reler')}
     finally{running.current=false;if(valid())setSaving(false)}
   };
