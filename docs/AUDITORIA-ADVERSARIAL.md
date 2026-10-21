@@ -1,6 +1,18 @@
 # Auditoria adversarial — 15/10/2026
 
-Julgamento da árvore local de `financial-app` a partir de `431aaf5`, com a correção de contagem dupla desta entrega, commit `cc7f562`. Dados sintéticos. O ledger ao vivo não foi lido, escrito, deduplicado nem reparado. O release privado no disco é Android 1.20.75 / versionCode 121, SHA-256 `4649AB9546727392941366A510E36C3C72D80599553059339966A71C401B4FF4`, commit `76bde2f`, com o certificado de debug anterior. A instalação física permanece unverified.
+Julgamento da árvore local de `financial-app` a partir de `431aaf5`, com a correção de contagem dupla desta entrega, commit `cc7f562`. Dados sintéticos. O ledger ao vivo não foi lido, escrito, deduplicado nem reparado. O release privado no disco é Android 1.20.76 / versionCode 122, SHA-256 `5510F7F1D48F2064A7D2E9958E24809E4C25D6087B1B6E4A79204C34778806F8`, commit `f6b35e2`, com o certificado de debug anterior. A instalação física permanece unverified.
+
+## Entrega 20/10/2026 — cache de leitura
+
+Commit do recurso `2f5b828`, empacotado em `f6b35e2`. APK ARM64 de 48116972 bytes, SHA-256 `5510F7F1D48F2064A7D2E9958E24809E4C25D6087B1B6E4A79204C34778806F8`, assinante `FAC61745DC0903786FB9EDE62A962B399F7348F0BB6F899B8332667591033B9C`. O ledger ao vivo não foi lido nem escrito. Nesta passagem passaram `backend/tests/test_performance_plan.py` (7), `backend/tests/test_telemetry_privacy.py` (5) e `backend/tests/test_auth.py` (14). A suíte completa do cliente e a homologação física não foram repetidas.
+
+| Correção | Veredito |
+| --- | --- |
+| Cache de referência | `unwrap_database` lê o banco no dicionário da instância. Os caches de classificação, contexto histórico, subcategorias e taxonomia passam a reconhecer o mesmo `Database`. |
+| Captura | O `PATCH` de provisório não registra o caminho duas vezes e reaproveita os perfis já lidos. |
+| Sessão | A identidade do dono fica em cache por 15 segundos e sai invalidada em login, logout, renovação e troca de conta ou senha. |
+| Projeção | Compromissos, parcelamentos e obrigações pedem `batchSize` 2000. |
+| Telemetria | A coleção fica ligada ao par conexão e pedido. O `getMore` usa o nome da coleção. |
 
 ## Entrega 20/10/2026 — leituras sem transação de consulta
 
