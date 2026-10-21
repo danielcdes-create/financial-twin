@@ -10,6 +10,12 @@ Notificações separam aprovação/recusa/estorno do contexto da compra, comerci
 
 O backend permanece neste PC, conforme a escolha do usuário. PC, sessão Windows e Tailscale precisam estar ativos; suspensão ou desligamento interrompem o acesso. Não foram alteradas as preferências de bateria/suspensão, nem foi contratado um serviço externo.
 
+## Confirmação de compra — 1.20.77
+
+A projeção do vendedor passa a trazer o alias inteiro, com `valor`, `normalizado`, `status` e `source_record_ids`. Antes, `aliases.normalizado` fazia o MongoDB devolver o alias sem os campos obrigatórios. Ao acrescentar um nome novo, a gravação reenviava essa lista incompleta, o validador recusava com código 121 e a Revisão mostrava “Operação indisponível; nenhuma gravação parcial deve ser considerada confirmada.” Se a lista recebida estiver incompleta, a função relê o fornecedor antes de gravar.
+
+O tempo esgotado de trava (código 24) e os abortos de transação 244 e 251 entram no mesmo caminho de repetição do comando já gravado. A montagem do cache de taxonomia, subcategorias, contexto histórico e identidade do dono lê o banco fora da sessão da escrita.
+
 ## Cache de leitura — 1.20.76
 
 `unwrap_database` tira o invólucro `_SessionDatabase` lendo o atributo `db` no dicionário da instância. O acesso anterior `getattr(db, "db", db)` fazia o PyMongo devolver uma coleção nova chamada `db` a cada chamada, e o cache de referência nunca reconhecia o mesmo banco. Com isso passam a valer `classification_cache`, `historical_context_cache`, `subcategory_catalog_cache` e `taxonomy_overrides_cache`.

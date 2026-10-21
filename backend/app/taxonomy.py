@@ -554,7 +554,7 @@ def category_subcategories(
         and preloaded_captures is None
         and isinstance(raw_db, Database)
     ):
-        return subcategory_catalog_cache.get(raw_db, lambda: _compute_category_subcategories(db))
+        return subcategory_catalog_cache.get(raw_db, lambda: _compute_category_subcategories(raw_db))
     return _compute_category_subcategories(
         db,
         all_categories=all_categories,

@@ -51,7 +51,7 @@ classification_cache._dependents.append(taxonomy_overrides_cache)
 def cached_taxonomy_overrides(db):
     raw_db = unwrap_database(db)
     if isinstance(raw_db, Database):
-        return taxonomy_overrides_cache.get(raw_db, lambda: taxonomy_overrides(db))
+        return taxonomy_overrides_cache.get(raw_db, lambda: taxonomy_overrides(raw_db))
     return taxonomy_overrides(db)
 from app.upload_worker import persisted_event, run_upload
 from app.operation_identity import bind_upload, complete_upload
@@ -208,7 +208,7 @@ def atomic_unavailable(_request, exc):
     return JSONResponse(status_code=503,content={"detail":str(exc)})
 @app.exception_handler(OperationFailure)
 def mongo_write_conflict(_request, exc):
-    if exc.code in {112,244,251} or exc.has_error_label('TransientTransactionError'):
+    if exc.code in {24,112,244,251} or exc.has_error_label('TransientTransactionError'):
         return JSONResponse(status_code=409,content={"detail":"Conflito concorrente. Recarregue e repita com o mesmo identificador."})
     logging.error("Mongo operation failed, code=%s",exc.code)
     message = str((exc.details or {}).get('errmsg', exc)).lower()
@@ -283,18 +283,27 @@ def _attach_historical_capture_defaults(document:dict[str,Any], result:dict[str,
 
 def _sync_merchant_alias(db, merchant:dict[str,Any], raw_source:str|None, supplier_name:str, platform_active:bool, platform_name:str|None, previous_merchant_id, now:datetime):
     use_raw=bool(raw_source) and (not platform_active or has_vendor_tokens_beyond_platform(raw_source,platform_name))
-    raw=(raw_source if use_raw else supplier_name) or supplier_name
-    normalized=re.sub(r"\s+"," ",re.sub(r"[^A-Z0-9 ]"," ",str(raw).upper())).strip()
-    if not normalized: return
+    raw=str((raw_source if use_raw else supplier_name) or supplier_name or "").strip()
+    normalized=re.sub(r"\s+"," ",re.sub(r"[^A-Z0-9 ]"," ",raw.upper())).strip()
+    if not raw or not normalized: return
     if previous_merchant_id and previous_merchant_id!=merchant.get("_id"):
         prev_doc=db.merchants.find_one({"_id":previous_merchant_id})
         if prev_doc and isinstance(prev_doc.get("aliases"),list):
             filtered=[a for a in prev_doc["aliases"] if a.get("normalizado")!=normalized]
             if len(filtered)!=len(prev_doc["aliases"]):
                 db.merchants.update_one({"_id":previous_merchant_id},{"$set":{"aliases":filtered,"updated_at":now}})
-    existing_doc=merchant if "aliases" in merchant else (db.merchants.find_one({"_id":merchant["_id"]}) or merchant)
-    aliases=list(existing_doc.get("aliases") or [])
-    if not any(a.get("normalizado")==normalized for a in aliases):
+    raw_aliases=merchant.get("aliases")
+    has_complete_aliases=isinstance(raw_aliases,list) and all(
+        isinstance(a,dict) and "valor" in a and "normalizado" in a and "status" in a
+        for a in raw_aliases
+    )
+    existing_doc=merchant if has_complete_aliases else (db.merchants.find_one({"_id":merchant["_id"]}) or merchant)
+    aliases=[
+        dict(a)
+        for a in list(existing_doc.get("aliases") or [])
+        if isinstance(a,dict) and "valor" in a and "normalizado" in a and "status" in a
+    ]
+    if not any(a.get("normalizado")==normalized or a.get("valor")==raw for a in aliases):
         aliases.append({"valor":raw,"normalizado":normalized,"status":"confirmado","source_record_ids":[]})
         merchant["aliases"]=aliases
         db.merchants.update_one({"_id":merchant["_id"]},{"$set":{"aliases":aliases,"updated_at":now}})
@@ -455,10 +464,10 @@ def canonical_distinct(db, field:str, value:str)->str:
     return next((str(item) for item in db.transactions.distinct(field) if item and canonical_key(str(item))==key),value)
 
 def find_canonical_merchant(db, value:str):
-    exact=db.merchants.find_one({"nome_padrao":value.strip()},{"nome_padrao":1,"aliases.normalizado":1}) if value and value.strip() else None
+    exact=db.merchants.find_one({"nome_padrao":value.strip()},{"nome_padrao":1,"aliases":1}) if value and value.strip() else None
     if exact: return exact
     key=canonical_key(value)
-    for merchant in db.merchants.find({"nome_padrao":{"$nin":[None,""]}},{"nome_padrao":1,"aliases.normalizado":1}):
+    for merchant in with_batch_size(db.merchants.find({"nome_padrao":{"$nin":[None,""]}},{"nome_padrao":1,"aliases":1}), 2000):
         if canonical_key(str(merchant.get("nome_padrao","")))==key: return merchant
         if any(canonical_key(str(alias.get("valor") or alias.get("normalizado") or ""))==key for alias in merchant.get("aliases",[])): return merchant
     return None

@@ -68,7 +68,7 @@ def owner(db):
     if isinstance(raw_db, Database):
         cached = owner_cache.get(
             raw_db,
-            lambda: db.account.find_one({'_id': OWNER_ID, 'kind': 'app_identity'}),
+            lambda: raw_db.account.find_one({'_id': OWNER_ID, 'kind': 'app_identity'}),
         )
         return copy.deepcopy(cached) if isinstance(cached, dict) else cached
     return db.account.find_one({'_id': OWNER_ID, 'kind': 'app_identity'})

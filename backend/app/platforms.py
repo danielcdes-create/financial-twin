@@ -317,7 +317,7 @@ def _historical_context(
     if catalog_cache is None and isinstance(raw_db, Database):
         ctx = historical_context_cache.get(
             raw_db,
-            lambda: _build_historical_context(db, allowed_subcats=allowed_subcats, profiles=profiles),
+            lambda: _build_historical_context(raw_db, allowed_subcats=allowed_subcats, profiles=profiles),
         )
         if allowed_subcats is not None and ctx.get("allowed_subcats") != allowed_subcats:
             return {**ctx, "allowed_subcats": allowed_subcats}

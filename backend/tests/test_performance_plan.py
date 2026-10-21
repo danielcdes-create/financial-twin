@@ -195,6 +195,117 @@ class PerformancePlanTests(unittest.TestCase):
         self.assertEqual(len(ids), len(set(ids)))
         self.assertFalse(second["has_more"])
 
+    def test_provisional_review_syncs_new_alias_on_existing_merchant_without_validation_error(self):
+        from uuid import uuid4
+        from bson import ObjectId
+        from pymongo.errors import WriteError
+        from app.main import ProvisionalUpdate, _sync_merchant_alias, update_provisional
+        from test_ingestion import Collection, Cursor, FakeDB
+
+        def apply_projection(doc, projection):
+            if not projection or doc is None:
+                return doc
+            out = {"_id": doc["_id"]} if "_id" in doc and projection.get("_id", 1) != 0 else {}
+            for key, val in projection.items():
+                if not val or key == "_id":
+                    continue
+                if "." in key:
+                    top, sub = key.split(".", 1)
+                    if isinstance(doc.get(top), list):
+                        out[top] = [{sub: item[sub]} if isinstance(item, dict) and sub in item else {} for item in doc[top]]
+                elif key in doc:
+                    out[key] = [dict(x) if isinstance(x, dict) else x for x in doc[key]] if isinstance(doc[key], list) else doc[key]
+            return out
+
+        class ValidatedMerchantCollection(Collection):
+            def find_one(self, query, projection=None):
+                doc = super().find_one(query)
+                return apply_projection(doc, projection) if projection and doc is not None else doc
+
+            def find(self, query, projection=None):
+                if "nome_padrao" in query and "$nin" in query["nome_padrao"]:
+                    matched = [doc for doc in self.docs if doc.get("nome_padrao") not in query["nome_padrao"]["$nin"]]
+                else:
+                    matched = [doc for doc in self.docs if self._matches(doc, query)]
+                return Cursor(apply_projection(doc, projection) if projection else doc for doc in matched)
+
+            def update_one(self, query, update):
+                set_fields = (update or {}).get("$set", {})
+                if "aliases" in set_fields:
+                    for alias in set_fields["aliases"]:
+                        if not isinstance(alias, dict) or not all(k in alias for k in ("valor", "normalizado", "status", "source_record_ids")):
+                            raise WriteError("Document failed validation: alias missing required schema fields", 121)
+                return super().update_one(query, update)
+
+        stamp = datetime(2026, 10, 20, 21, 21, 40, tzinfo=timezone.utc)
+        vendor_id = ObjectId()
+        platform_id = ObjectId()
+        db = FakeDB(
+            merchants=ValidatedMerchantCollection([
+                {
+                    "_id": vendor_id,
+                    "external_key": "merchant-lanche-bem",
+                    "schema_version": 2,
+                    "tipo_entidade": "marca",
+                    "nome_padrao": "Lanche Bem",
+                    "aliases": [{"valor": "LANCHE BEM", "normalizado": "LANCHE BEM", "status": "confirmado", "source_record_ids": []}],
+                },
+                {
+                    "_id": platform_id,
+                    "external_key": "merchant-cappta",
+                    "schema_version": 2,
+                    "tipo_entidade": "marca",
+                    "nome_padrao": "Cappta",
+                    "aliases": [],
+                },
+            ]),
+            provisional_transactions=Collection([
+                {
+                    "_id": ObjectId(),
+                    "provisional_id": "prov-review-1",
+                    "event_id": "ev-review-1",
+                    "status": "provisional",
+                    "revision": 1,
+                    "merchant_raw": "CAPPTA LANCHE BEM FILIAL 2",
+                    "valor": Decimal128("-35.90"),
+                    "fluxo": "saida",
+                    "tipo": "compra",
+                    "natureza": "COMPRA",
+                    "categoria_sugerida": "Alimentação",
+                    "subcategoria": "Padaria",
+                    "metodo_pagamento": "cartao_credito",
+                    "data_evento": stamp,
+                },
+            ]),
+            raw_events=Collection([{"_id": ObjectId(), "event_id": "ev-review-1", "processing_status": "provisional"}]),
+        )
+        req_id = uuid4()
+        res = update_provisional(
+            "prov-review-1",
+            ProvisionalUpdate(
+                request_id=req_id,
+                expected_revision=1,
+                vendedor="Lanche Bem",
+                plataforma="Cappta",
+                metodo_pagamento="cartao_credito",
+                fluxo="saida",
+                action="confirm",
+            ),
+            db,
+        )
+        self.assertTrue(res["persisted"])
+        self.assertEqual(res["request_id"], str(req_id))
+        self.assertEqual(res["item"]["status"], "confirmed")
+        self.assertEqual(res["item"]["vendedor"], "Lanche Bem")
+        merchant_doc = next(d for d in db.merchants.docs if d["_id"] == vendor_id)
+        self.assertEqual(len(merchant_doc["aliases"]), 2)
+        for alias in merchant_doc["aliases"]:
+            self.assertTrue(all(k in alias for k in ("valor", "normalizado", "status", "source_record_ids")))
+        # Also verify defensive reload when _sync_merchant_alias receives a stripped projection
+        stripped = {"_id": vendor_id, "nome_padrao": "Lanche Bem", "aliases": [{"normalizado": "LANCHE BEM"}]}
+        _sync_merchant_alias(db, stripped, "CAPPTA LANCHE BEM 3", "Lanche Bem", True, "Cappta", None, stamp)
+        self.assertEqual(len(merchant_doc["aliases"]), 3)
+
 
 if __name__ == "__main__":
     unittest.main()
