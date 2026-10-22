@@ -1,6 +1,17 @@
 # Auditoria adversarial — 15/10/2026
 
-Julgamento da árvore local de `financial-app` a partir de `431aaf5`, com a correção de contagem dupla desta entrega, commit `cc7f562`. Dados sintéticos. O ledger ao vivo não foi lido, escrito, deduplicado nem reparado. O release privado no disco é Android 1.20.77 / versionCode 123, SHA-256 `B11A12A91149FA8EBE713726A3E33B88492C0D169AE6BB86935E15CE337039EE`, commit `c9b6d64`, com o certificado de debug anterior. A instalação física permanece unverified.
+Julgamento da árvore local de `financial-app` a partir de `431aaf5`, com a correção de contagem dupla desta entrega, commit `cc7f562`. Dados sintéticos. O ledger ao vivo não foi lido, escrito, deduplicado nem reparado. O release privado no disco é Android 1.20.78 / versionCode 124, SHA-256 `B46242B0220A39383BDBB361DFE98C08FC488AB52F6F207DA585CCCC0F0AB10B`, commit `e621d48`, com o certificado de debug anterior. A instalação física permanece unverified.
+
+## Entrega 21/10/2026 — painel e revisão
+
+Commit do recurso `2c17e5c`, empacotado em `e621d48`. APK ARM64 de 48117532 bytes, SHA-256 `B46242B0220A39383BDBB361DFE98C08FC488AB52F6F207DA585CCCC0F0AB10B`, assinante `FAC61745DC0903786FB9EDE62A962B399F7348F0BB6F899B8332667591033B9C`. O ledger ao vivo não foi lido nem escrito. Nesta passagem passaram `backend/tests/test_performance_plan.py` (10) e `backend/tests/test_telemetry_privacy.py` (6). A suíte completa do cliente e a homologação física não foram repetidas.
+
+| Correção | Veredito |
+| --- | --- |
+| Subcategorias | O catálogo entra no cache também quando a leitura já trouxe os lançamentos. A classificação só cai se o vendedor, o alias, a plataforma ou a subcategoria mudou. |
+| Painel | O retrato do extrato dura 30 segundos e cai em escrita de lançamento, captura, compromisso, evento, transferência ou comando repetido. Mês e ano correntes reaproveitam a visão já calculada. |
+| Revisão | O item salvo substitui a linha na hora. A releitura da página não segura o aviso de processamento. No aparelho: unverified. |
+| Telemetria | A coleção sai de `cursor.ns`. O evento de gravação leva os tempos do servidor em campos próprios. |
 
 ## Entrega 20/10/2026 — alias do vendedor
 
