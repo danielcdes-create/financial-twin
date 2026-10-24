@@ -5,6 +5,7 @@ type DeferredAction = {action: () => void; cancelled: boolean};
 
 let snapshot: UserOperationSnapshot = Object.freeze({busy: false, label: '', dialogOpen: false});
 let active: symbol | null = null;
+let syncDepth = 0;
 let draining = false;
 const listeners = new Set<() => void>();
 const deferred: DeferredAction[] = [];
@@ -40,6 +41,7 @@ export const subscribeUserOperation = (listener: () => void) => {
   return () => {listeners.delete(listener);};
 };
 export const isUserOperationBusy = () => active !== null;
+export const isUserOperationSync = () => syncDepth > 0;
 export const isUserInteractionBlocked = () => active !== null || snapshot.dialogOpen;
 export const setUserDialogOpen = (open: boolean) => publish(snapshot.busy, snapshot.label, open);
 
@@ -79,7 +81,13 @@ export function runUserAction<T>(action: () => T | PromiseLike<T>, label = 'Proc
   const identity = Symbol('user-operation');
   active = identity;
   try {
-    const result = tracker ? tracker.trackUserAction(label, action, false) : action();
+    let result: T | PromiseLike<T>;
+    syncDepth += 1;
+    try {
+      result = tracker ? tracker.trackUserAction(label, action, false) : action();
+    } finally {
+      syncDepth -= 1;
+    }
     if (result != null && typeof (result as PromiseLike<T>).then === 'function') {
       // The synchronous part may consume a selector option. Publishing before
       // it runs would let the overlay's busy subscription close that option

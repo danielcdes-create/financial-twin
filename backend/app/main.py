@@ -248,7 +248,8 @@ async def invalidate_reference_data(request: Request, call_next):
     mutates_classification = is_write and path.startswith((
         "/v1/commitment-profile", "/v1/capture-batches", "/v1/movements",
         "/v1/transactions", "/v1/categories", "/v1/subcategories",
-        "/v1/merchants", "/v1/reviews", "/v1/import", "/v1/documents",
+        "/v1/provisional", "/v1/merchants", "/v1/reviews", "/v1/import",
+        "/v1/documents", "/v1/events",
     ))
     try:
         return await call_next(request)
@@ -280,15 +281,20 @@ def json_safe(value):
 def _attach_historical_capture_defaults(document:dict[str,Any], result:dict[str,Any], db, catalog_cache=None, history_cache=None):
     hist=historical_capture_profile(db,document,catalog_cache=catalog_cache,history_cache=history_cache)
     if not hist: return
+    user_cleared=set(document.get("user_cleared_fields") or [])
     defaults:dict[str,Any]={}
-    if not result.get("vendedor") and hist.get("vendedor"):
+    if "vendedor" not in user_cleared and not result.get("vendedor") and hist.get("vendedor"):
         defaults["vendedor"]=hist["vendedor"]
         result.setdefault("vendedor_sugerido",hist["vendedor"])
-    if not result.get("plataforma") and hist.get("plataforma"):
+    if hist.get("plataforma_ausente") or "plataforma" in user_cleared:
+        result.pop("plataforma_sugerida",None)
+        if int(document.get("revision") or 1)==1 and document.get("status") in {"provisional","enriched"}:
+            result["plataforma_ausente"]=True
+    elif not result.get("plataforma") and hist.get("plataforma"):
         defaults["plataforma"]=hist["plataforma"]
         result.setdefault("plataforma_sugerida",hist["plataforma"])
     for field in ("categoria_sugerida","subcategoria","natureza","tipo","metodo_pagamento","localidade","account_profile_id"):
-        if not result.get(field) and hist.get(field):
+        if field not in user_cleared and not result.get(field) and hist.get(field):
             defaults[field]=hist[field]
     if defaults.get("categoria_sugerida") and not result.get("categoria_inferida"):
         result["categoria_inferida"]=defaults["categoria_sugerida"]
@@ -347,10 +353,11 @@ def with_merchant_name(document:dict[str,Any], db, *, include_historical:bool=Tr
             result["vendedor"]=merchant["nome_padrao"]
             result["fornecedor"]=merchant["nome_padrao"]
     platform_id=document.get("platform_id")
+    user_cleared=set(document.get("user_cleared_fields") or [])
     if platform_id:
         platform=_lookup_merchant(platform_id)
         if platform and platform.get("nome_padrao"): result["plataforma"]=platform["nome_padrao"]
-    elif detected:=platform_identity(document.get("merchant_raw") or document.get("estabelecimento_original") or document.get("descricao_original")):
+    elif "plataforma" not in user_cleared and (detected:=platform_identity(document.get("merchant_raw") or document.get("estabelecimento_original") or document.get("descricao_original"))):
         result["plataforma_sugerida"]=detected[1]
     suggestion=infer_classification(document,cached_taxonomy_overrides(db))
     for field,value in suggestion.items():
@@ -380,9 +387,10 @@ def with_merchant_names(documents:list[dict[str,Any]], db):
             result["vendedor"]=merchant_name
             result["fornecedor"]=merchant_name
         platform_name=merchants.get(str(document.get("platform_id")))
+        user_cleared=set(document.get("user_cleared_fields") or [])
         if platform_name:
             result["plataforma"]=platform_name
-        elif not document.get("platform_id") and (detected:=platform_identity(document.get("merchant_raw") or document.get("estabelecimento_original") or document.get("descricao_original"))):
+        elif "plataforma" not in user_cleared and not document.get("platform_id") and (detected:=platform_identity(document.get("merchant_raw") or document.get("estabelecimento_original") or document.get("descricao_original"))):
             result["plataforma_sugerida"]=detected[1]
         for field,value in infer_classification(document,overrides).items():
             if not result.get(field): result['categoria_inferida' if field=='categoria' and document.get('provisional_id') else f"{field}_sugerida"]=value
@@ -476,6 +484,7 @@ def canonical_key(value:str)->str:
 
 def canonical_distinct(db, field:str, value:str)->str:
     key=canonical_key(value)
+    if not hasattr(db.transactions,"distinct"): return value
     return next((str(item) for item in db.transactions.distinct(field) if item and canonical_key(str(item))==key),value)
 
 def find_canonical_merchant(db, value:str):
@@ -597,10 +606,34 @@ def app_update():
     return verified_release(android_apk_path())
 
 @app.get("/v1/app-update/apk")
+@app.head("/v1/app-update/apk")
 def download_app_update():
     apk=android_apk_path()
     release=verified_release(apk)
     if not release["available"]: raise HTTPException(status_code=404,detail="Android update is not verified")
+    return FileResponse(apk,media_type="application/vnd.android.package-archive",filename=f"financial-twin-{release['version_name']}.apk")
+
+@app.get("/api/v1/apk/info")
+def get_apk_info():
+    apk=android_apk_path()
+    release=verified_release(apk)
+    if not release.get("available"): raise HTTPException(status_code=404,detail="APK not found or not available")
+    return {
+        "version_code": release["version_code"],
+        "version_name": release["version_name"],
+        "size_bytes": release["size_bytes"],
+        "sha256": release.get("sha256"),
+        "download_path": "/apk"
+    }
+
+@app.get("/apk")
+@app.head("/apk")
+@app.get("/financial-twin.apk")
+@app.head("/financial-twin.apk")
+def download_apk_direct():
+    apk=android_apk_path()
+    release=verified_release(apk)
+    if not release.get("available") or not apk.exists(): raise HTTPException(status_code=404,detail="APK not found")
     return FileResponse(apk,media_type="application/vnd.android.package-archive",filename=f"financial-twin-{release['version_name']}.apk")
 
 @app.post("/v1/events", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_session)])
@@ -1280,7 +1313,8 @@ def _update_transaction_classification(transaction_id:str, update:TransactionCla
     clear_supplier=supplier_name is not None and not supplier_name.strip()
     if clear_supplier: supplier_name=None
     platform_name=changes.pop("plataforma",None)
-    clear_platform=platform_name=='' and any(key in item for key in ('platform_id','plataforma'))
+    user_cleared=set(item.get("user_cleared_fields") or [])
+    clear_platform=platform_name=='' and (any(key in item for key in ('platform_id','plataforma')) or 'plataforma' not in user_cleared)
     if changes.get("localidade"): changes["localidade"]=canonical_distinct(db,"localidade",changes["localidade"])
     validate_signed_flow({**item,**changes})
     if apply_similar_classification:
@@ -1331,23 +1365,37 @@ def _update_transaction_classification(transaction_id:str, update:TransactionCla
         set_values.pop('metodo_pagamento',None);unset_values['metodo_pagamento']=''
     if clear_platform:
         unset_values.update({key:'' for key in ('platform_id','plataforma') if key in item})
+        if 'plataforma' not in user_cleared:
+            user_cleared.add('plataforma')
+            set_values['user_cleared_fields']=sorted(user_cleared)
     if platform_name:
         platform=find_or_create_platform(db,platform_name,now)
         platform_changed=item.get("platform_id")!=platform["_id"]
         if platform_changed: set_values["platform_id"]=platform["_id"]
         if "plataforma" in item: set_values["plataforma"]=platform["nome_padrao"]
+        if 'plataforma' in user_cleared:
+            user_cleared.discard('plataforma')
+            set_values['user_cleared_fields']=sorted(user_cleared)
         if current_merchant and not supplier_name and canonical_key(current_merchant.get("nome_padrao",""))==canonical_key(platform["nome_padrao"]): clear_supplier=True
     if clear_supplier and item.get("merchant_id"):
         unset_values["merchant_id"]=""
     if clear_supplier:
         for key in ("vendedor","merchant_name"):
             if key in item: unset_values[key]=""
+        if 'vendedor' not in user_cleared:
+            user_cleared.add('vendedor')
+            set_values['user_cleared_fields']=sorted(user_cleared)
+    elif supplier_name and 'vendedor' in user_cleared:
+        user_cleared.discard('vendedor')
+        set_values['user_cleared_fields']=sorted(user_cleared)
     if not validate_review and item.get("revisado_em"): unset_values["revisado_em"]=""
     try: db.transactions.update_one({"_id":object_id},{"$set":set_values,**({"$unset":unset_values} if unset_values else {})})
     except WriteError as exc:
         if created_merchant_id: db.merchants.delete_one({"_id":created_merchant_id})
         if exc.code==121: raise HTTPException(status_code=409,detail="O registro não passou pelas regras do dicionário financeiro. Revise os valores selecionados.")
         raise
+    if merchant_changed or clear_supplier or platform_name or clear_platform or changed:
+        classification_cache.invalidate()
     if changed or merchant_changed or clear_supplier or platform_changed or recurrence_changed:
         db.audit_log.insert_one({
             "event":"transaction_classification_updated",
@@ -1525,7 +1573,6 @@ def _cursor_movements_impl(limit, cursor, search, category, account_id, date_fro
         elif review_status=="validado": legacy_query["status_revisao"]="validado"
         historical=historical_statement_reviews(db,capture_query)
         capture_query=capture_review_query(capture_query,review_status,historical)
-    total=db.transactions.count_documents(legacy_query)+db.provisional_transactions.count_documents(capture_query)
     def bounded(query,source):
         if not cursor: return query
         when,last_source,last_id=cursor_position
@@ -1559,6 +1606,9 @@ def _cursor_movements_impl(limit, cursor, search, category, account_id, date_fro
     else:
         legacy=list(with_batch_size(db.transactions.find(bounded(legacy_query,"ledger")), 2000).sort([("data_evento",-1),("_id",-1)]).limit(needed+1))
         captures=list(with_batch_size(db.provisional_transactions.find(bounded(capture_query,"capture")), 2000).sort([("data_evento",-1),("_id",-1)]).limit(needed+1))
+        legacy_total=len(legacy) if not cursor and len(legacy)<=needed else db.transactions.count_documents(legacy_query)
+        capture_total=len(captures) if not cursor and len(captures)<=needed else db.provisional_transactions.count_documents(capture_query)
+        total=legacy_total+capture_total
         pairs=[("ledger",item) for item in legacy]+[("capture",item) for item in captures]
     pairs.sort(key=order,reverse=True)
     has_more=len(pairs)>needed
@@ -1683,8 +1733,12 @@ def reparse_provisional(provisional_id:str,body:ReparseIn,db=Depends(database)):
         if merchant_entity and (not detected_platform or merchant_entity['_id']!=changes.get('platform_id')):
             changes.update({'merchant_id':merchant_entity['_id'],'merchant_name':merchant_entity['nome_padrao']})
         apply_historical_capture_defaults(writing,changes,base_item=current)
+        reparse_unset={}
+        if "plataforma" in (changes.get("user_cleared_fields") or []) and "platform_id" not in changes:
+            for k in ("platform_id","plataforma"):
+                if k in current: reparse_unset[k]=""
         before={key:json_safe(item.get(key)) for key in changes if key!='updated_at'}
-        writing.provisional_transactions.update_one({'_id':item['_id']},{'$set':changes})
+        writing.provisional_transactions.update_one({'_id':item['_id']},{'$set':changes,**({'$unset':reparse_unset} if reparse_unset else {})})
         writing.raw_events.update_one({'_id':event['_id']},{'$set':{'parsed_payload':parsed,'parser_version':enriched.get('parser_version'),'updated_at':now}})
         writing.audit_log.insert_one({'event':'provisional_notification_reparsed','provisional_id':provisional_id,'before':before,'after':json_safe(changes),'parser_version':enriched.get('parser_version'),'created_at':now})
         return {'item':with_merchant_name(writing.provisional_transactions.find_one({'_id':item['_id']}),writing),'changed':True}
@@ -1756,6 +1810,7 @@ def update_provisional(provisional_id:str, update:ProvisionalUpdate, db=Depends(
                 writing,
                 current_item=raw_updated,
                 profiles=profiles_cache,
+                skip_historical_prefill=True,
             )
             decided_doc=decision_result.pop('_decided_item',None) or writing.provisional_transactions.find_one({'provisional_id':provisional_id})
             result['decision']=decision_result
@@ -1890,12 +1945,20 @@ def _atomic_update_provisional(provisional_id:str, update:ProvisionalUpdate, db=
         merchants_by_id[str(merchant["_id"])]=merchant
         changed.update({"merchant_id":merchant["_id"],"merchant_name":merchant["nome_padrao"]})
         before["vendedor"]=previous_vendor
+    user_cleared=set(item.get("user_cleared_fields") or [])
+    if supplier and "vendedor" in user_cleared:
+        user_cleared.discard("vendedor")
+        changed["user_cleared_fields"]=sorted(user_cleared)
     if platform_name:
         platform=find_or_create_platform(db,platform_name,now)
         merchants_by_id[platform["_id"]]=platform
         merchants_by_id[str(platform["_id"])]=platform
         if item.get("platform_id")!=platform["_id"]:
             changed["platform_id"]=platform["_id"]
+            taxonomy_mutated=True
+        if "plataforma" in user_cleared:
+            user_cleared.discard("plataforma")
+            changed["user_cleared_fields"]=sorted(user_cleared)
             taxonomy_mutated=True
         if previous_vendor and not supplier and canonical_key(previous_vendor)==canonical_key(platform["nome_padrao"]): clear_supplier=True
         if "platform_id" in changed: before["plataforma"]=previous_platform
@@ -1916,6 +1979,14 @@ def _atomic_update_provisional(provisional_id:str, update:ProvisionalUpdate, db=
         platform_unsets={key:'' for key in ('platform_id','plataforma') if key in item}
         if platform_unsets:
             unset_values.update(platform_unsets);before['plataforma']=previous_platform
+            taxonomy_mutated=True
+        if 'plataforma' not in user_cleared:
+            user_cleared.add('plataforma')
+            changed['user_cleared_fields']=sorted(user_cleared)
+            taxonomy_mutated=True
+        existing_prefill=list(item.get('historical_prefill_fields') or [])
+        if 'plataforma' in existing_prefill:
+            changed['historical_prefill_fields']=[f for f in existing_prefill if f!='plataforma']
     if clear_account_profile and item.get("account_profile_id"): unset_values["account_profile_id"]=""
     if nature=="TRANSFERENCIA" and item.get("account_profile_id"): unset_values["account_profile_id"]=""
     if nature=="TRANSFERENCIA" and item.get("platform_id"): unset_values["platform_id"]=""
@@ -1923,6 +1994,11 @@ def _atomic_update_provisional(provisional_id:str, update:ProvisionalUpdate, db=
     if clear_supplier and (item.get("merchant_id") or item.get("merchant_name")):
         unset_values.update({"merchant_id":"","merchant_name":""})
         before["vendedor"]=previous_vendor
+        taxonomy_mutated=True
+    if clear_supplier and nature!="TRANSFERENCIA" and "vendedor" not in user_cleared:
+        user_cleared.add("vendedor")
+        changed["user_cleared_fields"]=sorted(user_cleared)
+        taxonomy_mutated=True
     if item.get("status")=="confirmed" and (changed or unset_values or validate_review is not None):
         next_review="validado" if validate_review else "pendente"
         if changed or unset_values or item.get("status_revisao")!=next_review:
@@ -1959,7 +2035,7 @@ def decide_provisional(provisional_id:str, decision:ProvisionalAction, db=Depend
         res.pop("_decided_item",None)
         return res
 
-def _atomic_decide_provisional(provisional_id:str, decision:ProvisionalAction, db=Depends(database), *, current_item:dict|None=None, profiles=None):
+def _atomic_decide_provisional(provisional_id:str, decision:ProvisionalAction, db=Depends(database), *, current_item:dict|None=None, profiles=None, skip_historical_prefill:bool=False):
     lock_movement_insert(db)
     item=current_item if current_item is not None else db.provisional_transactions.find_one({"provisional_id":provisional_id})
     if not item: raise HTTPException(status_code=404,detail="Active provisional transaction not found")
@@ -1969,19 +2045,28 @@ def _atomic_decide_provisional(provisional_id:str, decision:ProvisionalAction, d
     if decision.expected_revision is None and item.get('revision') is not None:raise HTTPException(428,'Reabra a captura para obter a revisão atual.')
     if decision.expected_revision is not None and decision.expected_revision!=item.get("revision",1): raise HTTPException(409,"A captura mudou. Recarregue.")
     extra_set:dict[str,Any]={}
+    extra_unset:dict[str,str]={}
     if decision.action=="confirm":
-        apply_historical_capture_defaults(db,extra_set,base_item=item,profiles=profiles)
-        validate_confirmed_provisional({**item,**extra_set},db,profiles=profiles)
+        if not skip_historical_prefill:
+            apply_historical_capture_defaults(db,extra_set,base_item=item,profiles=profiles)
+            if "plataforma" in (extra_set.get("user_cleared_fields") or []):
+                for k in ("platform_id","plataforma"):
+                    if k in item: extra_unset[k]=""
+        candidate_item={k:v for k,v in {**item,**extra_set}.items() if k not in extra_unset}
+        validate_confirmed_provisional(candidate_item,db,profiles=profiles)
     if decision.action=='cancel':
         reasons=movement_blockers(db,'capture',provisional_id,item)
         if reasons:raise HTTPException(409,' '.join(reasons)+' Revise os vínculos antes de descartar.')
     now=datetime.now(timezone.utc);new_status="confirmed" if decision.action=="confirm" else "cancelled"
     update_fields={**extra_set,"revision":item.get("revision",1)+1,"status":new_status,"updated_at":now,**({"confirmed_at":now} if new_status=="confirmed" else {"cancelled_at":now})}
-    db.provisional_transactions.update_one({"_id":item["_id"]},{"$set":update_fields})
+    db.provisional_transactions.update_one({"_id":item["_id"]},{"$set":update_fields,**({"$unset":extra_unset} if extra_unset else {})})
     db.raw_events.update_one({"event_id":item.get("event_id")},{"$set":{"processing_status":new_status,"linked_transaction_id":item["_id"] if new_status=="confirmed" else None}})
     db.audit_log.insert_one({"event":"provisional_transaction_decision","provisional_id":provisional_id,"action":decision.action,"before":json_safe(item),"after":{"status":new_status},"created_at":now})
     resolved_review_count=resolve_pending_reviews_for_provisional(db, provisional_id, now, new_status)
-    return {"provisional_id":provisional_id,"status":new_status,"resolved_review_count":resolved_review_count,"_decided_item":{**item,**update_fields}}
+    classification_cache.invalidate()
+    dashboard_snapshot_cache.invalidate()
+    decided_item={k:v for k,v in {**item,**update_fields}.items() if k not in extra_unset}
+    return {"provisional_id":provisional_id,"status":new_status,"resolved_review_count":resolved_review_count,"_decided_item":decided_item}
 
 def review_sources(db,item):
     event_id=item.get('event_id')

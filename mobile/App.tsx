@@ -1870,7 +1870,7 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
           )}
           {tab === "Categorias" && (
             <>
-              <Pressable accessibilityRole="button" accessibilityLabel="Voltar a Mais" onPress={() => dispatchLocalBack()} style={{minHeight: 44, justifyContent: "center", paddingVertical: 6}}>
+              <Pressable accessibilityRole="button" accessibilityLabel="Voltar a Mais" onPress={() => { if (!dispatchLocalBack()) setTab("Mais", "back"); }} style={{minHeight: 44, justifyContent: "center", paddingVertical: 6}}>
                 <Text style={{color: "#67DFC3", fontWeight: "700"}}>‹ Voltar a Mais</Text>
               </Pressable>
               <CategoryManager
@@ -1884,7 +1884,7 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
           )}
           {tab === "Compromissos" && (
             <>
-              <Pressable accessibilityRole="button" accessibilityLabel="Voltar a Mais" onPress={() => dispatchLocalBack()} style={{minHeight: 44, justifyContent: "center", paddingVertical: 6}}>
+              <Pressable accessibilityRole="button" accessibilityLabel="Voltar a Mais" onPress={() => { if (!dispatchLocalBack()) setTab("Mais", "back"); }} style={{minHeight: 44, justifyContent: "center", paddingVertical: 6}}>
                 <Text style={{color: "#67DFC3", fontWeight: "700"}}>‹ Voltar a Mais</Text>
               </Pressable>
               <CommitmentManager profiles={accountProfiles}
@@ -1899,7 +1899,7 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
           )}
           {tab === "Cartões" && (
             <>
-              <Pressable accessibilityRole="button" accessibilityLabel="Voltar a Mais" onPress={() => dispatchLocalBack()} style={{minHeight: 44, justifyContent: "center", paddingVertical: 6}}>
+              <Pressable accessibilityRole="button" accessibilityLabel="Voltar a Mais" onPress={() => { if (!dispatchLocalBack()) setTab("Mais", "back"); }} style={{minHeight: 44, justifyContent: "center", paddingVertical: 6}}>
                 <Text style={{color: "#67DFC3", fontWeight: "700"}}>‹ Voltar a Mais</Text>
               </Pressable>
               <CardManager api={json} cards={cards} money={money} onUpdated={() => refreshAfterMutation("cards", "dashboard")} />
@@ -1938,7 +1938,7 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
           )}
           {tab === "Contas" && (
             <>
-              <Pressable accessibilityRole="button" accessibilityLabel="Voltar a Mais" onPress={() => dispatchLocalBack()} style={{minHeight: 44, justifyContent: "center", paddingVertical: 6}}>
+              <Pressable accessibilityRole="button" accessibilityLabel="Voltar a Mais" onPress={() => { if (!dispatchLocalBack()) setTab("Mais", "back"); }} style={{minHeight: 44, justifyContent: "center", paddingVertical: 6}}>
                 <Text style={{color: "#67DFC3", fontWeight: "700"}}>‹ Voltar a Mais</Text>
               </Pressable>
               <AccountPositions api={json} money={money} onOpen={() => contentScroll.current?.scrollTo({y: 0, animated: false})}
@@ -1947,7 +1947,7 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
           )}
           {tab === "Ajustes" && (
             <>
-              <Pressable accessibilityRole="button" accessibilityLabel="Voltar a Mais" onPress={() => dispatchLocalBack()} style={{minHeight: 44, justifyContent: "center", paddingVertical: 6}}>
+              <Pressable accessibilityRole="button" accessibilityLabel="Voltar a Mais" onPress={() => { if (!dispatchLocalBack()) setTab("Mais", "back"); }} style={{minHeight: 44, justifyContent: "center", paddingVertical: 6}}>
                 <Text style={{color: "#67DFC3", fontWeight: "700"}}>‹ Voltar a Mais</Text>
               </Pressable>
               <Text style={s.section}>Conexão</Text>

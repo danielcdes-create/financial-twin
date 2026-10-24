@@ -1,0 +1,776 @@
+diff --git a/backend/app/account_auth.py b/backend/app/account_auth.py
+index 2bd1d8c..3964138 100755
+--- a/backend/app/account_auth.py
++++ b/backend/app/account_auth.py
+@@ -7,8 +7,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
+ from pydantic import BaseModel, Field, field_validator
+ from pymongo.errors import DuplicateKeyError
+ from app.auth import (BIOMETRIC_SESSION_SECONDS, OWNER_ID, auth_database, auth_settings, get_settings, hash_password,
+-                      login_attempts, owner, public_account, renew_session_token, require_session, session_response,
+-                      verify_password)
++                      login_attempts, owner, owner_cache, public_account, renew_session_token, require_session,
++                      session_response, verify_password)
+ 
+ router = APIRouter(prefix='/v1/auth', tags=['account'])
+ 
+@@ -82,6 +82,8 @@ def setup(body: SetupInput, request: Request):
+         db.account.insert_one(account)
+     except DuplicateKeyError:
+         raise HTTPException(409, 'A conta já foi configurada. Use Entrar.') from None
++    finally:
++        owner_cache.invalidate()
+     login_attempts.reset('private-owner')
+     return session_response(db, account, body.device_label)
+ 
+@@ -105,6 +107,8 @@ def login(body: LoginInput, request: Request):
+             db.account.insert_one(account)
+         except DuplicateKeyError:
+             raise HTTPException(409, 'A conta foi configurada. Entre com as novas credenciais.') from None
++        finally:
++            owner_cache.invalidate()
+     else:
+         password_ok = verify_password(body.password, account['password_hash']) if account else False
+         if not account:
+@@ -153,6 +157,7 @@ def account_update(body: AccountInput, request: Request, session=Depends(require
+     db = auth_database(request)
+     result = db.account.update_one({'_id': OWNER_ID, 'auth_version': account['auth_version']},
+                                   {'$set': {'username': body.username, 'display_name': body.display_name, 'auth_version': version}})
++    owner_cache.invalidate()
+     if result.matched_count != 1:
+         raise HTTPException(409, 'A conta mudou. Entre novamente.')
+     db.audit_log.insert_one({'event': 'account_profile_updated', 'actor': 'owner', 'before': before, 'after': after,
+@@ -174,6 +179,7 @@ def password_change(body: PasswordInput, request: Request, session=Depends(requi
+     db = auth_database(request)
+     result = db.account.update_one({'_id': OWNER_ID, 'auth_version': account['auth_version']},
+                                   {'$set': {'password_hash': encoded, 'auth_version': version, 'sessions': []}})
++    owner_cache.invalidate()
+     if result.matched_count != 1:
+         raise HTTPException(409, 'A senha já foi alterada. Entre novamente.')
+     login_attempts.reset('private-owner')
+@@ -192,6 +198,7 @@ def revoke(session_id: str, request: Request, session=Depends(require_session)):
+     if not re.fullmatch('[a-f0-9]{64}', session_id):
+         raise HTTPException(422, 'Sessão inválida.')
+     auth_database(request).account.update_one({'_id': OWNER_ID}, {'$pull': {'sessions': {'id': session_id}}})
++    owner_cache.invalidate()
+     return {'revoked': True}
+ 
+ 
+@@ -203,4 +210,5 @@ def logout(request: Request, session=Depends(require_session)):
+ @router.post('/logout-all')
+ def logout_all(request: Request, session=Depends(require_session)):
+     auth_database(request).account.update_one({'_id': OWNER_ID}, {'$inc': {'auth_version': 1}, '$set': {'sessions': []}})
++    owner_cache.invalidate()
+     return {'revoked': True}
+diff --git a/backend/app/auth.py b/backend/app/auth.py
+index 183b7a8..405c46f 100755
+--- a/backend/app/auth.py
++++ b/backend/app/auth.py
+@@ -1,6 +1,7 @@
+ """Authentication for one private ledger owner; financial accounts are unrelated."""
+ import base64
+ import contextvars
++import copy
+ import hashlib
+ import hmac
+ import json
+@@ -11,12 +12,14 @@ from threading import Lock, Thread
+ from fastapi import Header, HTTPException, Request
+ from pymongo.database import Database
+ from app.config import get_settings
++from app.reference_cache import ReferenceCache, unwrap_database
+ 
+ OWNER_ID = 'financial-twin-owner'
+ SESSION_SECONDS = 12 * 60 * 60
+ BIOMETRIC_SESSION_SECONDS = 30 * 24 * 60 * 60
+ MAX_SESSIONS = 10
+ PASSWORD_ITERATIONS = 600_000
++owner_cache = ReferenceCache(ttl_seconds=15)
+ 
+ 
+ class LoginAttempts:
+@@ -61,6 +64,13 @@ def auth_settings():
+ 
+ 
+ def owner(db):
++    raw_db = unwrap_database(db)
++    if isinstance(raw_db, Database):
++        cached = owner_cache.get(
++            raw_db,
++            lambda: raw_db.account.find_one({'_id': OWNER_ID, 'kind': 'app_identity'}),
++        )
++        return copy.deepcopy(cached) if isinstance(cached, dict) else cached
+     return db.account.find_one({'_id': OWNER_ID, 'kind': 'app_identity'})
+ 
+ 
+@@ -103,11 +113,14 @@ def create_session_token(identity: str, version: int, session_id: str, now: int
+ 
+ def _persist_sessions_in_background(db, query: dict, sessions_snapshot: list[dict]) -> None:
+     """Persist session activity asynchronously in a clean context so GET routes never block on account.update."""
++    owner_cache.invalidate()
+     def _worker():
+         try:
+             db.account.update_one(query, {'$set': {'sessions': sessions_snapshot}})
+         except Exception:
+             pass
++        finally:
++            owner_cache.invalidate()
+ 
+     if isinstance(db, Database):
+         ctx = contextvars.Context()
+@@ -128,6 +141,7 @@ def session_response(db, account, label: str, ttl: int | None = None):
+             {'$filter': {'input': {'$ifNull': ['$sessions', []]}, 'as': 'session',
+                          'cond': {'$gt': ['$$session.expires_at', now]}}}, {'$literal': [item]}]}, -MAX_SESSIONS]}}}
+     ])
++    owner_cache.invalidate()
+     if result.matched_count != 1:
+         raise HTTPException(401, 'A conta mudou. Entre novamente.')
+     return {'access_token': create_session_token(OWNER_ID, account['auth_version'], identity, now, duration),
+@@ -156,6 +170,8 @@ def renew_session_token(db, account, jti: str, ttl: int = BIOMETRIC_SESSION_SECO
+             db.account.update_one(query, {'$set': {'sessions': account['sessions']}})
+         except Exception:
+             pass
++        finally:
++            owner_cache.invalidate()
+     return {'access_token': create_session_token(OWNER_ID, account['auth_version'], jti, now, ttl),
+             'token_type': 'bearer', 'expires_in': ttl, 'account': public_account(account)}
+ 
+diff --git a/backend/app/commitment_projection.py b/backend/app/commitment_projection.py
+index 764692c..50d2797 100755
+--- a/backend/app/commitment_projection.py
++++ b/backend/app/commitment_projection.py
+@@ -4,7 +4,7 @@ from datetime import date, timedelta
+ from decimal import Decimal
+ 
+ from fastapi import APIRouter, Depends, HTTPException, Query
+-from app.atomic import mongo_snapshot
++from app.atomic import mongo_snapshot, with_batch_size
+ from app.auth import require_session
+ from app.commitments import commitment_cutoff, advance, linked_due_dates, schedule_from, historical_occurrence_conflicts
+ from app.commitment_estimates import effective_commitments
+@@ -65,7 +65,10 @@ def monthly_projection(db, months=None, as_of: date | None = None):
+         (charges if destination is None else destination).append(entry)
+ 
+     with mongo_snapshot(db) as (reading, consistency):
+-        managed = effective_commitments(reading, reading.commitments.find({'status': 'ativo'}))
++        managed = effective_commitments(
++            reading,
++            with_batch_size(reading.commitments.find({'status': 'ativo'}), 2000),
++        )
+         for item in managed:
+             name = item['name']
+             if historical_occurrence_conflicts(item):
+@@ -94,7 +97,14 @@ def monthly_projection(db, months=None, as_of: date | None = None):
+                         'account_id': item.get('account_id'), 'category_name': item.get('category'),
+                     })
+ 
+-        plans = attach_cards(reading, effective_documents(reading, 'installment', reading.installment_plans.find({'status': 'ativo'})))
++        plans = attach_cards(
++            reading,
++            effective_documents(
++                reading,
++                'installment',
++                with_batch_size(reading.installment_plans.find({'status': 'ativo'}), 2000),
++            ),
++        )
+         plan_labels = {str(item['_id']): item.get('display_name') for item in plans if item.get('display_name')}
+         plan_ids = {str(item['_id']) for item in plans}
+         for item in plans:
+@@ -112,8 +122,11 @@ def monthly_projection(db, months=None, as_of: date | None = None):
+                     details={'source_type': 'installment_plan', 'occurrence_number': part.get('numero') or part.get('parcela_numero'),
+                              'occurrence_total': total_parts, 'card_label': item.get('card_label')})
+ 
+-        obligations = effective_documents(reading, 'obligation', reading.obligations.find({
+-            'status': {'$in': list(OPEN_OBLIGATION_STATUSES)}}))
++        obligations = effective_documents(
++            reading,
++            'obligation',
++            with_batch_size(reading.obligations.find({'status': {'$in': list(OPEN_OBLIGATION_STATUSES)}}), 2000),
++        )
+         for item in obligations:
+             # An explicitly linked installment must not also enter as an obligation.
+             if str(item.get('origem_id')) in plan_ids and item.get('tipo') != 'fatura_cartao':
+diff --git a/backend/app/main.py b/backend/app/main.py
+index 868e572..daa3894 100755
+--- a/backend/app/main.py
++++ b/backend/app/main.py
+@@ -35,7 +35,7 @@ from app.category_filter import ACTIVE_CAPTURES, catalog_category_names, categor
+ from app.movement_filters import period_query, intersect, search_query, filter_key as movement_filter_key
+ from app.document_validation import validate_document_extraction
+ from app.pdf_input import PDFPasswordError, read_pdf
+-from app.reference_cache import ReferenceCache, classification_cache
++from app.reference_cache import ReferenceCache, classification_cache, unwrap_database
+ from contextlib import nullcontext
+ try:
+     from app.telemetry import install_telemetry, SpanTimer
+@@ -49,9 +49,9 @@ taxonomy_overrides_cache = ReferenceCache(ttl_seconds=300)
+ classification_cache._dependents.append(taxonomy_overrides_cache)
+ 
+ def cached_taxonomy_overrides(db):
+-    raw_db = getattr(db, "db", db)
++    raw_db = unwrap_database(db)
+     if isinstance(raw_db, Database):
+-        return taxonomy_overrides_cache.get(raw_db, lambda: taxonomy_overrides(db))
++        return taxonomy_overrides_cache.get(raw_db, lambda: taxonomy_overrides(raw_db))
+     return taxonomy_overrides(db)
+ from app.upload_worker import persisted_event, run_upload
+ from app.operation_identity import bind_upload, complete_upload
+@@ -208,7 +208,7 @@ def atomic_unavailable(_request, exc):
+     return JSONResponse(status_code=503,content={"detail":str(exc)})
+ @app.exception_handler(OperationFailure)
+ def mongo_write_conflict(_request, exc):
+-    if exc.code in {112,244,251} or exc.has_error_label('TransientTransactionError'):
++    if exc.code in {24,112,244,251} or exc.has_error_label('TransientTransactionError'):
+         return JSONResponse(status_code=409,content={"detail":"Conflito concorrente. Recarregue e repita com o mesmo identificador."})
+     logging.error("Mongo operation failed, code=%s",exc.code)
+     message = str((exc.details or {}).get('errmsg', exc)).lower()
+@@ -283,18 +283,27 @@ def _attach_historical_capture_defaults(document:dict[str,Any], result:dict[str,
+ 
+ def _sync_merchant_alias(db, merchant:dict[str,Any], raw_source:str|None, supplier_name:str, platform_active:bool, platform_name:str|None, previous_merchant_id, now:datetime):
+     use_raw=bool(raw_source) and (not platform_active or has_vendor_tokens_beyond_platform(raw_source,platform_name))
+-    raw=(raw_source if use_raw else supplier_name) or supplier_name
+-    normalized=re.sub(r"\s+"," ",re.sub(r"[^A-Z0-9 ]"," ",str(raw).upper())).strip()
+-    if not normalized: return
++    raw=str((raw_source if use_raw else supplier_name) or supplier_name or "").strip()
++    normalized=re.sub(r"\s+"," ",re.sub(r"[^A-Z0-9 ]"," ",raw.upper())).strip()
++    if not raw or not normalized: return
+     if previous_merchant_id and previous_merchant_id!=merchant.get("_id"):
+         prev_doc=db.merchants.find_one({"_id":previous_merchant_id})
+         if prev_doc and isinstance(prev_doc.get("aliases"),list):
+             filtered=[a for a in prev_doc["aliases"] if a.get("normalizado")!=normalized]
+             if len(filtered)!=len(prev_doc["aliases"]):
+                 db.merchants.update_one({"_id":previous_merchant_id},{"$set":{"aliases":filtered,"updated_at":now}})
+-    existing_doc=merchant if "aliases" in merchant else (db.merchants.find_one({"_id":merchant["_id"]}) or merchant)
+-    aliases=list(existing_doc.get("aliases") or [])
+-    if not any(a.get("normalizado")==normalized for a in aliases):
++    raw_aliases=merchant.get("aliases")
++    has_complete_aliases=isinstance(raw_aliases,list) and all(
++        isinstance(a,dict) and "valor" in a and "normalizado" in a and "status" in a
++        for a in raw_aliases
++    )
++    existing_doc=merchant if has_complete_aliases else (db.merchants.find_one({"_id":merchant["_id"]}) or merchant)
++    aliases=[
++        dict(a)
++        for a in list(existing_doc.get("aliases") or [])
++        if isinstance(a,dict) and "valor" in a and "normalizado" in a and "status" in a
++    ]
++    if not any(a.get("normalizado")==normalized or a.get("valor")==raw for a in aliases):
+         aliases.append({"valor":raw,"normalizado":normalized,"status":"confirmado","source_record_ids":[]})
+         merchant["aliases"]=aliases
+         db.merchants.update_one({"_id":merchant["_id"]},{"$set":{"aliases":aliases,"updated_at":now}})
+@@ -455,10 +464,10 @@ def canonical_distinct(db, field:str, value:str)->str:
+     return next((str(item) for item in db.transactions.distinct(field) if item and canonical_key(str(item))==key),value)
+ 
+ def find_canonical_merchant(db, value:str):
+-    exact=db.merchants.find_one({"nome_padrao":value.strip()},{"nome_padrao":1,"aliases.normalizado":1}) if value and value.strip() else None
++    exact=db.merchants.find_one({"nome_padrao":value.strip()},{"nome_padrao":1,"aliases":1}) if value and value.strip() else None
+     if exact: return exact
+     key=canonical_key(value)
+-    for merchant in db.merchants.find({"nome_padrao":{"$nin":[None,""]}},{"nome_padrao":1,"aliases.normalizado":1}):
++    for merchant in with_batch_size(db.merchants.find({"nome_padrao":{"$nin":[None,""]}},{"nome_padrao":1,"aliases":1}), 2000):
+         if canonical_key(str(merchant.get("nome_padrao","")))==key: return merchant
+         if any(canonical_key(str(alias.get("valor") or alias.get("normalizado") or ""))==key for alias in merchant.get("aliases",[])): return merchant
+     return None
+@@ -1022,7 +1031,7 @@ def _build_classification_options(db):
+     by_id,_,_=ctx["catalog"]
+     known_platform_ids=[value for value in tx_distinct.get("platform_id",[])+prov_distinct.get("platform_id",[]) if value]
+     known_platform_id_strs={str(value) for value in known_platform_ids}
+-    if by_id or isinstance(getattr(db,"db",db),Database):
++    if by_id or isinstance(unwrap_database(db),Database):
+         platform_names=(
+             {name for _,name in PLATFORMS.values()}
+             | {
+@@ -1695,23 +1704,21 @@ def validate_signed_flow(item:dict[str,Any]) -> None:
+     if value is not None and value < 0 and (item.get('natureza')=='ESTORNO' or item.get('tipo')=='estorno'):
+         raise HTTPException(422,'Estorno recebido exige valor positivo e fluxo de entrada. Registre uma reversão como saída explícita, sem a natureza Estorno.')
+ 
+-def validate_confirmed_provisional(item:dict[str,Any], db=None) -> None:
++def validate_confirmed_provisional(item:dict[str,Any], db=None, *, profiles=None) -> None:
+     value=decimal_amount(item.get("valor"))
+     if value is None or not value.is_finite() or value == 0 or abs(value)>Decimal("100000000"):
+         raise HTTPException(422,"Informe um valor financeiro válido e diferente de zero.")
+     validate_signed_flow(item)
+     if item.get("account_profile_id"):
+-        validate_account_key(item["account_profile_id"],db)
++        validate_account_key(item["account_profile_id"],db,profiles=profiles)
+     if not str(item.get("tipo") or "").strip() or item.get("fluxo") not in {"entrada","saida"}:
+         raise HTTPException(status_code=422,detail="Informe tipo e fluxo antes de confirmar a captura.")
+     if item.get("natureza")=="TRANSFERENCIA":
+         transfer=item.get("transfer") or {}
+         origin=transfer.get("from_account_key");destination=transfer.get("to_account_key")
+-        validate_account_key(origin,db);validate_account_key(destination,db)
++        validate_account_key(origin,db,profiles=profiles);validate_account_key(destination,db,profiles=profiles)
+         if origin==destination: raise HTTPException(status_code=422,detail="Origem e destino devem ser contas diferentes.")
+ 
+-@app.patch("/v1/provisional/{provisional_id}", dependencies=[Depends(require_session)])
+-@durable_mutation('capture_update',('provisional_id',),'update')
+ @app.patch("/v1/provisional/{provisional_id}", dependencies=[Depends(require_session)])
+ @durable_mutation('capture_update',('provisional_id',),'update')
+ def update_provisional(provisional_id:str, update:ProvisionalUpdate, db=Depends(database)):
+@@ -1721,11 +1728,13 @@ def update_provisional(provisional_id:str, update:ProvisionalUpdate, db=Depends(
+         if update.action is not None:
+             raw_updated=result.pop('_raw_item',None)
+             merchants_cache=result.pop('_merchants_by_id',None)
++            profiles_cache=result.pop('_profiles',None)
+             decision_result=_atomic_decide_provisional(
+                 provisional_id,
+                 ProvisionalAction(action=update.action,expected_revision=result['item'].get('revision',1)),
+                 writing,
+                 current_item=raw_updated,
++                profiles=profiles_cache,
+             )
+             decided_doc=decision_result.pop('_decided_item',None) or writing.provisional_transactions.find_one({'provisional_id':provisional_id})
+             result['decision']=decision_result
+@@ -1733,6 +1742,7 @@ def update_provisional(provisional_id:str, update:ProvisionalUpdate, db=Depends(
+         else:
+             result.pop('_raw_item',None)
+             result.pop('_merchants_by_id',None)
++            result.pop('_profiles',None)
+         result.update({'persisted':True,'provisional_id':provisional_id,'action':update.action})
+         return result
+ 
+@@ -1804,7 +1814,7 @@ def _atomic_update_provisional(provisional_id:str, update:ProvisionalUpdate, db=
+     if nature!="TRANSFERENCIA": final.pop("transfer",None)
+     if clear_account_profile: final.pop("account_profile_id",None)
+     validate_signed_flow(final)
+-    if item.get("status")=="confirmed": validate_confirmed_provisional(final,db)
++    if item.get("status")=="confirmed": validate_confirmed_provisional(final,db,profiles=profiles_cache)
+     effective_category=values.get("categoria_sugerida",item.get("categoria_sugerida"))
+     if "categoria_sugerida" in values and rejects_direct_level1_posting(values.get("categoria_sugerida"), values.get("subcategoria", item.get("subcategoria"))):
+         raise HTTPException(422, "Este grupo não aceita lançamento direto. Escolha uma subcategoria.")
+@@ -1896,13 +1906,13 @@ def _atomic_update_provisional(provisional_id:str, update:ProvisionalUpdate, db=
+         if item.get('status')=='confirmed':
+             historical=historical_statement_reviews(db,{'provisional_id':provisional_id,'status':'confirmed'})
+             display_capture_review(result,historical)
+-        return {"item":result,"changed":False,"_raw_item":item,"_merchants_by_id":merchants_by_id}
++        return {"item":result,"changed":False,"_raw_item":item,"_merchants_by_id":merchants_by_id,"_profiles":profiles_cache}
+     changed["updated_at"]=now
+     changed["revision"]=item.get("revision",1)+1
+     db.provisional_transactions.update_one({"_id":item["_id"]},{"$set":changed,**({"$unset":unset_values} if unset_values else {})})
+     db.audit_log.insert_one({"event":"provisional_transaction_updated","provisional_id":provisional_id,"source":"mobile_manual_review","before":before,"after":{**json_safe(changed),**{key:None for key in unset_values if key not in {'merchant_id','merchant_name','platform_id'}},**({'plataforma':None} if 'platform_id' in unset_values else {}),**({"vendedor":None} if 'merchant_id' in unset_values or 'merchant_name' in unset_values else {"vendedor":supplier} if supplier and "merchant_id" in changed else {})},"change_reason":"user_review","created_at":now})
+     updated_doc={k:v for k,v in {**item,**changed}.items() if k not in unset_values}
+-    return {"item":with_merchant_name(updated_doc,db,include_historical=(update.action is None),merchants_by_id=merchants_by_id),"changed":True,"_raw_item":updated_doc,"_merchants_by_id":merchants_by_id}
++    return {"item":with_merchant_name(updated_doc,db,include_historical=(update.action is None),merchants_by_id=merchants_by_id),"changed":True,"_raw_item":updated_doc,"_merchants_by_id":merchants_by_id,"_profiles":profiles_cache}
+ 
+ class ProvisionalAction(BaseModel):
+     request_id:UUID|None=None
+@@ -1917,7 +1927,7 @@ def decide_provisional(provisional_id:str, decision:ProvisionalAction, db=Depend
+         res.pop("_decided_item",None)
+         return res
+ 
+-def _atomic_decide_provisional(provisional_id:str, decision:ProvisionalAction, db=Depends(database), *, current_item:dict|None=None):
++def _atomic_decide_provisional(provisional_id:str, decision:ProvisionalAction, db=Depends(database), *, current_item:dict|None=None, profiles=None):
+     lock_movement_insert(db)
+     item=current_item if current_item is not None else db.provisional_transactions.find_one({"provisional_id":provisional_id})
+     if not item: raise HTTPException(status_code=404,detail="Active provisional transaction not found")
+@@ -1928,8 +1938,8 @@ def _atomic_decide_provisional(provisional_id:str, decision:ProvisionalAction, d
+     if decision.expected_revision is not None and decision.expected_revision!=item.get("revision",1): raise HTTPException(409,"A captura mudou. Recarregue.")
+     extra_set:dict[str,Any]={}
+     if decision.action=="confirm":
+-        apply_historical_capture_defaults(db,extra_set,base_item=item)
+-        validate_confirmed_provisional({**item,**extra_set},db)
++        apply_historical_capture_defaults(db,extra_set,base_item=item,profiles=profiles)
++        validate_confirmed_provisional({**item,**extra_set},db,profiles=profiles)
+     if decision.action=='cancel':
+         reasons=movement_blockers(db,'capture',provisional_id,item)
+         if reasons:raise HTTPException(409,' '.join(reasons)+' Revise os vínculos antes de descartar.')
+diff --git a/backend/app/mutation_identity.py b/backend/app/mutation_identity.py
+index 1351b1e..a68c189 100755
+--- a/backend/app/mutation_identity.py
++++ b/backend/app/mutation_identity.py
+@@ -47,7 +47,7 @@ def durable_mutation(kind, target_names, body_name='body'):
+                     db.batch_commands.update_one({'_id': pending_review['_id']}, {'$set': pending_review}) if db.batch_commands.find_one({'_id': pending_review['_id']}) else db.batch_commands.insert_one(pending_review)
+                 raise
+             except (DuplicateKeyError,OperationFailure) as exc:
+-                if isinstance(exc,OperationFailure) and not (exc.code in {11000,112} or exc.has_error_label('TransientTransactionError') or exc.has_error_label('UnknownTransactionCommitResult')):
++                if isinstance(exc,OperationFailure) and not (exc.code in {11000,24,112,244,251} or exc.has_error_label('TransientTransactionError') or exc.has_error_label('UnknownTransactionCommitResult')):
+                     raise
+                 previous=replay(db)
+                 if previous is not None:return previous
+diff --git a/backend/app/platforms.py b/backend/app/platforms.py
+index 4da90df..22d163a 100755
+--- a/backend/app/platforms.py
++++ b/backend/app/platforms.py
+@@ -12,7 +12,7 @@ from pymongo.database import Database
+ 
+ from app.account_profiles import account_profiles
+ from app.atomic import with_batch_size
+-from app.reference_cache import historical_context_cache
++from app.reference_cache import historical_context_cache, unwrap_database
+ from app.taxonomy import CURATED_SUBCATEGORIES, NATURES, category_subcategories
+ 
+ 
+@@ -313,11 +313,11 @@ def _historical_context(
+     allowed_subcats: dict[str, list[str]] | None = None,
+     profiles=None,
+ ) -> dict[str, Any]:
+-    raw_db = getattr(db, "db", db)
++    raw_db = unwrap_database(db)
+     if catalog_cache is None and isinstance(raw_db, Database):
+         ctx = historical_context_cache.get(
+             raw_db,
+-            lambda: _build_historical_context(db, allowed_subcats=allowed_subcats, profiles=profiles),
++            lambda: _build_historical_context(raw_db, allowed_subcats=allowed_subcats, profiles=profiles),
+         )
+         if allowed_subcats is not None and ctx.get("allowed_subcats") != allowed_subcats:
+             return {**ctx, "allowed_subcats": allowed_subcats}
+diff --git a/backend/app/reference_cache.py b/backend/app/reference_cache.py
+index 42fd7e0..3aac3df 100755
+--- a/backend/app/reference_cache.py
++++ b/backend/app/reference_cache.py
+@@ -4,6 +4,13 @@ from threading import Lock
+ from time import monotonic
+ 
+ 
++def unwrap_database(scope):
++    """Unwrap _SessionDatabase wrappers without triggering PyMongo Database.__getattr__('db')."""
++    while type(scope).__name__ == "_SessionDatabase":
++        scope = scope.__dict__.get("db", scope)
++    return scope
++
++
+ class ReferenceCache:
+     def __init__(self, ttl_seconds=300, dependents=()):
+         self.ttl_seconds = ttl_seconds
+@@ -23,7 +30,7 @@ class ReferenceCache:
+             dependent.invalidate()
+ 
+     def get(self, scope, build):
+-        raw_scope = getattr(scope, "db", scope)
++        raw_scope = unwrap_database(scope)
+         key = id(raw_scope)
+         while True:
+             with self._lock:
+diff --git a/backend/app/taxonomy.py b/backend/app/taxonomy.py
+index b66d0c4..51fd591 100755
+--- a/backend/app/taxonomy.py
++++ b/backend/app/taxonomy.py
+@@ -11,7 +11,7 @@ from typing import Any
+ from pymongo.database import Database
+ 
+ from app.atomic import mongo_transaction, session_database, with_batch_size
+-from app.reference_cache import subcategory_catalog_cache
++from app.reference_cache import subcategory_catalog_cache, unwrap_database
+ 
+ 
+ NATURES = (
+@@ -547,14 +547,14 @@ def category_subcategories(
+     preloaded_transactions=None,
+     preloaded_captures=None,
+ ) -> dict[str, list[str]]:
+-    raw_db = getattr(db, "db", db)
++    raw_db = unwrap_database(db)
+     if (
+         all_categories is None
+         and preloaded_transactions is None
+         and preloaded_captures is None
+         and isinstance(raw_db, Database)
+     ):
+-        return subcategory_catalog_cache.get(raw_db, lambda: _compute_category_subcategories(db))
++        return subcategory_catalog_cache.get(raw_db, lambda: _compute_category_subcategories(raw_db))
+     return _compute_category_subcategories(
+         db,
+         all_categories=all_categories,
+diff --git a/backend/app/telemetry.py b/backend/app/telemetry.py
+index d9e6b88..2e2edff 100755
+--- a/backend/app/telemetry.py
++++ b/backend/app/telemetry.py
+@@ -171,27 +171,36 @@ class MongoPerformanceListener(monitoring.CommandListener):
+     }
+ 
+     def __init__(self) -> None:
+-        self._collections_by_req_id: dict[int, str] = {}
++        self._collections_by_req_id: dict[tuple[Any, int], str] = {}
+         self._lock = Lock()
+ 
++    @staticmethod
++    def _event_key(event: Any) -> tuple[Any, int]:
++        return (getattr(event, "connection_id", None), event.request_id)
++
+     def started(self, event: monitoring.CommandStartedEvent) -> None:
+         if event.command_name not in self._MONITORED_COMMANDS:
+             return
+-        trace = _current_trace.get()
+-        if trace is None:
+-            return
+-        collection = str(event.command.get(event.command_name) or "session")
++        if event.command_name == "getMore":
++            collection = str(event.command.get("collection") or event.command.get("getMore") or "cursor")
++        else:
++            collection = str(event.command.get(event.command_name) or event.command.get("collection") or "session")
+         with self._lock:
+-            self._collections_by_req_id[event.request_id] = collection
++            if len(self._collections_by_req_id) >= 4096:
++                self._collections_by_req_id.pop(next(iter(self._collections_by_req_id)), None)
++            self._collections_by_req_id[self._event_key(event)] = collection
+ 
+     def succeeded(self, event: monitoring.CommandSucceededEvent) -> None:
+         if event.command_name not in self._MONITORED_COMMANDS:
+             return
++        with self._lock:
++            collection = self._collections_by_req_id.pop(
++                self._event_key(event),
++                self._collections_by_req_id.pop((None, event.request_id), "unknown"),
++            )
+         trace = _current_trace.get()
+         if trace is None:
+             return
+-        with self._lock:
+-            collection = self._collections_by_req_id.pop(event.request_id, "unknown")
+         duration_ms = round(event.duration_micros / 1000.0, 2)
+         docs_returned = None
+         cursor = event.reply.get("cursor")
+@@ -213,11 +222,14 @@ class MongoPerformanceListener(monitoring.CommandListener):
+     def failed(self, event: monitoring.CommandFailedEvent) -> None:
+         if event.command_name not in self._MONITORED_COMMANDS:
+             return
++        with self._lock:
++            collection = self._collections_by_req_id.pop(
++                self._event_key(event),
++                self._collections_by_req_id.pop((None, event.request_id), "unknown"),
++            )
+         trace = _current_trace.get()
+         if trace is None:
+             return
+-        with self._lock:
+-            collection = self._collections_by_req_id.pop(event.request_id, "unknown")
+         duration_ms = round(event.duration_micros / 1000.0, 2)
+         trace.db_commands.append(
+             DbCommandMetric(
+diff --git a/backend/tests/test_performance_plan.py b/backend/tests/test_performance_plan.py
+index e2fdc5f..a0b4328 100755
+--- a/backend/tests/test_performance_plan.py
++++ b/backend/tests/test_performance_plan.py
+@@ -2,14 +2,17 @@ import sys
+ import unittest
+ from datetime import datetime, timezone
+ from pathlib import Path
++from types import SimpleNamespace
+ from unittest.mock import MagicMock
+ 
+ from bson.decimal128 import Decimal128
++from pymongo.database import Database
+ 
+ sys.path.insert(0, str(Path(__file__).parents[1]))
+-from app.atomic import mongo_snapshot, with_batch_size
+-from app.main import CLASSIFICATION_FIELDS, _build_classification_options, dashboard, dashboard_overview, movements
+-from app.reference_cache import classification_cache, historical_context_cache
++from app.atomic import _SessionDatabase, mongo_snapshot, with_batch_size
++from app.auth import OWNER_ID, owner, owner_cache
++from app.main import CLASSIFICATION_FIELDS, _build_classification_options, cached_taxonomy_overrides, dashboard, dashboard_overview, movements, taxonomy_overrides_cache
++from app.reference_cache import classification_cache, historical_context_cache, subcategory_catalog_cache, unwrap_database
+ 
+ 
+ def dashboard_db(transactions, captures=(), commitments=(), accounts=()):
+@@ -33,6 +36,9 @@ class PerformancePlanTests(unittest.TestCase):
+     def setUp(self):
+         classification_cache.invalidate()
+         historical_context_cache.invalidate()
++        subcategory_catalog_cache.invalidate()
++        taxonomy_overrides_cache.invalidate()
++        owner_cache.invalidate()
+ 
+     def test_dashboard_has_no_ten_thousand_record_cutoff(self):
+         stamp = datetime(2026, 9, 1, tzinfo=timezone.utc)
+@@ -106,6 +112,36 @@ class PerformancePlanTests(unittest.TestCase):
+         self.assertIs(returned, cursor)
+         self.assertEqual(cursor.applied_size, 2000)
+ 
++    def test_unwrap_database_preserves_pymongo_database_identity(self):
++        class FakeMongoDatabase(Database):
++            def __init__(self):
++                self.categories = MagicMock()
++                self.categories.find.return_value = [
++                    {"name": "Alimentação", "active": True, "subcategories": [{"name": "Padaria", "active": True}]}
++                ]
++                self.account = MagicMock()
++                self.account.find_one.return_value = {"_id": OWNER_ID, "kind": "app_identity", "auth_version": 1, "sessions": []}
++
++            def __getattr__(self, name):
++                # Emulate PyMongo Database.__getattr__ returning a new Collection object on .db access
++                return SimpleNamespace(collection_name=name)
++
++        raw_db = FakeMongoDatabase()
++        session_db = _SessionDatabase(raw_db, session=object())
++        self.assertIs(unwrap_database(raw_db), raw_db)
++        self.assertIs(unwrap_database(session_db), raw_db)
++
++        first = cached_taxonomy_overrides(raw_db)
++        second = cached_taxonomy_overrides(session_db)
++        self.assertEqual(first, second)
++        self.assertEqual(raw_db.categories.find.call_count, 1)
++
++        acc1 = owner(raw_db)
++        acc2 = owner(session_db)
++        self.assertEqual(acc1["_id"], OWNER_ID)
++        self.assertEqual(acc2["_id"], OWNER_ID)
++        self.assertEqual(raw_db.account.find_one.call_count, 1)
++
+     def test_classification_options_uses_single_aggregation_per_collection(self):
+         db = MagicMock()
+         tx_agg = {"_id": None, "platform_id": [], **{f: [] for f in CLASSIFICATION_FIELDS}}
+@@ -159,6 +195,117 @@ class PerformancePlanTests(unittest.TestCase):
+         self.assertEqual(len(ids), len(set(ids)))
+         self.assertFalse(second["has_more"])
+ 
++    def test_provisional_review_syncs_new_alias_on_existing_merchant_without_validation_error(self):
++        from uuid import uuid4
++        from bson import ObjectId
++        from pymongo.errors import WriteError
++        from app.main import ProvisionalUpdate, _sync_merchant_alias, update_provisional
++        from test_ingestion import Collection, Cursor, FakeDB
++
++        def apply_projection(doc, projection):
++            if not projection or doc is None:
++                return doc
++            out = {"_id": doc["_id"]} if "_id" in doc and projection.get("_id", 1) != 0 else {}
++            for key, val in projection.items():
++                if not val or key == "_id":
++                    continue
++                if "." in key:
++                    top, sub = key.split(".", 1)
++                    if isinstance(doc.get(top), list):
++                        out[top] = [{sub: item[sub]} if isinstance(item, dict) and sub in item else {} for item in doc[top]]
++                elif key in doc:
++                    out[key] = [dict(x) if isinstance(x, dict) else x for x in doc[key]] if isinstance(doc[key], list) else doc[key]
++            return out
++
++        class ValidatedMerchantCollection(Collection):
++            def find_one(self, query, projection=None):
++                doc = super().find_one(query)
++                return apply_projection(doc, projection) if projection and doc is not None else doc
++
++            def find(self, query, projection=None):
++                if "nome_padrao" in query and "$nin" in query["nome_padrao"]:
++                    matched = [doc for doc in self.docs if doc.get("nome_padrao") not in query["nome_padrao"]["$nin"]]
++                else:
++                    matched = [doc for doc in self.docs if self._matches(doc, query)]
++                return Cursor(apply_projection(doc, projection) if projection else doc for doc in matched)
++
++            def update_one(self, query, update):
++                set_fields = (update or {}).get("$set", {})
++                if "aliases" in set_fields:
++                    for alias in set_fields["aliases"]:
++                        if not isinstance(alias, dict) or not all(k in alias for k in ("valor", "normalizado", "status", "source_record_ids")):
++                            raise WriteError("Document failed validation: alias missing required schema fields", 121)
++                return super().update_one(query, update)
++
++        stamp = datetime(2026, 10, 20, 21, 21, 40, tzinfo=timezone.utc)
++        vendor_id = ObjectId()
++        platform_id = ObjectId()
++        db = FakeDB(
++            merchants=ValidatedMerchantCollection([
++                {
++                    "_id": vendor_id,
++                    "external_key": "merchant-lanche-bem",
++                    "schema_version": 2,
++                    "tipo_entidade": "marca",
++                    "nome_padrao": "Lanche Bem",
++                    "aliases": [{"valor": "LANCHE BEM", "normalizado": "LANCHE BEM", "status": "confirmado", "source_record_ids": []}],
++                },
++                {
++                    "_id": platform_id,
++                    "external_key": "merchant-cappta",
++                    "schema_version": 2,
++                    "tipo_entidade": "marca",
++                    "nome_padrao": "Cappta",
++                    "aliases": [],
++                },
++            ]),
++            provisional_transactions=Collection([
++                {
++                    "_id": ObjectId(),
++                    "provisional_id": "prov-review-1",
++                    "event_id": "ev-review-1",
++                    "status": "provisional",
++                    "revision": 1,
++                    "merchant_raw": "CAPPTA LANCHE BEM FILIAL 2",
++                    "valor": Decimal128("-35.90"),
++                    "fluxo": "saida",
++                    "tipo": "compra",
++                    "natureza": "COMPRA",
++                    "categoria_sugerida": "Alimentação",
++                    "subcategoria": "Padaria",
++                    "metodo_pagamento": "cartao_credito",
++                    "data_evento": stamp,
++                },
++            ]),
++            raw_events=Collection([{"_id": ObjectId(), "event_id": "ev-review-1", "processing_status": "provisional"}]),
++        )
++        req_id = uuid4()
++        res = update_provisional(
++            "prov-review-1",
++            ProvisionalUpdate(
++                request_id=req_id,
++                expected_revision=1,
++                vendedor="Lanche Bem",
++                plataforma="Cappta",
++                metodo_pagamento="cartao_credito",
++                fluxo="saida",
++                action="confirm",
++            ),
++            db,
++        )
++        self.assertTrue(res["persisted"])
++        self.assertEqual(res["request_id"], str(req_id))
++        self.assertEqual(res["item"]["status"], "confirmed")
++        self.assertEqual(res["item"]["vendedor"], "Lanche Bem")
++        merchant_doc = next(d for d in db.merchants.docs if d["_id"] == vendor_id)
++        self.assertEqual(len(merchant_doc["aliases"]), 2)
++        for alias in merchant_doc["aliases"]:
++            self.assertTrue(all(k in alias for k in ("valor", "normalizado", "status", "source_record_ids")))
++        # Also verify defensive reload when _sync_merchant_alias receives a stripped projection
++        stripped = {"_id": vendor_id, "nome_padrao": "Lanche Bem", "aliases": [{"normalizado": "LANCHE BEM"}]}
++        _sync_merchant_alias(db, stripped, "CAPPTA LANCHE BEM 3", "Lanche Bem", True, "Cappta", None, stamp)
++        self.assertEqual(len(merchant_doc["aliases"]), 3)
++
+ 
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/backend/tests/test_telemetry_privacy.py b/backend/tests/test_telemetry_privacy.py
+index 6de659a..f84b450 100755
+--- a/backend/tests/test_telemetry_privacy.py
++++ b/backend/tests/test_telemetry_privacy.py
+@@ -2,10 +2,11 @@
+ import sys
+ import unittest
+ from pathlib import Path
++from types import SimpleNamespace
+ 
+ sys.path.insert(0, str(Path(__file__).parents[1]))
+ from app.dashboard_window import _merge_intervals
+-from app.telemetry import RequestTrace, SpanTimer, _current_trace, public_route, safe_client_metadata
++from app.telemetry import MongoPerformanceListener, RequestTrace, SpanTimer, _current_trace, public_route, safe_client_metadata
+ 
+ 
+ class TelemetryPrivacyTests(unittest.TestCase):
+@@ -49,6 +50,30 @@ class TelemetryPrivacyTests(unittest.TestCase):
+             [('2026-01', '2026-02'), ('2026-04', '2026-05')],
+         )
+ 
++    def test_mongo_listener_tracks_getmore_collection_and_connection_id(self):
++        listener = MongoPerformanceListener()
++        trace = RequestTrace(trace_id='t2', method='GET', path='/v1/commitment-projection')
++        token = _current_trace.set(trace)
++        try:
++            listener.started(SimpleNamespace(
++                command_name='getMore',
++                command={'getMore': 160975888853370636, 'collection': 'obligations'},
++                request_id=42,
++                connection_id=('atlas-shard-0', 27017),
++            ))
++            listener.succeeded(SimpleNamespace(
++                command_name='getMore',
++                request_id=42,
++                connection_id=('atlas-shard-0', 27017),
++                duration_micros=531000,
++                reply={'cursor': {'nextBatch': [{}, {}]}},
++            ))
++        finally:
++            _current_trace.reset(token)
++        self.assertEqual(len(trace.db_commands), 1)
++        self.assertEqual(trace.db_commands[0].collection, 'obligations')
++        self.assertEqual(trace.db_commands[0].docs_returned, 2)
++
+ 
+ if __name__ == '__main__':
+     unittest.main()

@@ -78,8 +78,9 @@ class ReferenceCache:
 
 historical_context_cache = ReferenceCache(ttl_seconds=120)
 subcategory_catalog_cache = ReferenceCache(ttl_seconds=300)
-dashboard_snapshot_cache = ReferenceCache(ttl_seconds=30)
+statement_review_cache = ReferenceCache(ttl_seconds=120)
+dashboard_snapshot_cache = ReferenceCache(ttl_seconds=30, dependents=(statement_review_cache,))
 classification_cache = ReferenceCache(
     ttl_seconds=300,
-    dependents=(historical_context_cache, subcategory_catalog_cache, dashboard_snapshot_cache),
+    dependents=(historical_context_cache, subcategory_catalog_cache, dashboard_snapshot_cache, statement_review_cache),
 )

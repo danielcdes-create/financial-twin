@@ -22,4 +22,5 @@ def page(collection, query, field, limit=100, cursor=None):
     if more:
         last=rows[-1]
         token=base64.urlsafe_b64encode(json.dumps({'date':utc_instant(last[field]).isoformat(),'id':str(last['_id']),'object_id':isinstance(last['_id'],ObjectId),'field':field,'filter':signature}).encode()).decode().rstrip('=')
-    return rows,{'total':collection.count_documents(query),'has_more':more,'next_cursor':token,'limit':limit}
+    total=len(rows) if not cursor and not more else collection.count_documents(query)
+    return rows,{'total':total,'has_more':more,'next_cursor':token,'limit':limit}

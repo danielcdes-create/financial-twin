@@ -1,0 +1,524 @@
+diff --git a/backend/app/dashboard_window.py b/backend/app/dashboard_window.py
+index 3352154..d2e1e59 100644
+--- a/backend/app/dashboard_window.py
++++ b/backend/app/dashboard_window.py
+@@ -2,9 +2,11 @@
+ from contextlib import nullcontext
+ from datetime import datetime, timezone, timedelta
+ import re
++from pymongo.database import Database
+ from app.atomic import with_batch_size
+ from app.financial_time import day_start, today, local_date
+ from app.economic_period import economic_instant
++from app.reference_cache import dashboard_snapshot_cache, unwrap_database
+ 
+ try:
+     from app.telemetry import SpanTimer
+@@ -68,14 +70,26 @@ def _row_matches_intervals(row, date_ranges, comp_ranges, normalized_datetime):
+     return False
+ 
+ 
++def _load_raw_ledger_snapshot(db):
++    all_txs = list(with_batch_size(db.transactions.find({}, PROJECTION), 2000))
++    all_captures = list(with_batch_size(db.provisional_transactions.find({'status': 'confirmed'}, PROJECTION), 2000))
++    return all_txs, all_captures
++
++
+ def snapshot_for(db, windows):
+     from app.main import period_start, shift_months, normalized_datetime
+ 
+     with SpanTimer("dashboard.snapshot_for", windows=len(windows)):
+         # Load transactions and confirmed captures in a single batched query per collection
+-        # (eliminates the 4 separate find_one roundtrips and getMore pagination overhead).
+-        all_txs = list(with_batch_size(db.transactions.find({}, PROJECTION), 2000))
+-        all_captures = list(with_batch_size(db.provisional_transactions.find({'status': 'confirmed'}, PROJECTION), 2000))
++        # and reuse the 30s process-local snapshot cache when reading from a MongoDB Database.
++        raw_db = unwrap_database(db)
++        if isinstance(raw_db, Database):
++            all_txs, all_captures = dashboard_snapshot_cache.get(
++                raw_db,
++                lambda: _load_raw_ledger_snapshot(raw_db),
++            )
++        else:
++            all_txs, all_captures = _load_raw_ledger_snapshot(db)
+ 
+         latest_dt = max(
+             (row['data_evento'] for row in all_txs if isinstance(row.get('data_evento'), datetime)),
+diff --git a/backend/app/main.py b/backend/app/main.py
+index daa3894..cabdea2 100644
+--- a/backend/app/main.py
++++ b/backend/app/main.py
+@@ -35,7 +35,7 @@ from app.category_filter import ACTIVE_CAPTURES, catalog_category_names, categor
+ from app.movement_filters import period_query, intersect, search_query, filter_key as movement_filter_key
+ from app.document_validation import validate_document_extraction
+ from app.pdf_input import PDFPasswordError, read_pdf
+-from app.reference_cache import ReferenceCache, classification_cache, unwrap_database
++from app.reference_cache import ReferenceCache, classification_cache, dashboard_snapshot_cache, unwrap_database
+ from contextlib import nullcontext
+ try:
+     from app.telemetry import install_telemetry, SpanTimer
+@@ -231,17 +231,30 @@ async def private_response_headers(request: Request, call_next):
+ @app.middleware("http")
+ async def invalidate_reference_data(request: Request, call_next):
+     path = request.url.path
+-    mutates = (
++    is_write = (
+         request.method in {"POST", "PUT", "PATCH", "DELETE"}
+         and path != "/v1/capture-batches/file-status"
+         and not path.startswith("/v1/telemetry")
+         and not path.endswith(("/preview", "/review"))
+-        and path.startswith(("/v1/commitment-profile", "/v1/capture-batches", "/v1/movements", "/v1/transactions", "/v1/categories", "/v1/subcategories", "/v1/provisional", "/v1/merchants", "/v1/reviews", "/v1/import", "/v1/documents"))
+     )
++    mutates_dashboard = is_write and path.startswith((
++        "/v1/commitment-profile", "/v1/capture-batches", "/v1/movements",
++        "/v1/transactions", "/v1/categories", "/v1/subcategories",
++        "/v1/provisional", "/v1/merchants", "/v1/reviews",
++        "/v1/import", "/v1/documents",
++    ))
++    mutates_classification = is_write and path.startswith((
++        "/v1/commitment-profile", "/v1/capture-batches", "/v1/movements",
++        "/v1/transactions", "/v1/categories", "/v1/subcategories",
++        "/v1/merchants", "/v1/reviews", "/v1/import", "/v1/documents",
++    ))
+     try:
+         return await call_next(request)
+     finally:
+-        if mutates: classification_cache.invalidate()
++        if mutates_dashboard:
++            dashboard_snapshot_cache.invalidate()
++        if mutates_classification:
++            classification_cache.invalidate()
+ from app.release_manifest import verified_release
+ # Compatibility symbols: the API uses the verified APK manifest, never these values.
+ ANDROID_VERSION_NAME=None
+@@ -780,8 +793,14 @@ def dashboard_overview(period:Literal["month","3m","6m","12m","year","all"]="mon
+         snapshot=snapshot_for(reading,[(period,None,None),("year",year_begin,end),("month",month_begin,end)]) if isinstance(reading,(Database,_SessionDatabase)) else (list(with_batch_size(reading.transactions.find({},PROJECTION), 2000).limit(0)),list(with_batch_size(reading.provisional_transactions.find({'status':'confirmed'},PROJECTION), 2000)))
+         forecast=dashboard_forecast(reading, snapshot=snapshot)
+         selected_view=_dashboard(period,None,None,reading,snapshot,forecast)
+-        year_view=selected_view if period=="year" and selected_view.get("period_start")==year_begin.isoformat() and selected_view.get("period_end")==end.isoformat() else _dashboard("year",year_begin,end,reading,snapshot,forecast)
+-        month_view=selected_view if period=="month" and selected_view.get("period_start")==month_begin.isoformat() and selected_view.get("period_end")==end.isoformat() else _dashboard("month",month_begin,end,reading,snapshot,forecast)
++        if period=="year" and selected_view.get("period_start")==year_begin.isoformat() and (selected_view.get("period_end") or "")<=end.isoformat():
++            year_view=selected_view if selected_view.get("period_end")==end.isoformat() else {**selected_view,"period_end":end.isoformat()}
++        else:
++            year_view=_dashboard("year",year_begin,end,reading,snapshot,forecast)
++        if period=="month" and selected_view.get("period_start")==month_begin.isoformat() and (selected_view.get("period_end") or "")<=end.isoformat():
++            month_view=selected_view if selected_view.get("period_end")==end.isoformat() else {**selected_view,"period_end":end.isoformat()}
++        else:
++            month_view=_dashboard("month",month_begin,end,reading,snapshot,forecast)
+         result={
+             "selected":selected_view,
+             "year":year_view,
+@@ -1848,6 +1867,11 @@ def _atomic_update_provisional(provisional_id:str, update:ProvisionalUpdate, db=
+     previous_display=with_merchant_name(item,db,include_historical=False,merchants_by_id=merchants_by_id)
+     previous_vendor=previous_display.get("vendedor")
+     previous_platform=previous_display.get("plataforma") if platform_name is not None else None
++    taxonomy_mutated=False
++    if "subcategoria" in values and values["subcategoria"]:
++        known_subcats=set(category_subcategories(db).get(effective_category, []))
++        if values["subcategoria"] not in known_subcats:
++            taxonomy_mutated=True
+     if supplier and supplier!=previous_vendor:
+         raw_source=item.get("merchant_raw")
+         platform_active=bool(platform_name or item.get("platform_id") or platform_identity(raw_source))
+@@ -1859,6 +1883,7 @@ def _atomic_update_provisional(provisional_id:str, update:ProvisionalUpdate, db=
+             merchant={"_id":ObjectId(),"external_key":f"merchant-user-{uuid4()}","schema_version":2,"created_at":now,"updated_at":now,"tipo_entidade":"marca","nome_padrao":supplier,"aliases":[{"valor":raw,"normalizado":normalized,"status":"confirmado","source_record_ids":[]}]}
+             db.merchants.insert_one(merchant)
+         _sync_merchant_alias(db,merchant,raw_source,supplier,platform_active,platform_name,item.get("merchant_id"),now)
++        taxonomy_mutated=True
+         merchants_by_id[merchant["_id"]]=merchant
+         merchants_by_id[str(merchant["_id"])]=merchant
+         changed.update({"merchant_id":merchant["_id"],"merchant_name":merchant["nome_padrao"]})
+@@ -1867,7 +1892,9 @@ def _atomic_update_provisional(provisional_id:str, update:ProvisionalUpdate, db=
+         platform=find_or_create_platform(db,platform_name,now)
+         merchants_by_id[platform["_id"]]=platform
+         merchants_by_id[str(platform["_id"])]=platform
+-        if item.get("platform_id")!=platform["_id"]: changed["platform_id"]=platform["_id"]
++        if item.get("platform_id")!=platform["_id"]:
++            changed["platform_id"]=platform["_id"]
++            taxonomy_mutated=True
+         if previous_vendor and not supplier and canonical_key(previous_vendor)==canonical_key(platform["nome_padrao"]): clear_supplier=True
+         if "platform_id" in changed: before["plataforma"]=previous_platform
+     unset_values={}
+@@ -1911,6 +1938,9 @@ def _atomic_update_provisional(provisional_id:str, update:ProvisionalUpdate, db=
+     changed["revision"]=item.get("revision",1)+1
+     db.provisional_transactions.update_one({"_id":item["_id"]},{"$set":changed,**({"$unset":unset_values} if unset_values else {})})
+     db.audit_log.insert_one({"event":"provisional_transaction_updated","provisional_id":provisional_id,"source":"mobile_manual_review","before":before,"after":{**json_safe(changed),**{key:None for key in unset_values if key not in {'merchant_id','merchant_name','platform_id'}},**({'plataforma':None} if 'platform_id' in unset_values else {}),**({"vendedor":None} if 'merchant_id' in unset_values or 'merchant_name' in unset_values else {"vendedor":supplier} if supplier and "merchant_id" in changed else {})},"change_reason":"user_review","created_at":now})
++    if taxonomy_mutated:
++        classification_cache.invalidate()
++    dashboard_snapshot_cache.invalidate()
+     updated_doc={k:v for k,v in {**item,**changed}.items() if k not in unset_values}
+     return {"item":with_merchant_name(updated_doc,db,include_historical=(update.action is None),merchants_by_id=merchants_by_id),"changed":True,"_raw_item":updated_doc,"_merchants_by_id":merchants_by_id,"_profiles":profiles_cache}
+ 
+diff --git a/backend/app/reference_cache.py b/backend/app/reference_cache.py
+index 3aac3df..b9c5478 100644
+--- a/backend/app/reference_cache.py
++++ b/backend/app/reference_cache.py
+@@ -35,9 +35,13 @@ class ReferenceCache:
+         while True:
+             with self._lock:
+                 generation = self._generation
++                now = monotonic()
+                 cached = self._values.get(key)
+-                if cached and cached[0] is raw_scope and cached[1] > monotonic():
++                if cached and cached[0] is raw_scope and cached[1] > now:
+                     return cached[2]
++                catalog_cached = self._values.get("catalog") if not isinstance(scope, str) else None
++                if catalog_cached and catalog_cached[1] > now:
++                    return catalog_cached[2]
+                 future = self._pending.get((key, generation))
+                 owner = future is None
+                 if owner:
+@@ -62,10 +66,20 @@ class ReferenceCache:
+                 if generation == self._generation:
+                     return value
+ 
++    def set(self, scope, value):
++        raw_scope = unwrap_database(scope)
++        key = scope if isinstance(scope, str) else id(raw_scope)
++        with self._lock:
++            if len(self._values) >= 16 and key not in self._values:
++                self._values.pop(next(iter(self._values)))
++            self._values[key] = (raw_scope, monotonic() + self.ttl_seconds, value)
++        return value
++
+ 
+ historical_context_cache = ReferenceCache(ttl_seconds=120)
+ subcategory_catalog_cache = ReferenceCache(ttl_seconds=300)
++dashboard_snapshot_cache = ReferenceCache(ttl_seconds=30)
+ classification_cache = ReferenceCache(
+     ttl_seconds=300,
+-    dependents=(historical_context_cache, subcategory_catalog_cache),
++    dependents=(historical_context_cache, subcategory_catalog_cache, dashboard_snapshot_cache),
+ )
+diff --git a/backend/app/taxonomy.py b/backend/app/taxonomy.py
+index 51fd591..ef22628 100644
+--- a/backend/app/taxonomy.py
++++ b/backend/app/taxonomy.py
+@@ -555,12 +555,17 @@ def category_subcategories(
+         and isinstance(raw_db, Database)
+     ):
+         return subcategory_catalog_cache.get(raw_db, lambda: _compute_category_subcategories(raw_db))
+-    return _compute_category_subcategories(
++    result = _compute_category_subcategories(
+         db,
+         all_categories=all_categories,
+         preloaded_transactions=preloaded_transactions,
+         preloaded_captures=preloaded_captures,
+     )
++    if all_categories is None:
++        subcategory_catalog_cache.set("catalog", result)
++        if isinstance(raw_db, Database):
++            subcategory_catalog_cache.set(raw_db, result)
++    return result
+ 
+ 
+ def _read_pair(document: dict[str, Any], target: dict[str, Any]) -> tuple[Any, Any, list[str]]:
+diff --git a/backend/app/telemetry.py b/backend/app/telemetry.py
+index 2e2edff..6ad0dd1 100644
+--- a/backend/app/telemetry.py
++++ b/backend/app/telemetry.py
+@@ -190,20 +190,42 @@ class MongoPerformanceListener(monitoring.CommandListener):
+                 self._collections_by_req_id.pop(next(iter(self._collections_by_req_id)), None)
+             self._collections_by_req_id[self._event_key(event)] = collection
+ 
++    @staticmethod
++    def _extract_reply_collection(reply: Any) -> str | None:
++        if not isinstance(reply, dict):
++            return None
++        cursor = reply.get("cursor")
++        if isinstance(cursor, dict):
++            ns = cursor.get("ns")
++            if isinstance(ns, str) and "." in ns:
++                return ns.split(".", 1)[1]
++        return None
++
++    def _pop_collection(self, event: Any, reply: Any = None) -> str:
++        key = self._event_key(event)
++        with self._lock:
++            if key in self._collections_by_req_id:
++                collection = self._collections_by_req_id.pop(key)
++            else:
++                collection = self._collections_by_req_id.pop((None, event.request_id), "unknown")
++        collection_from_ns = self._extract_reply_collection(reply)
++        if collection_from_ns and (
++            collection in {"unknown", "cursor", "session"}
++            or event.command_name in {"find", "aggregate", "getMore"}
++        ):
++            return collection_from_ns
++        return collection
++
+     def succeeded(self, event: monitoring.CommandSucceededEvent) -> None:
+         if event.command_name not in self._MONITORED_COMMANDS:
+             return
+-        with self._lock:
+-            collection = self._collections_by_req_id.pop(
+-                self._event_key(event),
+-                self._collections_by_req_id.pop((None, event.request_id), "unknown"),
+-            )
++        collection = self._pop_collection(event, getattr(event, "reply", None))
+         trace = _current_trace.get()
+         if trace is None:
+             return
+         duration_ms = round(event.duration_micros / 1000.0, 2)
+         docs_returned = None
+-        cursor = event.reply.get("cursor")
++        cursor = event.reply.get("cursor") if isinstance(event.reply, dict) else None
+         if isinstance(cursor, dict):
+             batch = cursor.get("firstBatch") or cursor.get("nextBatch")
+             if isinstance(batch, list):
+@@ -222,11 +244,7 @@ class MongoPerformanceListener(monitoring.CommandListener):
+     def failed(self, event: monitoring.CommandFailedEvent) -> None:
+         if event.command_name not in self._MONITORED_COMMANDS:
+             return
+-        with self._lock:
+-            collection = self._collections_by_req_id.pop(
+-                self._event_key(event),
+-                self._collections_by_req_id.pop((None, event.request_id), "unknown"),
+-            )
++        collection = self._pop_collection(event)
+         trace = _current_trace.get()
+         if trace is None:
+             return
+diff --git a/backend/tests/test_performance_plan.py b/backend/tests/test_performance_plan.py
+index a0b4328..150ae48 100644
+--- a/backend/tests/test_performance_plan.py
++++ b/backend/tests/test_performance_plan.py
+@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).parents[1]))
+ from app.atomic import _SessionDatabase, mongo_snapshot, with_batch_size
+ from app.auth import OWNER_ID, owner, owner_cache
+ from app.main import CLASSIFICATION_FIELDS, _build_classification_options, cached_taxonomy_overrides, dashboard, dashboard_overview, movements, taxonomy_overrides_cache
+-from app.reference_cache import classification_cache, historical_context_cache, subcategory_catalog_cache, unwrap_database
++from app.reference_cache import classification_cache, dashboard_snapshot_cache, historical_context_cache, subcategory_catalog_cache, unwrap_database
+ 
+ 
+ def dashboard_db(transactions, captures=(), commitments=(), accounts=()):
+@@ -37,6 +37,7 @@ class PerformancePlanTests(unittest.TestCase):
+         classification_cache.invalidate()
+         historical_context_cache.invalidate()
+         subcategory_catalog_cache.invalidate()
++        dashboard_snapshot_cache.invalidate()
+         taxonomy_overrides_cache.invalidate()
+         owner_cache.invalidate()
+ 
+@@ -307,5 +308,95 @@ class PerformancePlanTests(unittest.TestCase):
+         self.assertEqual(len(merchant_doc["aliases"]), 3)
+ 
+ 
++
++    def test_category_subcategories_populates_cache_when_preloaded(self):
++        from app.taxonomy import category_subcategories
++
++        class FakeMongoDatabase(Database):
++            def __init__(self):
++                self.categories = MagicMock()
++                self.categories.find.return_value = [
++                    {"name": "Alimentação", "active": True, "subcategories": [{"name": "Padaria", "active": True}]}
++                ]
++                self.transactions = MagicMock()
++                self.transactions.find.return_value = []
++                self.provisional_transactions = MagicMock()
++                self.provisional_transactions.find.return_value = []
++
++            def __getattr__(self, name):
++                return SimpleNamespace(collection_name=name)
++
++        raw_db = FakeMongoDatabase()
++        preloaded_txs = [{"categoria": "Alimentação", "subcategoria": "Supermercado/Feira/Açougue"}]
++        first = category_subcategories(raw_db, preloaded_transactions=preloaded_txs, preloaded_captures=[])
++        second = category_subcategories(raw_db)
++        self.assertEqual(first, second)
++        self.assertEqual(raw_db.transactions.find.call_count, 0)
++        self.assertEqual(raw_db.provisional_transactions.find.call_count, 0)
++
++    def test_dashboard_snapshot_cache_and_month_view_deduplication(self):
++        from datetime import date
++
++        class FakeMongoDatabase(Database):
++            def __init__(self):
++                stamp = datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc)
++                self.transactions = MagicMock()
++                self.transactions.find.return_value = [
++                    {
++                        "_id": 1,
++                        "data_evento": stamp,
++                        "valor": Decimal128("-50.00"),
++                        "fluxo": "saida",
++                        "categoria": "Alimentação",
++                        "classification": {"migration_reason": "despesa_real"},
++                    }
++                ]
++                self.provisional_transactions = MagicMock()
++                self.provisional_transactions.find.return_value = []
++                self.provisional_transactions.count_documents.return_value = 0
++                self.review_queue = MagicMock()
++                self.review_queue.count_documents.return_value = 0
++                self.obligations = MagicMock()
++                self.obligations.find.return_value = []
++                self.installment_plans = MagicMock()
++                self.installment_plans.find.return_value = []
++                self.commitments = MagicMock()
++                self.commitments.find.return_value = []
++                self.accounts = MagicMock()
++                self.accounts.find.return_value = []
++                self.account_profiles = MagicMock()
++                self.account_profiles.find.return_value = []
++                self.future_schedule_overrides = MagicMock()
++                self.future_schedule_overrides.find.return_value = []
++                self.investments = MagicMock()
++                self.investments.count_documents.return_value = 0
++                self.source_records = MagicMock()
++                self.source_records.find_one.return_value = None
++
++            def __getattr__(self, name):
++                return SimpleNamespace(collection_name=name)
++
++        raw_db = FakeMongoDatabase()
++        res1 = dashboard_overview(
++            period="month",
++            year_start=date(2026, 1, 1),
++            month_start=date(2026, 10, 1),
++            month_end=date(2026, 10, 21),
++            db=raw_db,
++        )
++        res2 = dashboard_overview(
++            period="month",
++            year_start=date(2026, 1, 1),
++            month_start=date(2026, 10, 1),
++            month_end=date(2026, 10, 21),
++            db=raw_db,
++        )
++        self.assertEqual(raw_db.transactions.find.call_count, 1)
++        self.assertEqual(raw_db.provisional_transactions.find.call_count, 1)
++        self.assertEqual(res1["month"]["period_end"], "2026-10-21")
++        self.assertEqual(res1["month"]["expenses"], 50.0)
++        self.assertEqual(res2["month"]["expenses"], 50.0)
++
++
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/backend/tests/test_telemetry_privacy.py b/backend/tests/test_telemetry_privacy.py
+index f84b450..31c1eb0 100644
+--- a/backend/tests/test_telemetry_privacy.py
++++ b/backend/tests/test_telemetry_privacy.py
+@@ -75,5 +75,37 @@ class TelemetryPrivacyTests(unittest.TestCase):
+         self.assertEqual(trace.db_commands[0].docs_returned, 2)
+ 
+ 
++
++    def test_mongo_listener_extracts_cursor_ns_and_does_not_eager_pop(self):
++        listener = MongoPerformanceListener()
++        listener.started(SimpleNamespace(
++            command_name='find',
++            command={'find': 'accounts'},
++            connection_id=None,
++            request_id=99,
++        ))
++        listener.started(SimpleNamespace(
++            command_name='find',
++            command={'find': 'wrong_collection'},
++            connection_id=('127.0.0.1', 27017),
++            request_id=99,
++        ))
++        trace = RequestTrace(trace_id='t2', method='GET', path='/v1/dashboard/overview')
++        token = _current_trace.set(trace)
++        try:
++            listener.succeeded(SimpleNamespace(
++                command_name='find',
++                connection_id=('127.0.0.1', 27017),
++                request_id=99,
++                duration_micros=156000,
++                reply={'cursor': {'firstBatch': [{'_id': 1}], 'ns': 'financial_twin.transactions'}},
++            ))
++        finally:
++            _current_trace.reset(token)
++        self.assertEqual(len(trace.db_commands), 1)
++        self.assertEqual(trace.db_commands[0].collection, 'transactions')
++        self.assertEqual(listener._collections_by_req_id.get((None, 99)), 'accounts')
++
++
+ if __name__ == '__main__':
+     unittest.main()
+diff --git a/mobile/components/ProvisionalReview.tsx b/mobile/components/ProvisionalReview.tsx
+index 7569012..45056b8 100644
+--- a/mobile/components/ProvisionalReview.tsx
++++ b/mobile/components/ProvisionalReview.tsx
+@@ -211,15 +211,16 @@ export default function ProvisionalReview({api,money,onUpdated,initialItem,initi
+     if(!pending&&[409,428].includes(error.status))setNeedsCurrent(true);
+     Alert.alert(title,`${error.message}\n\nA tentativa e seus campos permanecem salvos.`);
+   };
+-  const finishConfirmed=async(provisionalId:string,confirmed:boolean,valid:()=>boolean,removedFromActive=confirmed)=>{
++  const finishConfirmed=async(provisionalId:string,confirmed:boolean,valid:()=>boolean,removedFromActive=confirmed,updatedItem?:any)=>{
+     setCommandPending(false);setConflict(null);
+     let notice='';
+     try{await forgetDraft(provisionalId)}catch{notice=' O rascunho foi preservado porque a limpeza local não terminou.'}
+     if(!valid())return;setResumable(current=>current?.provisional_id===provisionalId?null:current);setHasDraft(false);setSelected(null);
+     if(removedFromActive){setItems(current=>current.filter(row=>row.provisional_id!==provisionalId));setPage(current=>({...current,total:Math.max(0,current.total-1)}));}
++    else if(updatedItem){setItems(current=>current.map(row=>row.provisional_id===provisionalId?{...row,...updatedItem}:row));}
+     Alert.alert(confirmed?'Captura confirmada':'Captura atualizada',(confirmed?'A movimentação foi confirmada e entrou nos totais financeiros.':'As correções foram salvas.')+notice);
+     void Promise.resolve().then(onUpdated).catch(()=>{if(valid())Alert.alert('Captura salva','A gravação foi confirmada. Atualize a tela para conferir os dados atuais.');});
+-    if(initialItem)onExit?.();else await load(true);
++    if(initialItem)onExit?.();else void load(true);
+   };
+   const save=async(confirm=false)=>{
+     if(running.current||!selected?.provisional_id||conflict||needsCurrent)return;
+@@ -232,8 +233,8 @@ export default function ProvisionalReview({api,money,onUpdated,initialItem,initi
+     running.current=true;setSaving(true);const valid=captureScope();
+     try{
+       await draftWrites.current;
+-      await runReviewCommand(db,api,provisionalId,`/v1/provisional/${provisionalId}`,{...parsed,...(confirm?{action:'confirm'}:{}),...(reviewRecord?{validate_review:(draft.status_revisao||selected.status_revisao)==='validado'}:{}),expected_revision:selected.revision||1});
+-      if(valid())await finishConfirmed(provisionalId,confirm,valid);
++      const saved=await runReviewCommand(db,api,provisionalId,`/v1/provisional/${provisionalId}`,{...parsed,...(confirm?{action:'confirm'}:{}),...(reviewRecord?{validate_review:(draft.status_revisao||selected.status_revisao)==='validado'}:{}),expected_revision:selected.revision||1});
++      if(valid())await finishConfirmed(provisionalId,confirm,valid,confirm,saved?.item);
+     }catch(error:any){if(valid())await failedCommand(error,provisionalId,valid,'Não foi possível salvar')}
+     finally{running.current=false;if(valid())setSaving(false)}
+   };
+@@ -243,13 +244,14 @@ export default function ProvisionalReview({api,money,onUpdated,initialItem,initi
+     try{
+       await draftWrites.current;if(selected?.provisional_id===id)await preserveConflictingDraft(db,'provisional',provisionalId,{item:selected,draft});
+       const saved=await runReviewCommand(db,api,provisionalId);
+-      if(valid())await finishConfirmed(provisionalId,saved.item?.status==='confirmed'||saved.action==='confirm',valid);
++      const isConfirmed=saved.item?.status==='confirmed'||saved.action==='confirm';
++      if(valid())await finishConfirmed(provisionalId,isConfirmed,valid,isConfirmed,saved?.item);
+     }catch(error:any){if(valid())await failedCommand(error,provisionalId,valid,'Tentativa preservada')}finally{running.current=false;if(valid())setSaving(false)}
+   };
+   const reparse=async()=>{
+     if(running.current||!selected?.provisional_id||conflict||needsCurrent)return;
+     running.current=true;const provisionalId=selected.provisional_id;setSaving(true);const valid=captureScope();
+-    try{await runReviewCommand(db,api,provisionalId,`/v1/provisional/${provisionalId}/reparse`,{expected_revision:selected.revision||1});if(valid())await finishConfirmed(provisionalId,false,valid);}
++    try{const saved=await runReviewCommand(db,api,provisionalId,`/v1/provisional/${provisionalId}/reparse`,{expected_revision:selected.revision||1});if(valid())await finishConfirmed(provisionalId,false,valid,false,saved?.item);}
+     catch(error:any){if(valid())await failedCommand(error,provisionalId,valid,'Não foi possível reler')}
+     finally{running.current=false;if(valid())setSaving(false)}
+   };
+diff --git a/mobile/utils/apiClient.ts b/mobile/utils/apiClient.ts
+index a7f923b..ebec811 100644
+--- a/mobile/utils/apiClient.ts
++++ b/mobile/utils/apiClient.ts
+@@ -118,6 +118,7 @@ export function createApiClient(settings: Settings) {
+             ...(response.ok ? {} : { error: `HTTP ${response.status}` }),
+           });
+         } else {
++          const serverTotal = serverMetrics?.total_ms ?? null;
+           telemetry.record({
+             category: 'data_mutation',
+             name: `${(init.method || 'POST').toUpperCase()} ${path.split('?')[0]}`,
+@@ -128,7 +129,19 @@ export function createApiClient(settings: Settings) {
+               uploading,
+               status_code: response.status,
+               payload_bytes: text.length,
+-              server: serverMetrics,
++              ...(serverMetrics
++                ? {
++                    ...serverMetrics,
++                    network_overhead_ms:
++                      serverTotal !== null
++                        ? Math.max(0, Math.round((durationMs - serverTotal) * 100) / 100)
++                        : null,
++                    server_total_ms: serverTotal,
++                    server_db_ms: serverMetrics.db_ms ?? null,
++                    server_app_ms: serverMetrics.app_ms ?? null,
++                    server_db_calls: serverMetrics.db_calls ?? null,
++                  }
++                : {}),
+             },
+           });
+         }

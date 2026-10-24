@@ -478,6 +478,9 @@ def historical_capture_profile(
     vendor_id_by_name: dict[str, Any] = {}
     platform_votes: dict[str, float] = defaultdict(float)
     platform_id_by_name: dict[str, Any] = {}
+    no_platform_weight: float = 0.0
+    latest_reviewed_platform_state: str | None = None
+    latest_reviewed_stamp: float = -1.0
 
     for row, weight, _ in matched_rows:
         if has_specific_store:
@@ -502,10 +505,33 @@ def historical_capture_profile(
             pname = str(by_id[pid_str].get("nome_padrao") or "").strip()
         elif row.get("plataforma"):
             pname = str(row.get("plataforma") or "").strip()
-        if pname:
+        row_cleared = set(row.get("user_cleared_fields") or [])
+        row_prefilled = set(row.get("historical_prefill_fields") or [])
+        row_raw = str(row.get("merchant_raw") or row.get("estabelecimento_original") or row.get("descricao_original") or "")
+        reinjected_after_clear = (
+            "plataforma" in row_prefilled
+            and int(row.get("revision") or 1) >= 3
+            and bool(platform_identity(row_raw))
+        )
+        row_reviewed = _row_has_user_review(row)
+        row_stamp = _stamp_key(row)
+        if "plataforma" in row_cleared or reinjected_after_clear:
+            no_platform_weight += weight * 2.5
+            if row_stamp >= latest_reviewed_stamp:
+                latest_reviewed_stamp = row_stamp
+                latest_reviewed_platform_state = "cleared"
+        elif pname:
             platform_votes[pname] += weight
             if pid:
                 platform_id_by_name.setdefault(pname, pid)
+            if row_reviewed and "plataforma" not in row_prefilled and row_stamp >= latest_reviewed_stamp:
+                latest_reviewed_stamp = row_stamp
+                latest_reviewed_platform_state = "present"
+        elif row_reviewed:
+            no_platform_weight += weight * 1.5
+            if row_stamp >= latest_reviewed_stamp:
+                latest_reviewed_stamp = row_stamp
+                latest_reviewed_platform_state = "cleared"
 
     winning_vendor = _pick_winner(vendor_votes) if has_specific_store else None
     winning_merchant_id = vendor_id_by_name.get(winning_vendor) if winning_vendor else None
@@ -567,11 +593,21 @@ def historical_capture_profile(
                 acc_weight = weight * (1.4 if source_provider and row_provider == source_provider else 0.9)
                 account_votes[acc] += acc_weight
 
-    winning_platform = _pick_winner(platform_votes) or detected_platform_name
-    winning_platform_id = (
-        platform_id_by_name.get(winning_platform)
-        or (detected_platform_doc.get("_id") if detected_platform_doc else None)
+    best_platform = _pick_winner(platform_votes)
+    best_platform_score = platform_votes.get(best_platform, 0.0) if best_platform else 0.0
+    platform_absent = (
+        latest_reviewed_platform_state == "cleared"
+        or (no_platform_weight > 0 and no_platform_weight >= best_platform_score)
     )
+    if platform_absent:
+        winning_platform = None
+        winning_platform_id = None
+    else:
+        winning_platform = best_platform or detected_platform_name
+        winning_platform_id = (
+            platform_id_by_name.get(winning_platform)
+            or (detected_platform_doc.get("_id") if detected_platform_doc else None)
+        )
     winning_category = _pick_winner(category_votes)
     target_cat_for_sub = str(document.get("categoria_sugerida") or document.get("categoria") or winning_category or "").strip()
     winning_subcategory = _pick_winner(subcategory_by_cat.get(target_cat_for_sub, {})) if target_cat_for_sub else None
@@ -590,6 +626,8 @@ def historical_capture_profile(
         result["plataforma"] = winning_platform
         if winning_platform_id is not None:
             result["platform_id"] = winning_platform_id
+    elif platform_absent:
+        result["plataforma_ausente"] = True
     if winning_category:
         result["categoria_sugerida"] = winning_category
     if winning_subcategory:
@@ -617,44 +655,53 @@ def apply_historical_capture_defaults(
 ) -> list[str]:
     """Populate missing capture fields on `draft` from reviewed historical records."""
     source = {**(base_item or {}), **draft}
+    user_cleared = set(source.get("user_cleared_fields") or [])
     target_fields = ("merchant_id", "platform_id", "categoria_sugerida", "subcategoria", "natureza", "tipo", "metodo_pagamento", "localidade")
     if include_account_profile:
         target_fields = (*target_fields, "account_profile_id")
-    if all(source.get(field) for field in target_fields):
-        return []
     profile = historical_capture_profile(db, source, require_reviewed=True, profiles=profiles)
     if not profile:
         return []
+    if profile.get("plataforma_ausente") and "plataforma" not in user_cleared:
+        if base_item is None or int(base_item.get("revision") or 1) == 1:
+            draft.pop("platform_id", None)
+            draft.pop("plataforma", None)
+            source.pop("platform_id", None)
+            source.pop("plataforma", None)
+            user_cleared.add("plataforma")
+            draft["user_cleared_fields"] = sorted(user_cleared)
+    if all(source.get(field) for field in target_fields):
+        return []
     prefilled: list[str] = []
-    if not source.get("merchant_id") and profile.get("merchant_id") and profile.get("vendedor"):
+    if "vendedor" not in user_cleared and not source.get("merchant_id") and profile.get("merchant_id") and profile.get("vendedor"):
         if not source.get("platform_id") or profile["merchant_id"] != source.get("platform_id"):
             draft["merchant_id"] = profile["merchant_id"]
             draft["merchant_name"] = profile["vendedor"]
             prefilled.append("vendedor")
-    if not source.get("platform_id") and profile.get("platform_id"):
+    if "plataforma" not in user_cleared and not profile.get("plataforma_ausente") and not source.get("platform_id") and profile.get("platform_id"):
         if not draft.get("merchant_id") or draft.get("merchant_id") != profile["platform_id"]:
             draft["platform_id"] = profile["platform_id"]
             prefilled.append("plataforma")
-    if not source.get("categoria_sugerida") and profile.get("categoria_sugerida"):
+    if "categoria_sugerida" not in user_cleared and not source.get("categoria_sugerida") and profile.get("categoria_sugerida"):
         draft["categoria_sugerida"] = profile["categoria_sugerida"]
         prefilled.append("categoria_sugerida")
     effective_cat = draft.get("categoria_sugerida") or source.get("categoria_sugerida")
-    if not source.get("subcategoria") and profile.get("subcategoria") and effective_cat == profile.get("categoria_sugerida"):
+    if "subcategoria" not in user_cleared and not source.get("subcategoria") and profile.get("subcategoria") and effective_cat == profile.get("categoria_sugerida"):
         draft["subcategoria"] = profile["subcategoria"]
         prefilled.append("subcategoria")
-    if not source.get("natureza") and profile.get("natureza"):
+    if "natureza" not in user_cleared and not source.get("natureza") and profile.get("natureza"):
         draft["natureza"] = profile["natureza"]
         prefilled.append("natureza")
-    if not source.get("tipo") and profile.get("tipo"):
+    if "tipo" not in user_cleared and not source.get("tipo") and profile.get("tipo"):
         draft["tipo"] = profile["tipo"]
         prefilled.append("tipo")
-    if not source.get("metodo_pagamento") and profile.get("metodo_pagamento"):
+    if "metodo_pagamento" not in user_cleared and not source.get("metodo_pagamento") and profile.get("metodo_pagamento"):
         draft["metodo_pagamento"] = profile["metodo_pagamento"]
         prefilled.append("metodo_pagamento")
-    if not source.get("localidade") and profile.get("localidade"):
+    if "localidade" not in user_cleared and not source.get("localidade") and profile.get("localidade"):
         draft["localidade"] = profile["localidade"]
         prefilled.append("localidade")
-    if include_account_profile and not source.get("account_profile_id") and profile.get("account_profile_id"):
+    if include_account_profile and "account_profile_id" not in user_cleared and not source.get("account_profile_id") and profile.get("account_profile_id"):
         draft["account_profile_id"] = profile["account_profile_id"]
         prefilled.append("account_profile_id")
     if prefilled:
@@ -678,6 +725,7 @@ def build_vendor_defaults(
 
     buckets: dict[str, dict[str, dict[str, float]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
     subcat_buckets: dict[str, dict[str, dict[str, float]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
+    latest_vendor_plat: dict[str, tuple[float, str]] = {}
 
     for idx, (row, is_capture) in enumerate(
         [(r, True) for r in confirmed_captures] + [(r, False) for r in ledger_rows]
@@ -693,13 +741,34 @@ def build_vendor_defaults(
         if not vname:
             continue
 
-        weight = 1.5 if _row_has_user_review(row) else 1.0
+        row_reviewed = _row_has_user_review(row)
+        weight = 1.5 if row_reviewed else 1.0
         weight += 0.2 / (1.0 + idx * 0.05)
 
         pid = str(row.get("platform_id") or "")
         pname = str(by_id[pid].get("nome_padrao") or "").strip() if pid in by_id else str(row.get("plataforma") or "").strip()
-        if pname:
+        row_cleared = set(row.get("user_cleared_fields") or [])
+        row_prefilled = set(row.get("historical_prefill_fields") or [])
+        row_raw = str(row.get("merchant_raw") or row.get("estabelecimento_original") or row.get("descricao_original") or "")
+        reinjected_after_clear = (
+            "plataforma" in row_prefilled
+            and int(row.get("revision") or 1) >= 3
+            and bool(platform_identity(row_raw))
+        )
+        row_stamp = _stamp_key(row)
+        prev_stamp = latest_vendor_plat.get(vname, (-1.0, ""))[0]
+        if "plataforma" in row_cleared or reinjected_after_clear:
+            buckets[vname]["plataforma"][""] += weight * 2.5
+            if row_stamp >= prev_stamp:
+                latest_vendor_plat[vname] = (row_stamp, "cleared")
+        elif pname:
             buckets[vname]["plataforma"][pname] += weight
+            if row_reviewed and "plataforma" not in row_prefilled and row_stamp >= prev_stamp:
+                latest_vendor_plat[vname] = (row_stamp, "present")
+        elif row_reviewed:
+            buckets[vname]["plataforma"][""] += weight * 1.5
+            if row_stamp >= prev_stamp:
+                latest_vendor_plat[vname] = (row_stamp, "cleared")
 
         cat = str((row.get("categoria_sugerida") if is_capture else row.get("categoria")) or row.get("categoria") or row.get("categoria_sugerida") or "").strip()
         if cat:
@@ -732,6 +801,8 @@ def build_vendor_defaults(
     for vname, field_map in buckets.items():
         entry: dict[str, str] = {}
         for field in ("plataforma", "categoria", "natureza", "tipo", "metodo_pagamento", "localidade", "account_profile_id"):
+            if field == "plataforma" and latest_vendor_plat.get(vname, (-1.0, ""))[1] == "cleared":
+                continue
             winner = _pick_winner(field_map.get(field, {}), minimum_weight=1.0)
             if winner:
                 entry[field] = winner

@@ -6,18 +6,14 @@ from decimal import Decimal
 
 from bson import ObjectId
 from fastapi import HTTPException
+from pymongo.database import Database
 
 from app.account_profiles import account_profiles, legacy_accounts_by_profile, profile_for_legacy
 from app.financial_time import local_date, utc_instant
+from app.reference_cache import statement_review_cache, unwrap_database
 
 
-def historical_statement_reviews(db, capture_query):
-    """Recover only the original rows of an audited, completed statement review.
-
-    Explicit statuses always win. Older statement commits omitted the review
-    fields, so their original validation can be displayed from the saved review
-    and audit. An edited capture or an incomplete source stays pending.
-    """
+def _build_historical_statement_reviews(db, capture_query):
     candidates = list(db.provisional_transactions.find({'$and': [capture_query,
         {'status_revisao': {'$exists': False}, 'capture_batch_id': {'$exists': True}, 'revision': 1}]}))
     if not candidates:
@@ -89,6 +85,22 @@ def historical_statement_reviews(db, capture_query):
             continue
         reviews[capture['provisional_id']] = stamp
     return reviews
+
+
+def historical_statement_reviews(db, capture_query):
+    """Recover only the original rows of an audited, completed statement review.
+
+    Explicit statuses always win. Older statement commits omitted the review
+    fields, so their original validation can be displayed from the saved review
+    and audit. An edited capture or an incomplete source stays pending.
+    """
+    raw_db = unwrap_database(db)
+    if isinstance(raw_db, Database):
+        return statement_review_cache.get(
+            raw_db,
+            lambda: _build_historical_statement_reviews(raw_db, {'status': 'confirmed'}),
+        )
+    return _build_historical_statement_reviews(db, capture_query)
 
 
 def capture_review_query(query, status, historical):

@@ -48,11 +48,11 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(db.provisional_transactions.docs[0]["merchant_raw"], "IFD*GVG ALIM")
         self.assertNotEqual(db.provisional_transactions.docs[0]["merchant_id"], platform_id)
         db.provisional_transactions.docs[0]["status"]="confirmed"
-        corrected=update_provisional(captured["provisional_id"], ProvisionalUpdate(vendedor="GVG Restaurante", categoria_sugerida="Alimentação", subcategoria="lanches",expected_revision=updated['item']['revision']), db)
+        corrected=update_provisional(captured["provisional_id"], ProvisionalUpdate(vendedor="GVG Restaurante", categoria_sugerida="Alimentação", subcategoria="Restaurantes/Bares",expected_revision=updated['item']['revision']), db)
         self.assertEqual(corrected["item"]["vendedor"],"GVG Restaurante")
         self.assertEqual(corrected["item"]["plataforma"],"iFood")
         self.assertEqual(corrected["item"]["categoria_sugerida"],"Alimentação")
-        self.assertEqual(corrected["item"]["subcategoria"],"lanches")
+        self.assertEqual(corrected["item"]["subcategoria"],"Restaurantes/Bares")
 
     def test_existing_descriptor_suggests_platform_without_rewriting_source(self):
         db=FakeDB()
@@ -135,6 +135,64 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(vdefs["Lanche Bem"]["plataforma"],"Cappta")
         self.assertEqual(vdefs["Lanche Bem"]["categoria"],"Alimentação")
         self.assertEqual(vdefs["Lanche Bem"]["subcategoria"],"Lanches")
+
+    def test_clearing_platform_on_confirm_persists_and_prevents_future_prefill(self):
+        from app.platforms import build_vendor_defaults
+        stamp=datetime(2026,10,22,16,8,50,tzinfo=timezone.utc)
+        vendor_id=ObjectId();platform_id=ObjectId()
+        db=FakeDB(
+            merchants=MerchantCollection([
+                {"_id":vendor_id,"nome_padrao":"Lanche Bem","aliases":[{"valor":"LANCHE BEM","normalizado":"LANCHE BEM","status":"confirmado","source_record_ids":[]}]},
+                {"_id":platform_id,"external_key":"platform-cappta","nome_padrao":"Cappta","aliases":[]},
+            ]),
+            provisional_transactions=Collection([
+                {"_id":ObjectId(),"provisional_id":"prov-1","event_id":"ev-1","status":"provisional","revision":1,
+                 "merchant_raw":"CAPPTA LAN","platform_id":platform_id,"valor":Decimal128("-6.50"),"fluxo":"saida",
+                 "tipo":"compra","natureza":"COMPRA","categoria_sugerida":"Alimentação","subcategoria":"Lanches",
+                 "metodo_pagamento":"cartao_debito","localidade":"Betim","data_evento":stamp},
+            ]),
+        )
+        confirmed=update_provisional(
+            "prov-1",
+            ProvisionalUpdate(
+                action="confirm",
+                expected_revision=1,
+                vendedor="Lanche Bem",
+                plataforma="",
+                categoria_sugerida="Alimentação",
+                subcategoria="Restaurantes/Bares",
+                natureza="COMPRA",
+                tipo="compra",
+                fluxo="saida",
+                metodo_pagamento="cartao_debito",
+                localidade="Betim",
+            ),
+            db,
+        )
+        self.assertEqual(confirmed["item"]["status"],"confirmed")
+        self.assertEqual(confirmed["item"]["vendedor"],"Lanche Bem")
+        self.assertNotIn("plataforma",confirmed["item"])
+        self.assertNotIn("platform_id",db.provisional_transactions.docs[0])
+        self.assertIn("plataforma",db.provisional_transactions.docs[0].get("user_cleared_fields",[]))
+
+        pending={"_id":ObjectId(),"provisional_id":"prov-2","status":"provisional","revision":1,
+                 "merchant_raw":"CAPPTA LAN","platform_id":platform_id,"valor":Decimal128("-6.50"),
+                 "fluxo":"saida","tipo":"compra","data_evento":stamp}
+        enriched=with_merchant_name(pending,db)
+        self.assertTrue(enriched.get("plataforma_ausente"))
+        self.assertNotIn("plataforma",enriched.get("historical_defaults",{}))
+        self.assertNotIn("plataforma_sugerida",enriched)
+
+        res=TransactionService(db).process(event("cappta-next","android_notification",stamp,"CAPPTA LAN"))
+        self.assertEqual(res["status"],"provisional")
+        created=next(d for d in db.provisional_transactions.docs if d["provisional_id"]==res["provisional_id"])
+        self.assertEqual(created["merchant_name"],"Lanche Bem")
+        self.assertNotIn("platform_id",created)
+        self.assertIn("plataforma",created.get("user_cleared_fields",[]))
+
+        vdefs=build_vendor_defaults(db)
+        self.assertNotIn("plataforma",vdefs.get("Lanche Bem",{}))
+        self.assertEqual(vdefs["Lanche Bem"]["categoria"],"Alimentação")
 
 
 if __name__ == "__main__": unittest.main()

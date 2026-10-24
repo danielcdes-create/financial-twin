@@ -1,6 +1,6 @@
 import {createContext, useContext, useLayoutEffect, useRef} from 'react';
 import {Alert, cancelDialog, dialogSnapshot} from './appAlert';
-import {isUserOperationBusy, runUserAction} from './userOperation';
+import {isUserOperationBusy, isUserOperationSync, runUserAction} from './userOperation';
 
 const handlers = new Map<symbol,{priority:number; action:()=>unknown}>();
 let choiceBack:(()=>void)|null=null;
@@ -19,13 +19,25 @@ export function useLocalBack(action:()=>unknown,enabled=true,priority=10) {
     return()=>{handlers.delete(key);};
   },[enabled,priority,active]);
 }
+const reportBackError=(error:unknown)=>{
+  Alert.alert('Rascunho preservado',error instanceof Error?error.message:'Não foi possível voltar. Tente novamente.');
+};
 export function dispatchLocalBack():boolean {
-  if(isUserOperationBusy())return true;
+  if(isUserOperationBusy()&&!isUserOperationSync())return true;
   if(dialogSnapshot()){cancelDialog();return true;}
   if(choiceBack){choiceBack();return true;}
   const current=[...handlers.values()].reverse().sort((a,b)=>b.priority-a.priority)[0];
   if(!current)return false;
-  runUserAction(current.action,'Voltando…',error=>Alert.alert('Rascunho preservado',error instanceof Error?error.message:'Não foi possível voltar. Tente novamente.'));
+  if(isUserOperationSync()){
+    try{
+      const result=current.action();
+      if(result!=null&&typeof (result as PromiseLike<unknown>).then==='function'){
+        void Promise.resolve(result).catch(reportBackError);
+      }
+    }catch(error){reportBackError(error);}
+    return true;
+  }
+  runUserAction(current.action,'Voltando…',reportBackError);
   return true;
 }
 export function protectUnsavedBack(dirty:boolean,back:()=>unknown) {

@@ -30,16 +30,24 @@ const UNCONFIRMED_NATURE='_unconfirmed_legacy_nature';
 const draftFor=(item:any):Record<string,string>=>({...Object.fromEntries(FIELDS.map(([field])=>{const current=field==='vendedor'?(item.vendedor||item.fornecedor||item.merchant_name||''):(item[field]||'');if(field==='valor')return[field,Number(item.valor||0).toFixed(2).replace('.',',')];if(field==='data_evento')return[field,toBrasiliaInput(String(item.data_evento||''))];return[field,String(current)]})),from_account_key:item.transfer?.from_account_key||'',to_account_key:item.transfer?.to_account_key||'',account_profile_id:item.account_profile_id||'',status_revisao:item.status_revisao||'pendente',[DRAFT_INTENT_VERSION]:'2'});
 const PREFILLABLE_FIELDS=['vendedor','plataforma','tipo','categoria_sugerida','subcategoria','natureza','metodo_pagamento','localidade','account_profile_id'] as const;
 const PREFILL_LABELS:Record<string,string>={vendedor:'Vendedor',plataforma:'Plataforma',tipo:'Tipo',categoria_sugerida:'Categoria',subcategoria:'Subcategoria',natureza:'Natureza',metodo_pagamento:'Meio de pagamento',localidade:'Localidade',account_profile_id:'Conta movimentada'};
-const initialDraftFor=(item:any):Record<string,string>=>{const base=draftFor(item);if(!item||item.status==='confirmed'||base.natureza==='TRANSFERENCIA')return base;const defaults=item.historical_defaults||{};for(const field of PREFILLABLE_FIELDS){if(!String(base[field]||'').trim()&&defaults[field])base[field]=String(defaults[field]);}return base;};
+const CLEARABLE_FIELDS=new Set(['vendedor','plataforma','categoria_sugerida','subcategoria','metodo_pagamento','localidade','detalhe']);
+const initialDraftFor=(item:any):Record<string,string>=>{const base=draftFor(item);if(!item||item.status==='confirmed'||base.natureza==='TRANSFERENCIA')return base;if(item.plataforma_ausente)base.plataforma='';const defaults=item.historical_defaults||{};for(const field of PREFILLABLE_FIELDS){if(field==='plataforma'&&item.plataforma_ausente)continue;if(!String(base[field]||'').trim()&&defaults[field])base[field]=String(defaults[field]);}return base;};
 const prefilledSummaryFor=(item:any,currentDraft:Record<string,string>):string=>{if(!item||item.status==='confirmed'||currentDraft.natureza==='TRANSFERENCIA')return '';const base=draftFor(item),defaults=item.historical_defaults||{},persisted=Array.isArray(item.historical_prefill_fields)?item.historical_prefill_fields:[];const names:string[]=[];for(const field of PREFILLABLE_FIELDS){const val=String(currentDraft[field]||'').trim();if(!val)continue;const fromDefaults=!String(base[field]||'').trim()&&defaults[field]&&val===String(defaults[field]).trim();const fromPersisted=persisted.includes(field)&&val===String(base[field]||'').trim();if((fromDefaults||fromPersisted)&&PREFILL_LABELS[field]&&!names.includes(PREFILL_LABELS[field]))names.push(PREFILL_LABELS[field]);}return names.length?`Pré-preenchido pelo histórico (${names.join(', ')}). Confira antes de confirmar.`:'';};
 type Props={api:(path:string,init?:RequestInit)=>Promise<any>;money:(value:number)=>string;onUpdated:()=>Promise<void>;initialItem?:any;initialAccounts?:any[];onExit?:()=>void;reviewRecord?:boolean};
 type DraftRow={provisional_id:string;item:string;draft:string;updated_at:string};
+type ProvisionalCacheEntry={items:any[];page:{total:number;next_cursor:string|null};options:Record<string,any>;hasOptions:boolean;at:number};
+const provisionalListCache=new WeakMap<Function,ProvisionalCacheEntry>();
+export function primeProvisionalReviewCache(api:Function,captures:{items?:any[];total?:number;next_cursor?:string|null},options?:Record<string,any>|null){
+  const prev=provisionalListCache.get(api);
+  provisionalListCache.set(api,{items:captures.items||[],page:{total:captures.total||0,next_cursor:captures.next_cursor||null},options:options??prev?.options??{},hasOptions:Boolean(options||prev?.hasOptions),at:Date.now()});
+}
 
 const parseDraft=(row:DraftRow|null|undefined)=>{try{return row?{provisional_id:row.provisional_id,item:JSON.parse(row.item),draft:JSON.parse(row.draft),updated_at:row.updated_at}:null}catch{return null}};
 
 export default function ProvisionalReview({api,money,onUpdated,initialItem,initialAccounts,onExit,reviewRecord=false}:Props){
   const db=useSQLiteContext();const captureScope=useAsyncScope(initialItem?.provisional_id);
-  const [items,setItems]=useState<any[]>([]),[options,setOptions]=useState<Record<string,any>>({});
+  const cachedEntry=!initialItem&&typeof api==='function'?provisionalListCache.get(api):undefined;
+  const [items,setItems]=useState<any[]>(()=>cachedEntry?.items||[]),[options,setOptions]=useState<Record<string,any>>(()=>cachedEntry?.options||(typeof api==='function'?provisionalListCache.get(api)?.options:undefined)||{});
   const [optionsError,setOptionsError]=useState(''),[optionsLoading,setOptionsLoading]=useState(false);
   const optionsGeneration=useRef(0);
   const retryOptions=async()=>{
@@ -70,7 +78,7 @@ export default function ProvisionalReview({api,money,onUpdated,initialItem,initi
   useLocalBack(back,Boolean(selected),20);
   useLayoutEffect(()=>{const owner=editorEpoch;owner.current++;return()=>{owner.current++}},[selected?.provisional_id]);
   const captureEditor=()=>{const valid=captureScope(),epoch=editorEpoch.current;return()=>valid()&&epoch===editorEpoch.current};
-  const [page,setPage]=useState<{total:number;next_cursor:string|null}>({total:0,next_cursor:null});
+  const [page,setPage]=useState<{total:number;next_cursor:string|null}>(()=>cachedEntry?.page||{total:0,next_cursor:null});
   const [moreBusy,setMoreBusy]=useState(false);
   const storedDraft=useCallback(async(provisionalId?:string)=>{
     const where=provisionalId?' WHERE provisional_id=?':'';
@@ -89,9 +97,10 @@ export default function ProvisionalReview({api,money,onUpdated,initialItem,initi
     draftEpoch.current++;
     if(persistedDraft.current===provisionalId)persistedDraft.current=null;
   },[db]);
-  const hasOptionsRef=useRef(false);
+  const hasOptionsRef=useRef(Boolean(cachedEntry?.hasOptions));
   const load=useCallback(async(silent=false)=>{
-    const version=++generation.current;if(!silent)setLoading(true);
+    const hasWarmCache=!initialItem&&typeof api==='function'&&Boolean(provisionalListCache.get(api));
+    const version=++generation.current;if(!silent&&!hasWarmCache)setLoading(true);
     try {
       if(initialItem?.provisional_id)await flushDraftWrites(db,'review',initialItem.provisional_id);
       const [rawLocal,commands]=await Promise.all([storedDraft(initialItem?.provisional_id),pendingReviewCommands(db)]);
@@ -111,7 +120,7 @@ export default function ProvisionalReview({api,money,onUpdated,initialItem,initi
         if(version!==generation.current)return;
         setResumable(local);
         setPendingCommands(commands);
-        if(captures.status==='fulfilled'){setItems(captures.value.items||[]);setPage({total:captures.value.total||0,next_cursor:captures.value.next_cursor||null})}
+        if(captures.status==='fulfilled'){const nextItems=captures.value.items||[],nextPage={total:captures.value.total||0,next_cursor:captures.value.next_cursor||null};setItems(nextItems);setPage(nextPage);if(typeof api==='function'){const prev=provisionalListCache.get(api);provisionalListCache.set(api,{items:nextItems,page:nextPage,options:available.status==='fulfilled'&&available.value!==null?(available.value||{}):(prev?.options||options),hasOptions:hasOptionsRef.current||(available.status==='fulfilled'&&available.value!==null),at:Date.now()});}}
         if(available.status==='fulfilled'){if(available.value!==null){hasOptionsRef.current=true;setOptions(available.value||{});}setOptionsError('');}
         else setOptionsError(available.reason?.message||'Não foi possível carregar as sugestões.');
         if(captures.status==='rejected'&&(available.status==='rejected'||hasOptionsRef.current)&&!local)throw captures.reason;
@@ -199,9 +208,9 @@ export default function ProvisionalReview({api,money,onUpdated,initialItem,initi
   };
   const payload=()=>{
     const source=draftFor(selected);
-    const values=Object.fromEntries(FIELDS.map(([field])=>[field,draft[field]?.trim()||'']).filter(([field,value])=>value!==(source[field]?.trim()||'')).map(([field,value])=>[field,field==='valor'?Number(requireMoneyInput(value,{signed:true,allowZero:false,max:100_000_000})):field==='data_evento'?fromBrasiliaInput(value):value]));
+    const values=Object.fromEntries(FIELDS.map(([field])=>[field,draft[field]?.trim()||'']).filter(([field,value])=>value!==(source[field]?.trim()||'')||(CLEARABLE_FIELDS.has(field)&&value===''&&Boolean(selectedSourceDraft[field]?.trim()))).map(([field,value])=>[field,field==='valor'?Number(requireMoneyInput(value,{signed:true,allowZero:false,max:100_000_000})):field==='data_evento'?fromBrasiliaInput(value):value]));
     const accountFields=draft.natureza==='TRANSFERENCIA'?['from_account_key','to_account_key']:['account_profile_id'];
-    for(const field of accountFields)if(draft[field]!==source[field])values[field]=draft[field]||'';
+    for(const field of accountFields)if(draft[field]!==source[field]||(draft[field]===''&&Boolean(selectedSourceDraft[field])))values[field]=draft[field]||'';
     return values;
   };
   const failedCommand=async(error:any,provisionalId:string,valid:()=>boolean,title:string)=>{
@@ -216,8 +225,8 @@ export default function ProvisionalReview({api,money,onUpdated,initialItem,initi
     let notice='';
     try{await forgetDraft(provisionalId)}catch{notice=' O rascunho foi preservado porque a limpeza local não terminou.'}
     if(!valid())return;setResumable(current=>current?.provisional_id===provisionalId?null:current);setHasDraft(false);setSelected(null);
-    if(removedFromActive){setItems(current=>current.filter(row=>row.provisional_id!==provisionalId));setPage(current=>({...current,total:Math.max(0,current.total-1)}));}
-    else if(updatedItem){setItems(current=>current.map(row=>row.provisional_id===provisionalId?{...row,...updatedItem}:row));}
+    if(removedFromActive){setItems(current=>{const next=current.filter(row=>row.provisional_id!==provisionalId);if(typeof api==='function'){const prev=provisionalListCache.get(api);if(prev)provisionalListCache.set(api,{...prev,items:next,page:{...prev.page,total:Math.max(0,prev.page.total-1)},at:Date.now()});}return next;});setPage(current=>({...current,total:Math.max(0,current.total-1)}));}
+    else if(updatedItem){setItems(current=>{const next=current.map(row=>row.provisional_id===provisionalId?{...row,...updatedItem}:row);if(typeof api==='function'){const prev=provisionalListCache.get(api);if(prev)provisionalListCache.set(api,{...prev,items:next,at:Date.now()});}return next;});}
     Alert.alert(confirmed?'Captura confirmada':'Captura atualizada',(confirmed?'A movimentação foi confirmada e entrou nos totais financeiros.':'As correções foram salvas.')+notice);
     void Promise.resolve().then(onUpdated).catch(()=>{if(valid())Alert.alert('Captura salva','A gravação foi confirmada. Atualize a tela para conferir os dados atuais.');});
     if(initialItem)onExit?.();else void load(true);

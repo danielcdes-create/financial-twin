@@ -24,6 +24,9 @@ const stub=name=>renderer.root.findAllByType(name+'Stub').length;
  for(const [label,component] of [['Decisões e evidências','FinancialLab'],['Fechamento do mês','MonthClose'],['Cabe na minha vida?','PurchaseCheck'],['Rascunhos','DraftManager'],['Contas','AccountPositions'],['Cartões','CardManager'],['Categorias','CategoryManager'],['Compromissos','CommitmentManager'],['Ajustes','AppUpdate']]){
    await press(label);if(label!=='Ajustes')assert.equal(stub(component),1,label);await act(async()=>assert.equal(hardwareBack(),true,label));assert.ok(button('Decisões e evidências'),label+' returns to More');
  }
+ for(const [label,component] of [['Contas','AccountPositions'],['Cartões','CardManager'],['Categorias','CategoryManager'],['Compromissos','CommitmentManager'],['Ajustes','AppUpdate']]){
+   await press(label);if(label!=='Ajustes')assert.equal(stub(component),1,label);await press('‹ Voltar a Mais');assert.ok(button('Decisões e evidências'),label+' UI Back button returns to More');
+ }
  await press('Decisões e evidências');await press('Open fixture selector');await act(async()=>assert.equal(hardwareBack(),true));assert.equal(stub('FinancialLab'),1,'Overlay closes before leaving its page');
  await act(async()=>dialogs.Alert.alert('Synthetic dialog','Keep page',[{text:'Cancel',style:'cancel'}]));await act(async()=>assert.equal(hardwareBack(),true));assert.equal(dialogs.dialogSnapshot(),null);assert.equal(stub('FinancialLab'),1,'Dialog cancels before navigation');
  let release;await act(async()=>{gate.runUserAction(()=>new Promise(resolve=>{release=resolve;}));});await act(async()=>assert.equal(hardwareBack(),true));assert.equal(stub('FinancialLab'),1);await act(async()=>release());assert.equal(stub('FinancialLab'),1,'Blocked Back is never replayed');
