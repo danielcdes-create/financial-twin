@@ -126,12 +126,19 @@ if live.exists() and target.exists():
                 }
             }
 
-            # 2. Commit e Push no GitHub (incluindo telemetria e artefatos de publicação)
+            # 2. Atualiza ponteiro de release no README.md
+            $pointerScript = Join-Path $repoRoot 'scripts\release_pointer.py'
+            $readmePath = Join-Path $repoRoot 'README.md'
+            if ((Test-Path -LiteralPath $pythonExe) -and (Test-Path -LiteralPath $pointerScript) -and (Test-Path -LiteralPath $readmePath)) {
+                & $pythonExe $pointerScript --manifest $manifestPath --app-config $appConfigPath --readme $readmePath
+            }
+
+            # 3. Commit e Push no GitHub (incluindo telemetria e ponteiro da release)
             if (!$NoPush) {
                 Write-Host "Executando git commit e push para o GitHub..." -ForegroundColor Cyan
                 Push-Location $repoRoot
                 try {
-                    git add mobile/artifacts/ $manifestPath $apkInfoPath $versionedApk logs/perf_telemetry.jsonl mobile/app.json mobile/android/app/build.gradle
+                    git add logs/perf_telemetry.jsonl mobile/app.json README.md
                     $commitMsg = "feat(release): publicar APK v$versionName (build $versionCode) e sincronizar telemetria"
                     git commit -m $commitMsg
                     if ($LASTEXITCODE -eq 0 -or (git status --porcelain).Trim() -eq "") {
