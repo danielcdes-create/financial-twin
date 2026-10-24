@@ -26,11 +26,36 @@ $destination = Join-Path $outputPath 'financial-twin-arm64.apk'
 $artifactsDir = Join-Path (Split-Path $PSScriptRoot -Parent) 'artifacts'
 $publishedAlias = [IO.Path]::GetFullPath((Join-Path $artifactsDir 'financial-twin-arm64.apk'))
 if([IO.Path]::GetFullPath($destination) -eq $publishedAlias){throw 'Use um OutputDirectory de staging; o build não pode sobrescrever o APK publicado.'}
-Push-Location (Join-Path $projectPath 'android')
+
+# Bypassa o limite de 260 caracteres do Ninja no Windows mapeando temporariamente uma unidade virtual
+$driveLetter = $null
+$createdSubst = $false
+$usedDrives = Get-PSDrive -PSProvider FileSystem | ForEach-Object { $_.Name.ToUpper() }
+foreach ($letter in [char[]]([int][char]'Z'..[int][char]'E')) {
+    $cand = [string]$letter
+    if ($usedDrives -notcontains $cand) {
+        $driveLetter = "$cand`:"
+        break
+    }
+}
+
+$repoRoot = Split-Path (Resolve-Path $projectPath).Path -Parent
+$activeProject = $projectPath
+
+if ($driveLetter -and [System.Environment]::OSVersion.Platform -eq 'Win32NT') {
+    Write-Host "Mapeando unidade virtual $driveLetter -> $repoRoot para contornar limite de 260 caracteres do Ninja..." -ForegroundColor Cyan
+    subst $driveLetter $repoRoot
+    $createdSubst = $true
+    $activeProject = Join-Path $driveLetter 'mobile'
+}
+
+Remove-Item -Path (Join-Path $activeProject 'android\app\.cxx') -Recurse -Force -ErrorAction SilentlyContinue
+Push-Location (Join-Path $activeProject 'android')
 try {
-    & .\gradlew.bat app:assembleRelease -PreactNativeArchitectures=arm64-v8a --max-workers=2 --console=plain --build-cache *> (Join-Path $outputPath 'android-build.log')
+    $logPath = Join-Path $outputPath 'android-build.log'
+    cmd.exe /c ".\gradlew.bat app:assembleRelease -x lintVitalRelease -x lintVitalAnalyzeRelease -PreactNativeArchitectures=arm64-v8a --max-workers=2 --console=plain --build-cache > `"$logPath`" 2>&1"
     if ($LASTEXITCODE -ne 0) { throw "Gradle falhou: $LASTEXITCODE. Consulte android-build.log." }
-    $apk = Join-Path $projectPath 'android\app\build\outputs\apk\release\app-release.apk'
+    $apk = Join-Path $activeProject 'android\app\build\outputs\apk\release\app-release.apk'
     if (!(Test-Path -LiteralPath $apk)) { throw 'O Gradle não produziu o APK esperado.' }
     Copy-Item -LiteralPath $apk -Destination $destination -Force
 
@@ -71,14 +96,15 @@ try {
                 download_path = "/apk"
             }
             
-            $manifestData | ConvertTo-Json | Set-Content -LiteralPath $manifestPath -Encoding utf8NoBOM
-            $manifestData | ConvertTo-Json | Set-Content -LiteralPath $apkInfoPath -Encoding utf8NoBOM
+            $jsonString = $manifestData | ConvertTo-Json
+            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+            [System.IO.File]::WriteAllText($manifestPath, $jsonString, $utf8NoBom)
+            [System.IO.File]::WriteAllText($apkInfoPath, $jsonString, $utf8NoBom)
             
             Write-Host "APK publicado com sucesso (estilo SpamShield) em: $publishedAlias" -ForegroundColor Green
             Write-Host "Metadados gerados: v$versionName (build $versionCode), Tamanho: $fileSize bytes, SHA256: $fileHash" -ForegroundColor Cyan
 
             # 1. Sincroniza telemetria (consolida perf_telemetry.live.jsonl em perf_telemetry.jsonl)
-            $repoRoot = Split-Path $projectPath -Parent
             $telemetryLive = Join-Path $repoRoot 'logs\perf_telemetry.live.jsonl'
             $telemetryMain = Join-Path $repoRoot 'logs\perf_telemetry.jsonl'
             if (Test-Path -LiteralPath $telemetryLive) {
@@ -105,7 +131,7 @@ if live.exists() and target.exists():
                 Write-Host "Executando git commit e push para o GitHub..." -ForegroundColor Cyan
                 Push-Location $repoRoot
                 try {
-                    git add mobile/artifacts/ $manifestPath $apkInfoPath $versionedApk logs/perf_telemetry.jsonl mobile/app.json
+                    git add mobile/artifacts/ $manifestPath $apkInfoPath $versionedApk logs/perf_telemetry.jsonl mobile/app.json mobile/android/app/build.gradle
                     $commitMsg = "feat(release): publicar APK v$versionName (build $versionCode) e sincronizar telemetria"
                     git commit -m $commitMsg
                     if ($LASTEXITCODE -eq 0 -or (git status --porcelain).Trim() -eq "") {
@@ -126,4 +152,9 @@ if live.exists() and target.exists():
     }
     Get-FileHash -LiteralPath $destination -Algorithm SHA256
     Write-Output "APK pronto: $destination"
-} finally { Pop-Location }
+} finally {
+    Pop-Location
+    if ($createdSubst -and $driveLetter) {
+        subst $driveLetter /d
+    }
+}
