@@ -104,12 +104,13 @@ try {
             Write-Host "APK publicado com sucesso (estilo SpamShield) em: $publishedAlias" -ForegroundColor Green
             Write-Host "Metadados gerados: v$versionName (build $versionCode), Tamanho: $fileSize bytes, SHA256: $fileHash" -ForegroundColor Cyan
 
+            $pythonExe = Join-Path $repoRoot '.venv\Scripts\python.exe'
+
             # 1. Sincroniza telemetria (unificado em perf_telemetry.jsonl; migra .live.jsonl se existir)
             $telemetryLive = Join-Path $repoRoot 'logs\perf_telemetry.live.jsonl'
             $telemetryMain = Join-Path $repoRoot 'logs\perf_telemetry.jsonl'
             if (Test-Path -LiteralPath $telemetryLive) {
                 Write-Host "Consolidando telemetria legada em $telemetryMain..." -ForegroundColor Cyan
-                $pythonExe = Join-Path $repoRoot '.venv\Scripts\python.exe'
                 if (Test-Path -LiteralPath $pythonExe) {
                     & $pythonExe -c "
 from pathlib import Path
