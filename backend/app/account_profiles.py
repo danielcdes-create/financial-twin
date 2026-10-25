@@ -71,10 +71,10 @@ def profile_document_id(key):
     return "account-profile:" + key
 
 
-def account_profiles(db, profiles=None):
+def account_profiles(db, profiles=None, *, stored_rows=None):
     if profiles is not None:
         return list(profiles)
-    cached = getattr(db, "__dict__", {}).get("_account_profiles_cache") if db is not None else None
+    cached = getattr(db, "__dict__", {}).get("_account_profiles_cache") if (db is not None and stored_rows is None) else None
     if isinstance(cached, list):
         return list(cached)
     defaults = {key: {"key": key, "instituicao": institution, "apelido": "", "tipo": kind,
@@ -82,7 +82,8 @@ def account_profiles(db, profiles=None):
         "agencia": "", "agencia_digito": "", "numero": "", "numero_digito": "",
         "data_abertura": None, "data_encerramento": None, "observacoes": ""}
         for key, institution, kind, currency in ACCOUNT_CATALOG}
-    for stored in with_batch_size(db.account_profiles.find({})):
+    source_rows = stored_rows if stored_rows is not None else with_batch_size(db.account_profiles.find({}))
+    for stored in source_rows:
         if stored.get("entity_type") in {"card", "bill", "month_close"}:
             continue
         key = stored["key"]

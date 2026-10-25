@@ -10,7 +10,7 @@ type Month = {month: string; total: string; installments: string; subscriptions:
 type Projection = {items: Month[]; months: number; start_month: string; end_month: string; last_installment_month: string | null; warnings: string[]; total: string; as_of: string; automatic_horizon_capped: boolean; summary?: {this_month: string; next_12: string | null; overdue?: string; upcoming?: string; installments: string; subscriptions: string; other: string; bill_balance: string; window_months: number} | null};
 type Frame = {summary: React.ReactNode; chart: React.ReactNode; monthOpen: boolean; bindCharge: (opener: (entry: ChargeEntry) => void) => void};
 
-export default function CommitmentProjection({api, money, refreshKey = 0, renderFrame, initialMonth = null, initialMonths, urlDriven = false}: {
+export default function CommitmentProjection({api, money, refreshKey = 0, renderFrame, initialMonth = null, initialMonths, urlDriven = false, onSettled}: {
   api: (path: string) => Promise<any>;
   money: (value: number) => string;
   refreshKey?: number;
@@ -18,6 +18,7 @@ export default function CommitmentProjection({api, money, refreshKey = 0, render
   initialMonth?: string | null;
   initialMonths?: number | null;
   urlDriven?: boolean;
+  onSettled?: () => void;
 }) {
   const [months, setMonths] = useState<number | null>(urlDriven && initialMonths !== undefined ? initialMonths : null);
   const [draft, setDraft] = useState('');
@@ -64,7 +65,7 @@ export default function CommitmentProjection({api, money, refreshKey = 0, render
       setData(response);
       setSelected(old => old && response.items.some((row: Month) => row.month === old) ? old : urlDriven ? old : null);
     }).catch(failure => {if (current === generation.current) setError(failure.message || 'Não foi possível carregar a projeção.');})
-      .finally(() => {if (current === generation.current) setSettledKey(queryKey);});
+      .finally(() => {if (current === generation.current) {setSettledKey(queryKey); onSettled?.();}});
   }, [api, months, refreshKey, retry, queryKey, urlDriven]);
   useLayoutEffect(() => {
     if (!selected || !narrow) return;

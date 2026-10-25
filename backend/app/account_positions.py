@@ -6,7 +6,15 @@ import unicodedata
 from bson import ObjectId
 from bson.decimal128 import Decimal128
 from fastapi import HTTPException
+from pymongo.database import Database
 from app.atomic import with_batch_size
+from contextlib import nullcontext
+from app.reference_cache import dashboard_snapshot_cache, unwrap_database
+try:
+    from app.telemetry import SpanTimer
+except Exception:
+    def SpanTimer(*_args, **_kwargs):
+        return nullcontext()
 from app.source_tokens import source_token
 from app.account_profiles import ACCOUNT_CATALOG, ACCOUNT_KEYS, account_profiles, legacy_accounts_by_profile, validate_account_key
 from app.account_profiles import effective_capture_account_key
@@ -48,6 +56,13 @@ def _linked_statement_inside_reference(db, capture, account_id, after_reference,
 
 def account_positions(db):
     """A reference balance plus posted movements; captures without an account stay visible as a gap."""
+    raw_db = unwrap_database(db)
+    has_warm_snap = isinstance(raw_db, Database) and dashboard_snapshot_cache.peek(raw_db) is not None
+    with SpanTimer("accounts.positions", cached=has_warm_snap):
+        return _account_positions_impl(db)
+
+
+def _account_positions_impl(db):
     profiles = account_profiles(db)
     checking_accounts = list(with_batch_size(db.accounts.find({"tipo": "conta_corrente"})))
     legacy_by_key = legacy_accounts_by_profile(db, rows=checking_accounts)
@@ -55,10 +70,18 @@ def account_positions(db):
     keys = {item["key"] for item in profiles}
     snapshots = {item["account_key"]: item for item in with_batch_size(db.account_balance_snapshots.find({})) if item.get("account_key") in keys}
     earliest = min((_aware(item['as_of']) for item in snapshots.values()), default=None)
-    legacy_transactions = list(with_batch_size(db.transactions.find({'data_evento': {'$gte': earliest}}, {"account_id": 1, "account_profile_id": 1, "data_evento": 1, "valor": 1}))) if earliest else []
-    # A capture can precede the cutoff while its linked bank leg follows it.
-    captures = list(with_batch_size(db.provisional_transactions.find({"status": "confirmed"}, {"data_evento": 1, "valor": 1, "natureza": 1, "transfer": 1, "account_profile_id": 1, "account_id": 1, "linked_transaction_id": 1}))) if earliest else []
-    linked_by_id = {str(row["_id"]): row for row in legacy_transactions if row.get("_id") is not None}
+    raw_db = unwrap_database(db)
+    snap = dashboard_snapshot_cache.peek(raw_db) if isinstance(raw_db, Database) else None
+    if snap is not None:
+        all_txs, all_captures = snap[0], snap[1]
+        legacy_transactions = [row for row in all_txs if row.get("data_evento") and _aware(row["data_evento"]) >= earliest] if earliest else []
+        captures = list(all_captures) if earliest else []
+        linked_by_id = {str(row["_id"]): row for row in all_txs if row.get("_id") is not None}
+    else:
+        legacy_transactions = list(with_batch_size(db.transactions.find({'data_evento': {'$gte': earliest}}, {"account_id": 1, "account_profile_id": 1, "data_evento": 1, "valor": 1}))) if earliest else []
+        # A capture can precede the cutoff while its linked bank leg follows it.
+        captures = list(with_batch_size(db.provisional_transactions.find({"status": "confirmed"}, {"data_evento": 1, "valor": 1, "natureza": 1, "transfer": 1, "account_profile_id": 1, "account_id": 1, "linked_transaction_id": 1}))) if earliest else []
+        linked_by_id = {str(row["_id"]): row for row in legacy_transactions if row.get("_id") is not None}
     needed_ids = {
         str(c["linked_transaction_id"])
         for c in captures

@@ -469,8 +469,8 @@ export type CommitmentFigures = {
   lastDue: string;
 };
 
-export function commitmentFigures(source: 'managed' | 'installment' | 'obligation', payload: any, asOf = civilToday()): CommitmentFigures {
-  const pending = pendingOccurrences(source, payload, asOf);
+export function commitmentFigures(source: 'managed' | 'installment' | 'obligation', payload: any, asOf = civilToday(), cutoff = commitmentCutoff()): CommitmentFigures {
+  const pending = pendingOccurrences(source, payload, asOf, cutoff);
   const endless = source === 'managed' && isOpenEnded(payload);
   const estimated = pending.some(row => row.estimated) || (source === 'managed' && Boolean(payload?.amount_estimate || payload?.amount_mode === 'last_three_bills'));
   const oldest = pending[0];

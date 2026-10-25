@@ -11,14 +11,27 @@ from app.commitment_estimates import effective_commitments
 from app.economic_policy import amount
 from app.financial_time import civil_date, today
 from app.future_commitments import database, effective_documents
+from pymongo.database import Database
 from app.obligation_policy import OPEN_OBLIGATION_STATUSES
 from app.installment_cards import attach_cards
+from contextlib import nullcontext
+from app.reference_cache import dashboard_snapshot_cache, unwrap_database
+try:
+    from app.telemetry import SpanTimer
+except Exception:
+    def SpanTimer(*_args, **_kwargs):
+        return nullcontext()
 
 router = APIRouter(dependencies=[Depends(require_session)])
 MAX_MONTHS = 120
 
 
 def monthly_projection(db, months=None, as_of: date | None = None):
+    with SpanTimer("commitments.monthly_projection", months=months):
+        return _monthly_projection_impl(db, months=months, as_of=as_of)
+
+
+def _monthly_projection_impl(db, months=None, as_of: date | None = None):
     if months is not None and (isinstance(months, bool) or not isinstance(months, int) or not 1 <= months <= MAX_MONTHS):
         raise HTTPException(422, 'Escolha de 1 a 120 meses.')
     current = as_of or today()
@@ -65,9 +78,13 @@ def monthly_projection(db, months=None, as_of: date | None = None):
         (charges if destination is None else destination).append(entry)
 
     with mongo_snapshot(db) as (reading, consistency):
+        raw_db = unwrap_database(reading)
+        snap = dashboard_snapshot_cache.peek(raw_db) if isinstance(raw_db, Database) else None
         managed = effective_commitments(
             reading,
             with_batch_size(reading.commitments.find({'status': 'ativo'}), 2000),
+            preloaded_transactions=snap[0] if snap else None,
+            preloaded_captures=snap[1] if snap else None,
         )
         for item in managed:
             name = item['name']

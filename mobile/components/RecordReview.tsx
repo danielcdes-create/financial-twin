@@ -10,7 +10,7 @@ import SingleLineValue from './SingleLineValue';
 
 const PAGE_SIZE=50;
 const isIncoming=(item:any)=>item?.fluxo==='entrada'||Number(item?.valor||0)>0;
-type Props={api:(path:string,init?:RequestInit)=>Promise<any>;money:(value:number)=>string;onUpdated:()=>Promise<void>};
+type Props={api:(path:string,init?:RequestInit)=>Promise<any>;money:(value:number)=>string;onUpdated:()=>Promise<void>;lazy?:boolean};
 type RecordPageEntry={items:any[];total:number;at:number};
 const recordReviewCache=new WeakMap<Function,Map<string,RecordPageEntry>>();
 const getRecordCache=(api:Function)=>{
@@ -25,10 +25,11 @@ export function invalidateRecordReviewCache(api:Function){
   recordReviewCache.delete(api);
 }
 
-export default function RecordReview({api,money,onUpdated}:Props){
+export default function RecordReview({api,money,onUpdated,lazy=false}:Props){
   const {width,fontScale}=useWindowDimensions(),compact=compactLayout(width,fontScale);
   const initialKey=JSON.stringify(['pendente','',0]);
   const initialCached=typeof api==='function'?getRecordCache(api).get(initialKey):undefined;
+  const [expanded,setExpanded]=useState(()=>!lazy||Boolean(initialCached));
   const [items,setItems]=useState<any[]>(()=>initialCached?.items||[]),[selected,setSelected]=useState<any>(null);
   const [search,setSearch]=useState(''),[appliedSearch,setAppliedSearch]=useState('');
   const [reviewStatus,setReviewStatus]=useState<'pendente'|'validado'|'todos'>('pendente');
@@ -57,20 +58,22 @@ export default function RecordReview({api,money,onUpdated}:Props){
     }catch(error:any){if(current===generation.current)setReadError(error.message||'Não foi possível carregar os registros. Tente novamente.')}
     finally{if(loadController.current===controller)loadController.current=null;if(current===generation.current)setLoading(false)}
   },[api,appliedSearch,offset,reviewStatus]);
-  useEffect(()=>{const counter=generation;const task=setTimeout(()=>load(),0);return()=>{clearTimeout(task);counter.current++;loadController.current?.abort();loadController.current=null;}},[load,refreshVersion]);
+  useEffect(()=>{if(!expanded)return;const counter=generation;const task=setTimeout(()=>load(),0);return()=>{clearTimeout(task);counter.current++;loadController.current?.abort();loadController.current=null;}},[expanded,load,refreshVersion]);
   if(selected?.provisional_id)return <ProvisionalReview key={selected.provisional_id} initialItem={selected} api={api} money={money} reviewRecord onExit={()=>setSelected(null)} onUpdated={async()=>{if(typeof api==='function')invalidateRecordReviewCache(api);await Promise.all([load(true),onUpdated()])}}/>;
   if(selected)return <TransactionEditor key={selected.id} item={selected} api={api} money={money} onCancel={()=>setSelected(null)} onSaved={async(updatedItem)=>{if(typeof api==='function')invalidateRecordReviewCache(api);if(updatedItem){if(reviewStatus==='pendente'&&updatedItem.status_revisao==='validado'){setItems(current=>current.filter(row=>row.id!==updatedItem.id));setTotal(current=>Math.max(0,current-1));}else{setItems(current=>current.map(row=>row.id===updatedItem.id?{...row,...updatedItem}:row));}}setSelected(null);await Promise.all([load(true),onUpdated()])}}/>;
   const visibleItems=resultKey===queryKey?items:(cachedPage?.items||[]),visibleTotal=resultKey===queryKey?total:(cachedPage?.total||0);
   const hasVisibleResult=resultKey===queryKey||Boolean(cachedPage);
-  const applySearch=()=>{setOffset(0);setAppliedSearch(search.trim());setRefreshVersion(value=>value+1)},first=visibleTotal?offset+1:0,last=Math.min(offset+PAGE_SIZE,visibleTotal);
+  const applySearch=()=>{setExpanded(true);setOffset(0);setAppliedSearch(search.trim());setRefreshVersion(value=>value+1)},first=visibleTotal?offset+1:0,last=Math.min(offset+PAGE_SIZE,visibleTotal);
   return <View>
     <Text style={s.heading}>Revisar registros</Text><Text style={s.helper}>Movimentações confirmadas de PDF também aparecem aqui como validadas. Confira “Vendedor”, “Plataforma” e a classificação; você pode editar ou reabrir a revisão. Alterações são sincronizadas com Extrato, Detalhe e Dashboard.</Text>
-    <View style={s.filters}>{(['pendente','validado','todos'] as const).map(status=><Pressable accessibilityRole="button" key={status} onPress={()=>{setOffset(0);setReviewStatus(status)}} style={[s.filter,reviewStatus===status&&s.filterActive]}><Text style={[s.filterText,reviewStatus===status&&s.filterTextActive]}>{status==='pendente'?'Pendentes':status==='validado'?'Validados':'Todos'}</Text></Pressable>)}</View>
+    <View style={s.filters}>{(['pendente','validado','todos'] as const).map(status=><Pressable accessibilityRole="button" key={status} onPress={()=>{setExpanded(true);setOffset(0);setReviewStatus(status)}} style={[s.filter,reviewStatus===status&&s.filterActive]}><Text style={[s.filterText,reviewStatus===status&&s.filterTextActive]}>{status==='pendente'?'Pendentes':status==='validado'?'Validados':'Todos'}</Text></Pressable>)}</View>
     <View style={[s.searchRow,compact&&{flexDirection:'column'}]}><TextInput accessibilityLabel="Buscar descrição, categoria ou tipo" value={search} onChangeText={setSearch} onSubmitEditing={applySearch} placeholder="Buscar descrição, categoria ou tipo" placeholderTextColor="#92A4A2" style={[s.searchInput,{minWidth:0}]}/><Pressable accessibilityRole="button" onPress={applySearch} style={[s.searchButton,{minHeight:44,paddingVertical:12}]}><Text style={s.searchButtonText}>Buscar</Text></Pressable></View>
+    {!expanded?(<Pressable accessibilityRole="button" accessibilityLabel="Carregar registros para revisão" onPress={()=>setExpanded(true)} style={[s.searchButton,{minHeight:44,paddingVertical:12,alignItems:'center',marginBottom:12}]}><Text style={s.searchButtonText}>Carregar registros para revisão</Text></Pressable>):(<>
     {!!readError&&<View><Text accessibilityRole="alert" style={s.helper}>{readError}{visibleItems.length?' Os registros anteriores podem estar desatualizados.':''}</Text><Pressable accessibilityRole="button" disabled={loading} onPress={()=>setRefreshVersion(value=>value+1)} style={s.searchButton}><Text style={s.searchButtonText}>Tentar carregar registros novamente</Text></Pressable></View>}
     {loading&&<ActivityIndicator color="#4FD1B5" style={s.loader}/>}{!loading&&!readError&&hasVisibleResult&&visibleItems.length===0&&<Text style={s.empty}>Nenhum registro encontrado.</Text>}
     {visibleItems.map(item=><Pressable accessibilityRole="button" key={`${item.movement_source || 'ledger'}:${item.provisional_id || item.id}`} onPress={()=>setSelected(item)} style={[s.record,compact&&{flexDirection:'column'}]}><View style={s.recordMain}><Text style={s.knownName}>{item.vendedor||item.fornecedor||(isIncoming(item)?'Origem não identificada':'Vendedor não identificado')}</Text><Text style={s.recordTitle}>{item.estabelecimento_original||item.descricao_original||'Movimentação'}</Text><Text style={s.recordMeta}>{recordCategory(item)}{item.subcategoria?` › ${item.subcategoria}`:''} · {financialDateLabel(String(item.data_evento||''))} · {item.status_revisao==='validado'?'Validado':'Pendente'}</Text></View><View style={[s.recordRight,compact&&{width:'100%',alignItems:'flex-start'}]}><SingleLineValue style={[s.recordAmount,Number(item.valor)<0?s.expense:s.income]}>{money(Number(item.valor||0))}</SingleLineValue><Text style={s.edit}>Editar ›</Text></View></Pressable>)}
     <View style={s.pagination}><Pressable accessibilityRole="button" disabled={offset===0} onPress={()=>setOffset(Math.max(0,offset-PAGE_SIZE))} style={[s.pageButton,offset===0&&s.disabled]}><Text style={s.pageText}>Anterior</Text></Pressable><Text style={s.pageStatus}>{first}–{last} de {visibleTotal}</Text><Pressable accessibilityRole="button" disabled={offset+PAGE_SIZE>=visibleTotal} onPress={()=>setOffset(offset+PAGE_SIZE)} style={[s.pageButton,offset+PAGE_SIZE>=visibleTotal&&s.disabled]}><Text style={s.pageText}>Próxima</Text></Pressable></View>
+    </>)}
   </View>;
 }
 

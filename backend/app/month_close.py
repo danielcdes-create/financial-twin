@@ -29,7 +29,13 @@ from app.commitments import schedule_from, historical_occurrence_conflicts
 from app.future_commitments import effective_documents
 from app.mutation_identity import durable_mutation
 from app.economic_period import economic_rows
+from contextlib import nullcontext
 from app.transfer_legs import resolved_transfer_legs
+try:
+    from app.telemetry import SpanTimer
+except Exception:
+    def SpanTimer(*_args, **_kwargs):
+        return nullcontext()
 
 router = APIRouter(prefix="/v1/month-close", dependencies=[Depends(require_session)])
 
@@ -95,23 +101,39 @@ def stored_state(db, month):
 
 
 def financial_context(db, month):
+    with SpanTimer("month_close.financial_context", period=month):
+        return _financial_context_impl(db, month)
+
+
+def _financial_context_impl(db, month):
     start, end = bounds(month)
     window = date_filter(start, end)
     transactions = list(db.transactions.find({"data_evento": window}).sort("_id", 1))
     captures = list(db.provisional_transactions.find({"data_evento": window,
                       "status": {"$in": ["confirmed", "provisional", "enriched"]}}).sort("_id", 1))
     confirmed = [row for row in captures if row.get("status") == "confirmed"]
-    economic_transactions = economic_rows(db.transactions, start, end)
-    economic_confirmed = economic_rows(db.provisional_transactions, start, end, {"status": "confirmed"})
+    economic_transactions = economic_rows(db.transactions, start, end, dated_rows=transactions)
+    economic_confirmed = economic_rows(db.provisional_transactions, start, end, {"status": "confirmed"}, dated_rows=confirmed)
     all_confirmed = list({str(row.get("_id")): row for row in [*confirmed, *economic_confirmed]}.values())
-    transfer_legs = resolved_transfer_legs(db, all_confirmed, legacy_accounts_by_profile(db))
-    profiles = account_profiles(db)
     original_accounts = list(db.accounts.find({}).sort("_id", 1))
-    profile_meta = {row["_id"]: row for row in db.account_profiles.find({"entity_type": {"$in": ["card", "bill"]}})}
+    checking_accounts = [row for row in original_accounts if row.get("tipo") == "conta_corrente"]
+    legacy_by_profile = legacy_accounts_by_profile(db, rows=checking_accounts)
+    known_tx_by_id = {str(row["_id"]): row for row in [*transactions, *economic_transactions] if row.get("_id") is not None}
+    transfer_legs = resolved_transfer_legs(db, all_confirmed, legacy_by_profile, posted_by_id=known_tx_by_id)
+    all_profile_docs = list(db.account_profiles.find({}))
+    profiles = account_profiles(db, stored_rows=all_profile_docs)
+    profile_meta = {row["_id"]: row for row in all_profile_docs if row.get("entity_type") in {"card", "bill"}}
     all_bills = list(db.credit_card_bills.find({}).sort("_id", 1))
     all_obligations = effective_documents(db, "obligation", db.obligations.find({}).sort("_id", 1))
     schedules = []
-    for commitment in effective_commitments(db, db.commitments.find({}).sort("_id", 1), as_of=end):
+    for commitment in effective_commitments(
+        db,
+        db.commitments.find({}).sort("_id", 1),
+        as_of=end,
+        legacy_map=legacy_by_profile,
+        preloaded_transactions=list(known_tx_by_id.values()) or None,
+        preloaded_captures=all_confirmed or None,
+    ):
         rows = [row for row in schedule_from(commitment, start, 32) if row["due_date"] <= end.isoformat()]
         links = [link for link in commitment.get("linked_transactions", [])
                  if str(link.get("period_key", "")).startswith(month)
@@ -150,7 +172,14 @@ def financial_context(db, month):
     obligations = [row for row in all_obligations if row.get("origem_id") in bill_ids
                    or row.get("competencia") == month or in_period(row.get("data_vencimento"), start, end, civil=True)]
     item_ids = {item["transaction_id"] for row in bills for item in row.get("items", []) if item.get("transaction_id")}
-    invoice_transactions = list(db.transactions.find({"_id": {"$in": list(item_ids)}}).sort("_id", 1)) if item_ids else []
+    missing_item_ids = [tid for tid in item_ids if str(tid) not in known_tx_by_id]
+    if missing_item_ids:
+        for row in db.transactions.find({"_id": {"$in": missing_item_ids}}).sort("_id", 1):
+            known_tx_by_id[str(row["_id"])] = row
+    invoice_transactions = sorted(
+        (known_tx_by_id[str(tid)] for tid in item_ids if str(tid) in known_tx_by_id),
+        key=lambda row: row.get("_id"),
+    ) if item_ids else []
     linked_ids = bill_ids | {row["_id"] for row in obligations} | transaction_ids | item_ids
     links = [row for row in reconciliations if row.get("obligation_id") in linked_ids or row.get("transaction_id") in linked_ids
              or any((row.get(endpoint) or {}).get("id") in linked_ids for endpoint in ("origem", "destino"))]
@@ -189,7 +218,7 @@ def financial_context(db, month):
             unassigned += row.get("account_id") not in known_account_ids and not row.get("bill_id") and row.get("account_profile_id") not in known_profile_keys
     return {"start": start, "end": end, "transactions": transactions, "captures": captures, "confirmed": confirmed,
             "economic_transactions": economic_transactions, "economic_confirmed": economic_confirmed, "transfer_legs": transfer_legs,
-            "profiles": profiles, "accounts": original_accounts, "profile_meta": profile_meta, "bills": bills,
+            "profiles": profiles, "accounts": original_accounts, "legacy_by_profile": legacy_by_profile, "profile_meta": profile_meta, "bills": bills,
             "obligations": obligations, "schedules": schedules, "invoice_transactions": invoice_transactions, "links": links,
             "period_reviews": period_reviews, "undated_reviews": len(reviews) - len(period_reviews), "totals": totals,
             "unknown": unknown, "unassigned": unassigned, "transfer_pending": transfer_pending, "missing_category": missing_category}
@@ -224,6 +253,11 @@ CARD = [
 
 
 def view(db, month, state=None):
+    with SpanTimer("month_close.view", period=month):
+        return _view_impl(db, month, state=state)
+
+
+def _view_impl(db, month, state=None):
     state = stored_state(db, month) if state is None else state
     state = state or {"revision": 0, "items": {}, "balances": {}, "custom": [], "status": "open"}
     ctx = financial_context(db, month)
@@ -259,7 +293,7 @@ def view(db, month, state=None):
                        "balance": account_balance, "completed": sum(item["completed"] for item in items), "total": len(items)})
 
     unresolved = sum(row.get("status") != "confirmed" for row in ctx["captures"])
-    legacy = legacy_accounts_by_profile(db)
+    legacy = ctx["legacy_by_profile"]
     opening_gaps = []
     for profile in ctx["profiles"]:
         original_id = (legacy.get(profile["key"]) or {}).get("_id")
@@ -287,7 +321,7 @@ def view(db, month, state=None):
     group("general", "Conferência geral", "general", GENERAL, financial_source, blocks=general_blocks, item_sources={"commitments": ctx["schedules"]},
           detail=f'{len(ctx["transactions"]) + len(ctx["confirmed"])} movimentações; {ctx["undated_reviews"]} revisão(ões) adicional(is) fora do recorte ou com período indefinido.')
 
-    legacy = legacy_accounts_by_profile(db)
+    legacy = ctx["legacy_by_profile"]
     represented = {row["_id"] for row in legacy.values()}
     specs = []
     for profile in ctx["profiles"]:

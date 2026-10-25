@@ -34,10 +34,10 @@ def economic_instant(item):
     return item.get("data_evento")
 
 
-def economic_rows(collection, start, end, query=None):
+def economic_rows(collection, start, end, query=None, *, dated_rows=None):
     """Use indexed competence and event windows, then deduplicate their union."""
     query = query or {}
     declared = with_batch_size(collection.find({**query, "competencia": {"$gte": start.strftime("%Y-%m"), "$lte": end.strftime("%Y-%m")}}))
-    dated = with_batch_size(collection.find({**query, "data_evento": date_filter(start, end)}))
+    dated = dated_rows if dated_rows is not None else with_batch_size(collection.find({**query, "data_evento": date_filter(start, end)}))
     rows = {str(row.get("_id")): row for row in [*declared, *dated] if economic_in_period(row, start, end)}
     return list(rows.values())

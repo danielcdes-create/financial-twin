@@ -32,39 +32,45 @@ class ReferenceCache:
     def get(self, scope, build):
         raw_scope = unwrap_database(scope)
         key = id(raw_scope)
-        while True:
-            with self._lock:
-                generation = self._generation
-                now = monotonic()
-                cached = self._values.get(key)
-                if cached and cached[0] is raw_scope and cached[1] > now:
-                    return cached[2]
-                catalog_cached = self._values.get("catalog") if not isinstance(scope, str) else None
-                if catalog_cached and catalog_cached[1] > now:
-                    return catalog_cached[2]
-                future = self._pending.get((key, generation))
-                owner = future is None
-                if owner:
-                    future = Future()
-                    self._pending[(key, generation)] = future
+        with self._lock:
+            generation = self._generation
+            now = monotonic()
+            cached = self._values.get(key)
+            if cached and cached[0] is raw_scope and cached[1] > now:
+                return cached[2]
+            catalog_cached = self._values.get("catalog") if not isinstance(scope, str) else None
+            if catalog_cached and catalog_cached[1] > now:
+                return catalog_cached[2]
+            future = self._pending.get((key, generation))
+            owner = future is None
             if owner:
-                try:
-                    value = build()
-                    with self._lock:
-                        if generation == self._generation:
-                            if len(self._values) >= 16:
-                                self._values.pop(next(iter(self._values)))
-                            self._values[key] = (raw_scope, monotonic() + self.ttl_seconds, value)
-                    future.set_result(value)
-                except BaseException as error:
-                    future.set_exception(error)
-                finally:
-                    with self._lock:
-                        self._pending.pop((key, generation), None)
-            value = future.result()
-            with self._lock:
-                if generation == self._generation:
-                    return value
+                future = Future()
+                self._pending[(key, generation)] = future
+        if owner:
+            try:
+                value = build()
+                with self._lock:
+                    if generation == self._generation:
+                        if len(self._values) >= 16:
+                            self._values.pop(next(iter(self._values)))
+                        self._values[key] = (raw_scope, monotonic() + self.ttl_seconds, value)
+                future.set_result(value)
+            except BaseException as error:
+                future.set_exception(error)
+            finally:
+                with self._lock:
+                    self._pending.pop((key, generation), None)
+        return future.result()
+
+    def peek(self, scope):
+        raw_scope = unwrap_database(scope)
+        key = scope if isinstance(scope, str) else id(raw_scope)
+        with self._lock:
+            now = monotonic()
+            cached = self._values.get(key)
+            if cached and (isinstance(scope, str) or cached[0] is raw_scope) and cached[1] > now:
+                return cached[2]
+            return None
 
     def set(self, scope, value):
         raw_scope = unwrap_database(scope)
@@ -79,8 +85,20 @@ class ReferenceCache:
 historical_context_cache = ReferenceCache(ttl_seconds=120)
 subcategory_catalog_cache = ReferenceCache(ttl_seconds=300)
 statement_review_cache = ReferenceCache(ttl_seconds=120)
-dashboard_snapshot_cache = ReferenceCache(ttl_seconds=30, dependents=(statement_review_cache,))
+dashboard_forecast_cache = ReferenceCache(ttl_seconds=60)
+movement_count_cache = ReferenceCache(ttl_seconds=60)
+dashboard_snapshot_cache = ReferenceCache(
+    ttl_seconds=60,
+    dependents=(statement_review_cache, dashboard_forecast_cache, movement_count_cache),
+)
 classification_cache = ReferenceCache(
     ttl_seconds=300,
-    dependents=(historical_context_cache, subcategory_catalog_cache, dashboard_snapshot_cache, statement_review_cache),
+    dependents=(
+        historical_context_cache,
+        subcategory_catalog_cache,
+        dashboard_snapshot_cache,
+        statement_review_cache,
+        dashboard_forecast_cache,
+        movement_count_cache,
+    ),
 )

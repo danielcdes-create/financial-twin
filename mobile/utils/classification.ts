@@ -60,7 +60,7 @@ export const applyVendorDefaults=(
   options?:Record<string,any>|null,
   categoryField:'categoria_sugerida'|'categoria'='categoria_sugerida',
 ):Record<string,string>=>{
-  const next={...currentDraft,vendedor:vendorName};
+  const next: Record<string, any> = {...currentDraft, vendedor: vendorName};
   const vendorMap=options?.vendor_defaults;
   if(!vendorMap||typeof vendorMap!=='object')return next;
   const targetKey=normalized(vendorName);

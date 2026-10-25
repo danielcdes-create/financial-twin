@@ -104,24 +104,25 @@ try {
             Write-Host "APK publicado com sucesso (estilo SpamShield) em: $publishedAlias" -ForegroundColor Green
             Write-Host "Metadados gerados: v$versionName (build $versionCode), Tamanho: $fileSize bytes, SHA256: $fileHash" -ForegroundColor Cyan
 
-            # 1. Sincroniza telemetria (consolida perf_telemetry.live.jsonl em perf_telemetry.jsonl)
+            # 1. Sincroniza telemetria (unificado em perf_telemetry.jsonl; migra .live.jsonl se existir)
             $telemetryLive = Join-Path $repoRoot 'logs\perf_telemetry.live.jsonl'
             $telemetryMain = Join-Path $repoRoot 'logs\perf_telemetry.jsonl'
             if (Test-Path -LiteralPath $telemetryLive) {
-                Write-Host "Consolidando telemetria em $telemetryMain..." -ForegroundColor Cyan
+                Write-Host "Consolidando telemetria legada em $telemetryMain..." -ForegroundColor Cyan
                 $pythonExe = Join-Path $repoRoot '.venv\Scripts\python.exe'
                 if (Test-Path -LiteralPath $pythonExe) {
                     & $pythonExe -c "
 from pathlib import Path
 target = Path(r'$telemetryMain')
 live = Path(r'$telemetryLive')
-if live.exists() and target.exists():
-    existing = set(target.read_text(encoding='utf-8').splitlines())
-    new_lines = [l.strip() for l in live.read_text(encoding='utf-8').splitlines() if l.strip() and l.strip() not in existing]
+if live.exists():
+    existing = set(target.read_text(encoding='utf-8', errors='ignore').splitlines()) if target.exists() else set()
+    new_lines = [l.strip() for l in live.read_text(encoding='utf-8', errors='ignore').splitlines() if l.strip() and l.strip() not in existing]
     if new_lines:
         with target.open('a', encoding='utf-8') as f:
             for l in new_lines: f.write(l + '\n')
         print(f'Telemetria: {len(new_lines)} novos eventos consolidados.')
+    live.unlink(missing_ok=True)
 "
                 }
             }

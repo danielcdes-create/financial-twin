@@ -396,14 +396,21 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
       send: async (row: QueueRow) => {
         ensureQueueSession(syncIdentity.current);
         try {
-          if (row.kind === "event" || row.kind === "native_event")
-            return await json("/v1/events", {
-              method: "POST",
-              body: row.payload,
-            });
-          return await submitQueuedCapture(row, api.upload, () => {
-            ensureQueueSession(syncIdentity.current);
-          });
+          return await telemetry.measureSpan(
+            "queue_sync",
+            `sync.${row.kind}`,
+            async () => {
+              if (row.kind === "event" || row.kind === "native_event")
+                return await json("/v1/events", {
+                  method: "POST",
+                  body: row.payload,
+                });
+              return await submitQueuedCapture(row, api.upload, () => {
+                ensureQueueSession(syncIdentity.current);
+              });
+            },
+            { kind: row.kind, attempt: (row.attempt_count || 0) + 1 },
+          );
         } catch (error) {
           if (
             error instanceof ApiError &&
@@ -472,24 +479,35 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
         return Promise.resolve();
       }
       const work: Promise<void>[] = [];
+      const deferredWork: (() => Promise<void>)[] = [];
       const readGeneration = api.getReadGeneration();
+      const enqueueTask = (taskFactory: () => Promise<void>, deferInAll = false) => {
+        if (scope === "all" && deferInAll) {
+          deferredWork.push(taskFactory);
+        } else {
+          work.push(taskFactory());
+        }
+      };
       const run = (
         resource: string,
         path: string,
         publish: (value: any) => void,
+        deferInAll = false,
       ) =>
-        work.push(
-          requests.run(
-            resource,
-            `${path}:${readGeneration}`,
-            (signal) => json(path, { signal }),
-            (value) => {
-              publish(value);
-              lastLoaded.set(resource, { key: path, at: Date.now(), generation: readGeneration });
-              loadedResourcesRef.current = { ...loadedResourcesRef.current, [resource]: true };
-              setLoadedResources((current) => ({ ...current, [resource]: true }));
-            },
-          ),
+        enqueueTask(
+          () =>
+            requests.run(
+              resource,
+              `${path}:${readGeneration}`,
+              (signal) => json(path, { signal }),
+              (value) => {
+                publish(value);
+                lastLoaded.set(resource, { key: path, at: Date.now(), generation: readGeneration });
+                loadedResourcesRef.current = { ...loadedResourcesRef.current, [resource]: true };
+                setLoadedResources((current) => ({ ...current, [resource]: true }));
+              },
+            ),
+          deferInAll,
         );
       const isResourceFresh = (resource: string, key: string) => {
         if (showLoading) return false;
@@ -511,12 +529,17 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
       ) {
         const window = currentMonthWindow();
         const path = `/v1/dashboard/overview?period=${dashboardPeriod.current}&year_start=${window.yearStart}&month_start=${window.monthStart}&month_end=${window.monthEnd}`;
-        run("início", path, (value) => {
-          setDashboard(value.selected);
-          setYearDashboard(value.year);
-          setMonthDashboard(value.month);
-          synced();
-        });
+        run(
+          "início",
+          path,
+          (value) => {
+            setDashboard(value.selected);
+            setYearDashboard(value.year);
+            setMonthDashboard(value.month);
+            synced();
+          },
+          tab !== "Início",
+        );
       }
       if (scope === "all" || scope === "finance" || scope === "movements") {
         // A page from the previous filter/snapshot must not append to a reset.
@@ -524,34 +547,36 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
         const path = movementPath({search:movementQuery.current,category:movementCategory.current,
           account:movementAccount.current,range:movementDateRange.current,spendingOnly:movementSpendingOnly.current});
         setRequestedMovementPath(path);
-        work.push(
-          requests.run(
-            "movimentações",
-            `${path}:${readGeneration}`,
-            (signal) => json(path, { signal }),
-            (result) => {
-              const merged = result.items || [];
-              setItems(merged);
-              setMovementResultPath(path);
-              setMovementTotal(result.total || 0);
-              setMovementHasMore(Boolean(result.has_more));
-              movementCursor.current = result.next_cursor || null;
-              setSelectedItem((current: any) => {
-                if (!current) return current;
-                const fresh = merged.find(
-                  (value: any) =>
-                    (value.id && value.id === current.id) ||
-                    (value.provisional_id &&
-                      value.provisional_id === current.provisional_id),
-                );
-                return fresh ? { ...current, ...fresh } : current;
-              });
-              synced();
-              lastLoaded.set("movimentações", { key: path, at: Date.now(), generation: readGeneration });
-              loadedResourcesRef.current = { ...loadedResourcesRef.current, movimentações: true };
-              setLoadedResources((current) => ({ ...current, movimentações: true }));
-            },
-          ),
+        enqueueTask(
+          () =>
+            requests.run(
+              "movimentações",
+              `${path}:${readGeneration}`,
+              (signal) => json(path, { signal }),
+              (result) => {
+                const merged = result.items || [];
+                setItems(merged);
+                setMovementResultPath(path);
+                setMovementTotal(result.total || 0);
+                setMovementHasMore(Boolean(result.has_more));
+                movementCursor.current = result.next_cursor || null;
+                setSelectedItem((current: any) => {
+                  if (!current) return current;
+                  const fresh = merged.find(
+                    (value: any) =>
+                      (value.id && value.id === current.id) ||
+                      (value.provisional_id &&
+                        value.provisional_id === current.provisional_id),
+                  );
+                  return fresh ? { ...current, ...fresh } : current;
+                });
+                synced();
+                lastLoaded.set("movimentações", { key: path, at: Date.now(), generation: readGeneration });
+                loadedResourcesRef.current = { ...loadedResourcesRef.current, movimentações: true };
+                setLoadedResources((current) => ({ ...current, movimentações: true }));
+              },
+            ),
+          tab !== "Movimentações" && tab !== "Detalhe",
         );
       }
       if (scope === "all" || scope === "reviews") {
@@ -578,13 +603,26 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
       }
       if (scope === "all" || scope === "cards")
         run("cartões", "/v1/card-catalog", (result) => setCards(result.items || []));
-      if (scope === "all") void sync();
-      if (showLoading && work.length) {
+      const hasWork = work.length + deferredWork.length > 0;
+      if (showLoading && hasWork) {
         manualLoads.current += 1;
         setManualLoading(true);
       }
-      return Promise.all(work).then(() => undefined).finally(() => {
-        if (showLoading && work.length) {
+      return (async () => {
+        const wave1 = await Promise.allSettled(work);
+        const wave2 = deferredWork.length
+          ? await Promise.allSettled(deferredWork.map((fn) => fn()))
+          : [];
+        if (scope === "all") {
+          void sync();
+          if (showLoading) void telemetry.flush();
+        }
+        const rejected = [...wave1, ...wave2].find(
+          (item): item is PromiseRejectedResult => item.status === "rejected",
+        );
+        if (rejected) throw rejected.reason;
+      })().finally(() => {
+        if (showLoading && hasWork) {
           manualLoads.current -= 1;
           setManualLoading(manualLoads.current > 0);
         }
@@ -649,7 +687,9 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
       task = Promise.resolve();
     }
     return task.finally(() => {
-      telemetry.completeTabTransition(tab, { cached: fromCache, forced: force });
+      if (!["Compromissos", "Categorias", "Fechamento", "Decisões", "Comprar"].includes(tab)) {
+        telemetry.completeTabTransition(tab, { cached: fromCache, forced: force });
+      }
     });
   }, [lastLoaded, refresh, tab]);
   const resolveActiveRefreshScopes = useCallback((scopes: Parameters<typeof refresh>[0][]) => {
@@ -1407,7 +1447,7 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
           renderItem={reviewRow}
           keyExtractor={(item, index) => String(item.review_id || index)}
           ListHeaderComponent={reviewHeader}
-          ListFooterComponent={<>{reviewPage.next_cursor?<Pressable accessibilityRole="button" disabled={reviewMoreBusy} onPress={()=>loadMoreReviews()}><Text style={{color:"#4FD1B5",padding:18}}>{reviewMoreBusy?"Carregando…":`Carregar mais revisões (${reviews.length} de ${reviewPage.total})`}</Text></Pressable>:null}<RecordReview api={json} money={money} onUpdated={() => refreshAfterMutation("finance", "reviews")}/></>}
+          ListFooterComponent={<>{reviewPage.next_cursor?<Pressable accessibilityRole="button" disabled={reviewMoreBusy} onPress={()=>loadMoreReviews()}><Text style={{color:"#4FD1B5",padding:18}}>{reviewMoreBusy?"Carregando…":`Carregar mais revisões (${reviews.length} de ${reviewPage.total})`}</Text></Pressable>:null}<RecordReview api={json} money={money} lazy onUpdated={() => refreshAfterMutation("finance", "reviews")}/></>}
           contentContainerStyle={[s.content, s.contentShell]}
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode="on-drag"

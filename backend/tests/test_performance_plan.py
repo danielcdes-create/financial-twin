@@ -393,9 +393,128 @@ class PerformancePlanTests(unittest.TestCase):
         )
         self.assertEqual(raw_db.transactions.find.call_count, 1)
         self.assertEqual(raw_db.provisional_transactions.find.call_count, 1)
+        self.assertEqual(raw_db.obligations.find.call_count, 2)
+        self.assertEqual(raw_db.commitments.find.call_count, 1)
         self.assertEqual(res1["month"]["period_end"], "2026-10-21")
         self.assertEqual(res1["month"]["expenses"], 50.0)
         self.assertEqual(res2["month"]["expenses"], 50.0)
+
+    def test_p0_selective_cache_invalidation_preserves_classification_on_event_and_provisional_writes(self):
+        import asyncio
+        from app.main import invalidate_reference_data
+        from app.reference_cache import ReferenceCache
+
+        classification_cache.set("catalog", {"categoria": ["Alimentação"]})
+        historical_context_cache.set("catalog", {"by_exact": {}})
+        dashboard_snapshot_cache.set("catalog", ([], []))
+
+        cls_gen_before = classification_cache._generation
+        hist_gen_before = historical_context_cache._generation
+        dash_gen_before = dashboard_snapshot_cache._generation
+
+        async def ok_next(_req):
+            return SimpleNamespace(status_code=200, headers={})
+
+        for method, path in [
+            ("POST", "/v1/events"),
+            ("PATCH", "/v1/provisional/prov-123"),
+            ("POST", "/v1/provisional/prov-123/decision"),
+            ("POST", "/v1/reviews/rev-123/decision"),
+        ]:
+            req = SimpleNamespace(method=method, url=SimpleNamespace(path=path))
+            asyncio.run(invalidate_reference_data(req, ok_next))
+
+        self.assertEqual(classification_cache._generation, cls_gen_before)
+        self.assertEqual(historical_context_cache._generation, hist_gen_before)
+        self.assertEqual(dashboard_snapshot_cache._generation, dash_gen_before + 4)
+
+        # Direct taxonomy mutation still invalidates classification_cache + dependents
+        req_cat = SimpleNamespace(method="POST", url=SimpleNamespace(path="/v1/categories"))
+        asyncio.run(invalidate_reference_data(req_cat, ok_next))
+        self.assertEqual(classification_cache._generation, cls_gen_before + 1)
+        self.assertEqual(historical_context_cache._generation, hist_gen_before + 1)
+
+        # In-flight invalidation during ReferenceCache.get returns value once without retry storm
+        cache = ReferenceCache(ttl_seconds=60)
+        scope = SimpleNamespace()
+        calls = 0
+
+        def build_once():
+            nonlocal calls
+            calls += 1
+            cache.invalidate()
+            return {"built": calls}
+
+        first = cache.get(scope, build_once)
+        self.assertEqual(first, {"built": 1})
+        self.assertEqual(calls, 1)
+        second = cache.get(scope, lambda: {"built": 2})
+        self.assertEqual(second, {"built": 2})
+
+    def test_p1_snapshot_reuse_in_account_positions_economic_rows_and_purchase_links(self):
+        from datetime import date
+        from app.account_positions import account_positions
+        from app.economic_period import economic_rows
+        from app.parcelamento_link import decorate_purchase_links
+
+        # 1. economic_rows with dated_rows skips second find()
+        collection = MagicMock()
+        stamp = datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc)
+        dated_row = {"_id": "tx-1", "data_evento": stamp, "valor": Decimal128("-10.00")}
+        collection.find.return_value = []
+        merged = economic_rows(collection, date(2026, 10, 1), date(2026, 10, 31), dated_rows=[dated_row])
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(collection.find.call_count, 1)
+
+        # 2. decorate_purchase_links with preloaded_commitments skips db.commitments.find
+        db_mock = MagicMock()
+        items = [{"provisional_id": "prov-1", "movement_source": "capture"}]
+        preloaded = [{
+            "commitment_id": "c-1",
+            "name": "Notebook",
+            "kind": "parcelamento",
+            "amount": "100.00",
+            "installment_count": 3,
+            "purchase_provisional_id": "prov-1",
+        }]
+        decorate_purchase_links(db_mock, items, preloaded_commitments=preloaded)
+        self.assertEqual(db_mock.commitments.find.call_count, 0)
+        self.assertEqual(items[0]["commitment"]["id"], "c-1")
+
+        # 3. account_positions reuses warm dashboard_snapshot_cache on Database instances
+        class FakePosDatabase(Database):
+            def __init__(self):
+                self.account_profiles = MagicMock()
+                self.account_profiles.find.return_value = []
+                self.accounts = MagicMock()
+                self.accounts.find.return_value = [{"_id": "acc-itau", "instituicao": "Itaú", "tipo": "conta_corrente"}]
+                self.account_balance_snapshots = MagicMock()
+                self.account_balance_snapshots.find.return_value = [{
+                    "account_key": "itau",
+                    "amount": Decimal128("1000.00"),
+                    "as_of": datetime(2026, 10, 1, 0, 0, tzinfo=timezone.utc),
+                    "reference_kind": "civil_day",
+                    "as_of_date": "2026-10-01",
+                }]
+                self.transactions = MagicMock()
+                self.provisional_transactions = MagicMock()
+
+            def __getattr__(self, name):
+                return SimpleNamespace(collection_name=name)
+
+        pos_db = FakePosDatabase()
+        dashboard_snapshot_cache.set(
+            pos_db,
+            (
+                [{"_id": "t1", "account_id": "acc-itau", "data_evento": stamp, "valor": Decimal128("-50.00")}],
+                [],
+            ),
+        )
+        positions = account_positions(pos_db)
+        itau = next(p for p in positions if p["key"] == "itau")
+        self.assertEqual(itau["balance"], 950.0)
+        self.assertEqual(pos_db.transactions.find.call_count, 0)
+        self.assertEqual(pos_db.provisional_transactions.find.call_count, 0)
 
 
 if __name__ == "__main__":

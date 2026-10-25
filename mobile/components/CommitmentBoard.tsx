@@ -432,7 +432,7 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
       }
       if (collapsedYears[`${card.key}:${year}`]) continue;
       const dueDay = String(row.due).slice(0, 10);
-      const payment = row.payment || (card.payload.linked_transactions || []).find((link: any) => String(link.due_date || link.occurrence_due_date || '').slice(0, 10) === dueDay);
+      const payment = ('payment' in row ? row.payment : undefined) || (card.payload.linked_transactions || []).find((link: any) => String(link.due_date || link.occurrence_due_date || '').slice(0, 10) === dueDay);
       const statusText = row.state === 'Pago (assumido)' ? 'Pago (assumido)' : row.state === 'Pago' ? 'Pago' : row.state === 'Pago vinculado' ? `Pago · extrato · ${dateLabel(payment?.paid_date || dueDay)} · ${money(Number(payment?.actual_amount || row.amount || 0))}` : '';
       entries.push({
         kind: 'row', key: row.key, due: dueDay, amount: row.amount,

@@ -116,20 +116,23 @@ export default function ProvisionalReview({api,money,onUpdated,initialItem,initi
         setConflict(local&&!sameReviewSource(local.item,initialItem)?initialItem:null);
         const pending=!!await pendingReviewCommand(db,initialItem.provisional_id);if(version===generation.current)setCommandPending(pending);
       }else{
-        const [captures,available]=await Promise.allSettled([api('/v1/provisional?active_only=true'),hasOptionsRef.current?Promise.resolve(null):api('/v1/transactions/classification-options')]);
+        const captures=await Promise.allSettled([api('/v1/provisional?active_only=true')]).then(r=>r[0]);
+        const nextItems=captures.status==='fulfilled'?(captures.value.items||[]):[];
+        const shouldLoadOptions=!hasOptionsRef.current&&(nextItems.length>0||Boolean(local));
+        const available=shouldLoadOptions?await Promise.allSettled([api('/v1/transactions/classification-options')]).then(r=>r[0]):{status:'fulfilled' as const,value:null};
         if(version!==generation.current)return;
         setResumable(local);
         setPendingCommands(commands);
-        if(captures.status==='fulfilled'){const nextItems=captures.value.items||[],nextPage={total:captures.value.total||0,next_cursor:captures.value.next_cursor||null};setItems(nextItems);setPage(nextPage);if(typeof api==='function'){const prev=provisionalListCache.get(api);provisionalListCache.set(api,{items:nextItems,page:nextPage,options:available.status==='fulfilled'&&available.value!==null?(available.value||{}):(prev?.options||options),hasOptions:hasOptionsRef.current||(available.status==='fulfilled'&&available.value!==null),at:Date.now()});}}
+        if(captures.status==='fulfilled'){const nextPage={total:captures.value.total||0,next_cursor:captures.value.next_cursor||null};setItems(nextItems);setPage(nextPage);if(typeof api==='function'){const prev=provisionalListCache.get(api);provisionalListCache.set(api,{items:nextItems,page:nextPage,options:available.status==='fulfilled'&&available.value!==null?(available.value||{}):(prev?.options||options),hasOptions:hasOptionsRef.current||(available.status==='fulfilled'&&available.value!==null),at:Date.now()});}}
         if(available.status==='fulfilled'){if(available.value!==null){hasOptionsRef.current=true;setOptions(available.value||{});}setOptionsError('');}
         else setOptionsError(available.reason?.message||'Não foi possível carregar as sugestões.');
-        if(captures.status==='rejected'&&(available.status==='rejected'||hasOptionsRef.current)&&!local)throw captures.reason;
+        if(captures.status==='rejected'&&(available.status==='rejected'||hasOptionsRef.current||!shouldLoadOptions)&&!local)throw captures.reason;
       }
     }catch(error:any){if(version===generation.current)Alert.alert('Não foi possível carregar as capturas',error.message)}
     finally{if(version===generation.current)setLoading(false)}
   },[api,db,initialItem,storedDraft]);
   useEffect(()=>{const lifetime=generation,task=setTimeout(()=>load(),0);return()=>{clearTimeout(task);lifetime.current++}},[load]);
-  useEffect(()=>{if(initialAccounts?.length){setAccountOptions(initialAccounts);return;}let active=true;void api('/v1/account-positions').then(result=>{if(active)setAccountOptions(result.items||[])}).catch(()=>{});return()=>{active=false}},[api,initialAccounts]);
+  useEffect(()=>{if(initialAccounts?.length){setAccountOptions(initialAccounts);return;}if(!selected&&!initialItem)return;let active=true;void api('/v1/account-positions').then(result=>{if(active)setAccountOptions(result.items||[])}).catch(()=>{});return()=>{active=false}},[api,initialAccounts,initialItem,selected]);
   useEffect(()=>{
     if(!selected?.provisional_id||!Object.keys(draft).length||conflict)return;
     if(persistedDraft.current!==selected.provisional_id&&!Object.entries(draft).some(([field,value])=>value!==(selectedSourceDraft[field]||'')))return;
@@ -149,10 +152,11 @@ export default function ProvisionalReview({api,money,onUpdated,initialItem,initi
     if(running.current)return;running.current=true;setLoading(true);const valid=captureScope();
     try{
       await draftWrites.current;await flushDraftWrites(db,'review',item.provisional_id);
-      const [response,local,pendingCmd]=await Promise.all([api(`/v1/provisional/${item.provisional_id}`),storedDraft(item.provisional_id),pendingReviewCommand(db,item.provisional_id)]);
+      const [response,local,pendingCmd,loadedOptions]=await Promise.all([api(`/v1/provisional/${item.provisional_id}`),storedDraft(item.provisional_id),pendingReviewCommand(db,item.provisional_id),hasOptionsRef.current?Promise.resolve(null):api('/v1/transactions/classification-options').catch(()=>null)]);
       const current=response?.item;
       if(!current)throw new Error('Não foi possível conferir a versão atual. O rascunho permanece salvo.');
       if(!valid())return;
+      if(loadedOptions){hasOptionsRef.current=true;setOptions(loadedOptions);setOptionsError('');}
       persistedDraft.current=local?item.provisional_id:null;setHasDraft(!!local);
       setDraftState(local?'Rascunho salvo neste dispositivo.':'Sem alterações locais');
       setNeedsCurrent(false);setSelected(local?.item||current);setDraft(local?.draft||initialDraftFor(current));

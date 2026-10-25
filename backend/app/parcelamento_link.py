@@ -552,12 +552,16 @@ def purchase_summary(commitment: dict) -> dict:
     }
 
 
-def decorate_purchase_links(db, items: list[dict]) -> None:
+def decorate_purchase_links(db, items: list[dict], *, preloaded_commitments=None) -> None:
     capture_ids = [item.get('provisional_id') for item in items if item.get('movement_source') == 'capture' and item.get('provisional_id')]
     if not capture_ids:
         return
-    for commitment in db.commitments.find({'purchase_provisional_id': {'$in': capture_ids}}):
+    capture_id_set = set(capture_ids)
+    rows = preloaded_commitments if preloaded_commitments is not None else db.commitments.find({'purchase_provisional_id': {'$in': capture_ids}})
+    for commitment in rows:
         pointer = commitment.get('purchase_provisional_id')
+        if pointer not in capture_id_set:
+            continue
         summary = purchase_summary(commitment)
         for item in items:
             if item.get('provisional_id') != pointer:

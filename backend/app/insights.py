@@ -26,9 +26,18 @@ from app.services.ai.xai.provider import XAIVisionProvider, XAIError, public_xai
 from app.pagination import page
 from app.account_positions import account_positions, account_key_for_legacy
 from app.commitments import commitment_cutoff, linked_due_dates, schedule_from, as_date, historical_occurrence_conflicts
+from pymongo.database import Database
+from app.dashboard_window import _load_raw_ledger_snapshot
 from app.future_commitments import effective_documents
-from app.economic_period import economic_rows, economic_basis
+from app.economic_period import economic_rows, economic_basis, economic_in_period
 from app.obligation_policy import OPEN_OBLIGATION_STATUSES
+from contextlib import nullcontext
+from app.reference_cache import dashboard_snapshot_cache, unwrap_database
+try:
+    from app.telemetry import SpanTimer
+except Exception:
+    def SpanTimer(*_args, **_kwargs):
+        return nullcontext()
 
 router=APIRouter(prefix='/v1/insights',dependencies=[Depends(require_session)])
 def database(request:Request):
@@ -49,6 +58,14 @@ def period(start,end):
     return date_filter(start,end)
 def rows_for(db,start,end):
     period(start,end)
+    raw_db=unwrap_database(db)
+    snap=dashboard_snapshot_cache.peek(raw_db) if isinstance(raw_db,Database) else None
+    if snap is not None:
+        all_txs,all_captures=snap[0],snap[1]
+        ledger=[row for row in all_txs if economic_in_period(row,start,end)]
+        linked={str(row['_id']) for row in ledger}
+        captures=[row for row in all_captures if economic_in_period(row,start,end) and str(row.get('linked_transaction_id') or '') not in linked]
+        return [(False,row) for row in ledger]+[(True,row) for row in captures]
     ledger=list(economic_rows(db.transactions,start,end))
     linked={str(row['_id']) for row in ledger}
     captures=[row for row in economic_rows(db.provisional_transactions,start,end,{'status':'confirmed'}) if str(row.get('linked_transaction_id') or '') not in linked]
@@ -65,7 +82,10 @@ def source(db,reference):
 @router.get('/closure')
 def closure(start:date,end:date,db=Depends(database)):
     period(start,end)
-    with mongo_snapshot(db) as (reading,consistency):
+    with SpanTimer("insights.closure"), mongo_snapshot(db) as (reading,consistency):
+        raw_db=unwrap_database(reading)
+        if isinstance(raw_db,Database) and dashboard_snapshot_cache.peek(raw_db) is None:
+            dashboard_snapshot_cache.get(raw_db,lambda:_load_raw_ledger_snapshot(raw_db))
         rows=rows_for(reading,start,end);positions=account_positions(reading)
         totals={'income':Decimal('0'),'expenses':Decimal('0')};unknown=0;refunds=0
         for captured,row in rows:
@@ -200,12 +220,21 @@ def _planning_context(start:date,end:date,db,purchase:bool=False):
     flows=[];excluded=[];suggestions=[]
     cutoff = commitment_cutoff(start)
     seek = min(start, cutoff) if (purchase and start >= cutoff) else start
-    with mongo_snapshot(db) as (reading,consistency):
+    with SpanTimer("insights.planning_context", purchase=purchase), mongo_snapshot(db) as (reading,consistency):
+        raw_db=unwrap_database(reading)
+        snap=dashboard_snapshot_cache.get(raw_db,lambda:_load_raw_ledger_snapshot(raw_db)) if isinstance(raw_db,Database) else None
         positions=account_positions(reading)
         account_keys={p['legacy_account_id']:p['key'] for p in positions if p.get('legacy_account_id')}
+        legacy_map={p['key']:{'_id':ObjectId(p['legacy_account_id']) if ObjectId.is_valid(str(p['legacy_account_id'])) else p['legacy_account_id']} for p in positions if p.get('legacy_account_id') and not p.get('legacy_account_ambiguous')}
         excluded.extend({'ref':'profile:'+p['key'],'label':p.get('apelido') or p.get('instituicao') or p['key'],'reason':'Conta encerrada ou arquivada não é oferecida para novas movimentações.'} for p in positions if p.get('archived') or p.get('status')=='encerrada')
         positions=[p for p in positions if not p.get('archived') and p.get('status')!='encerrada']
-        for commitment in effective_commitments(reading, with_batch_size(reading.commitments.find({'status':'ativo'}), 2000)):
+        for commitment in effective_commitments(
+            reading,
+            with_batch_size(reading.commitments.find({'status':'ativo'}), 2000),
+            preloaded_transactions=snap[0] if snap else None,
+            preloaded_captures=snap[1] if snap else None,
+            legacy_map=legacy_map if legacy_map else None,
+        ):
             if historical_occurrence_conflicts(commitment):
                 excluded.append({'ref':'commitment:'+commitment['commitment_id'],'label':commitment.get('name') or 'Compromisso','reason':'Pagamento histórico contradiz a próxima ocorrência. Confira o histórico e a agenda antes de projetar caixa.'})
                 continue

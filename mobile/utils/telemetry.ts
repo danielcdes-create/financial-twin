@@ -130,6 +130,9 @@ class PerformanceTelemetryCollector {
         await this.db.execAsync?.(
           'CREATE TABLE IF NOT EXISTS perf_telemetry (event_id TEXT PRIMARY KEY NOT NULL, timestamp TEXT NOT NULL, category TEXT NOT NULL, name TEXT NOT NULL, duration_ms REAL NOT NULL, status TEXT NOT NULL, tab TEXT NOT NULL, trace_id TEXT NOT NULL, metadata TEXT NOT NULL)',
         );
+        await this.db.execAsync?.(
+          'DELETE FROM perf_telemetry WHERE rowid NOT IN (SELECT rowid FROM perf_telemetry ORDER BY timestamp DESC LIMIT 1000)',
+        );
       } catch {
         // Falha em telemetria nunca bloqueia o fluxo financeiro
       }
@@ -360,6 +363,20 @@ class PerformanceTelemetryCollector {
         ...(params.error ? { error: params.error } : {}),
       },
     });
+
+    if (this.activeTransition && params.status !== 'aborted') {
+      const targetTab = this.activeTransition.to;
+      const matchesChildPrimaryEndpoint =
+        (targetTab === 'Categorias' && cleanPath === '/v1/categories') ||
+        (targetTab === 'Fechamento' && cleanPath.startsWith('/v1/month-close/')) ||
+        (targetTab === 'Decisões' && cleanPath === '/v1/insights/closure') ||
+        (targetTab === 'Comprar' && cleanPath === '/v1/insights/purchase-context');
+      if (matchesChildPrimaryEndpoint) {
+        this.completeTabTransition(targetTab, {
+          cached: params.status === 'cache_hit' || params.status === 'deduped',
+        });
+      }
+    }
   }
 
   /**

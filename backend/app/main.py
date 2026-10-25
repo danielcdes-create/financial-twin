@@ -35,7 +35,7 @@ from app.category_filter import ACTIVE_CAPTURES, catalog_category_names, categor
 from app.movement_filters import period_query, intersect, search_query, filter_key as movement_filter_key
 from app.document_validation import validate_document_extraction
 from app.pdf_input import PDFPasswordError, read_pdf
-from app.reference_cache import ReferenceCache, classification_cache, dashboard_snapshot_cache, unwrap_database
+from app.reference_cache import ReferenceCache, classification_cache, dashboard_forecast_cache, dashboard_snapshot_cache, movement_count_cache, unwrap_database
 from contextlib import nullcontext
 try:
     from app.telemetry import install_telemetry, SpanTimer
@@ -107,9 +107,20 @@ async def lifespan(app: FastAPI):
     app.state.service = None
     app.state.db = None
     recovery_task = None
+    try:
+        import anyio
+        anyio.to_thread.current_default_thread_limiter().total_tokens = 64
+    except Exception:
+        pass
     if settings.mongodb_uri:
         from pymongo import MongoClient
-        app.state.mongo_client = MongoClient(configured_mongodb_uri(settings), serverSelectionTimeoutMS=2500)
+        app.state.mongo_client = MongoClient(
+            configured_mongodb_uri(settings),
+            serverSelectionTimeoutMS=2500,
+            connectTimeoutMS=5000,
+            socketTimeoutMS=20000,
+            maxPoolSize=32,
+        )
         app.state.db = app.state.mongo_client[settings.mongodb_database]
         initialize_deletion_storage(app.state.db)
         app.state.service = TransactionService(app.state.db)
@@ -147,6 +158,7 @@ async def lifespan(app: FastAPI):
         app.state.db.provisional_transactions.create_index([("event_id",1)],name="provisional_by_event_id")
         app.state.db.transaction_evidence.create_index([("transaction_id",1),("status",1)],name="evidence_by_transaction")
         app.state.db.audit_log.create_index([("event",1),("transaction_id",1),("created_at",-1)],name="audit_reviewed_labels")
+        app.state.db.obligations.create_index([("status",1),("tipo",1),("data_vencimento",1)],name="obligation_status_type_due")
         for collection in ('financial_cases','saving_experiments'):
             app.state.db[collection].create_index([('created_at',-1),('_id',-1)],name='workflow_page')
         account_index=[('account_id',1),('data_evento',-1)]
@@ -243,13 +255,12 @@ async def invalidate_reference_data(request: Request, call_next):
         "/v1/provisional", "/v1/merchants", "/v1/reviews",
         "/v1/import", "/v1/documents", "/v1/events",
         "/v1/commitments", "/v1/future-commitments", "/v1/transfers",
-        "/v1/batch-commands",
+        "/v1/batch-commands", "/v1/account-positions", "/v1/account-profiles",
     ))
     mutates_classification = is_write and path.startswith((
         "/v1/commitment-profile", "/v1/capture-batches", "/v1/movements",
         "/v1/transactions", "/v1/categories", "/v1/subcategories",
-        "/v1/provisional", "/v1/merchants", "/v1/reviews", "/v1/import",
-        "/v1/documents", "/v1/events",
+        "/v1/merchants", "/v1/import", "/v1/documents",
     ))
     try:
         return await call_next(request)
@@ -673,6 +684,12 @@ def percentage_change(current:Decimal,previous:Decimal)->float|None:
 
 def dashboard_forecast(db, snapshot=None):
     with SpanTimer("dashboard.forecast"):
+        raw_db = unwrap_database(db)
+        if isinstance(raw_db, Database):
+            return dashboard_forecast_cache.get(
+                raw_db,
+                lambda: _dashboard_forecast(db, snapshot=snapshot),
+            )
         return _dashboard_forecast(db, snapshot=snapshot)
 
 def _dashboard_forecast(db, snapshot=None):
@@ -1606,8 +1623,27 @@ def _cursor_movements_impl(limit, cursor, search, category, account_id, date_fro
     else:
         legacy=list(with_batch_size(db.transactions.find(bounded(legacy_query,"ledger")), 2000).sort([("data_evento",-1),("_id",-1)]).limit(needed+1))
         captures=list(with_batch_size(db.provisional_transactions.find(bounded(capture_query,"capture")), 2000).sort([("data_evento",-1),("_id",-1)]).limit(needed+1))
-        legacy_total=len(legacy) if not cursor and len(legacy)<=needed else db.transactions.count_documents(legacy_query)
-        capture_total=len(captures) if not cursor and len(captures)<=needed else db.provisional_transactions.count_documents(capture_query)
+        raw_db=unwrap_database(db)
+        counts_map=movement_count_cache.get(raw_db,dict) if isinstance(raw_db,Database) else None
+        cached_counts=counts_map.get(signature) if counts_map is not None else None
+        if cached_counts is not None:
+            legacy_total,capture_total=cached_counts
+        else:
+            snap=dashboard_snapshot_cache.peek(raw_db) if isinstance(raw_db,Database) else None
+            if not cursor and len(legacy)<=needed:
+                legacy_total=len(legacy)
+            elif snap is not None and not legacy_query:
+                legacy_total=len(snap[0])
+            else:
+                legacy_total=db.transactions.count_documents(legacy_query)
+            if not cursor and len(captures)<=needed:
+                capture_total=len(captures)
+            elif snap is not None and capture_query=={"status":"confirmed"}:
+                capture_total=len(snap[1])
+            else:
+                capture_total=db.provisional_transactions.count_documents(capture_query)
+            if counts_map is not None:
+                counts_map[signature]=(legacy_total,capture_total)
         total=legacy_total+capture_total
         pairs=[("ledger",item) for item in legacy]+[("capture",item) for item in captures]
     pairs.sort(key=order,reverse=True)
@@ -1628,14 +1664,24 @@ def _cursor_movements_impl(limit, cursor, search, category, account_id, date_fro
     capture_ids=[item["provisional_id"] for item in items if item["movement_source"]=="capture"]
     if ledger_ids or capture_ids:
         links={}
-        for commitment in db.commitments.find({"$or":[{"linked_transactions.transaction_id":{"$in":ledger_ids}},{"linked_transactions.provisional_id":{"$in":capture_ids}}]}):
+        clauses=[]
+        if ledger_ids:
+            clauses.append({"linked_transactions.transaction_id":{"$in":ledger_ids}})
+        if capture_ids:
+            clauses.append({"linked_transactions.provisional_id":{"$in":capture_ids}})
+            clauses.append({"purchase_provisional_id":{"$in":capture_ids}})
+        query=clauses[0] if len(clauses)==1 else {"$or":clauses}
+        matched_commitments=list(db.commitments.find(query))
+        for commitment in matched_commitments:
             for link in commitment.get("linked_transactions",[]):
                 key=link.get("transaction_id") or link.get("provisional_id")
                 if key: links[key]={"id":commitment["commitment_id"],"name":commitment["name"],"kind":commitment["kind"]}
         for item in items:
             linked=links.get(item.get("id") or item.get("provisional_id"))
             if linked: item["commitment"]=linked
-    decorate_purchase_links(db, items)
+        decorate_purchase_links(db, items, preloaded_commitments=matched_commitments if isinstance(unwrap_database(db), Database) or matched_commitments else None)
+    else:
+        decorate_purchase_links(db, items)
     next_cursor=encode_movement_cursor(selected[-1][1]["data_evento"],selected[-1][0],selected[-1][1]["_id"],signature) if has_more and selected else None
     return {"items":items,"limit":limit,"offset":offset,"total":total,"has_more":has_more,"next_cursor":next_cursor,
             'period_basis':period_basis,'spending_only':spending_only,'spending_total':float(spending_total) if spending_total is not None else None}
@@ -2063,7 +2109,6 @@ def _atomic_decide_provisional(provisional_id:str, decision:ProvisionalAction, d
     db.raw_events.update_one({"event_id":item.get("event_id")},{"$set":{"processing_status":new_status,"linked_transaction_id":item["_id"] if new_status=="confirmed" else None}})
     db.audit_log.insert_one({"event":"provisional_transaction_decision","provisional_id":provisional_id,"action":decision.action,"before":json_safe(item),"after":{"status":new_status},"created_at":now})
     resolved_review_count=resolve_pending_reviews_for_provisional(db, provisional_id, now, new_status)
-    classification_cache.invalidate()
     dashboard_snapshot_cache.invalidate()
     decided_item={k:v for k,v in {**item,**update_fields}.items() if k not in extra_unset}
     return {"provisional_id":provisional_id,"status":new_status,"resolved_review_count":resolved_review_count,"_decided_item":decided_item}

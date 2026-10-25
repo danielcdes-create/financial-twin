@@ -84,7 +84,7 @@ export function runUserAction<T>(action: () => T | PromiseLike<T>, label = 'Proc
     let result: T | PromiseLike<T>;
     syncDepth += 1;
     try {
-      result = tracker ? tracker.trackUserAction(label, action, false) : action();
+      result = (tracker ? tracker.trackUserAction(label, action, false) : action()) as T | PromiseLike<T>;
     } finally {
       syncDepth -= 1;
     }

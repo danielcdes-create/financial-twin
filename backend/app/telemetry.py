@@ -35,7 +35,7 @@ from app.auth import require_session
 
 logger = logging.getLogger("financial_twin.telemetry")
 
-_SPAN_META_KEYS = {"period", "limit", "period_basis", "spending_only", "review_status", "windows"}
+_SPAN_META_KEYS = {"period", "limit", "period_basis", "spending_only", "review_status", "windows", "cached", "months", "purchase", "source", "count"}
 _CLIENT_META_KEYS = {
     "from", "to", "reason", "cached", "forced", "payload_bytes", "attempt",
     "shared_consumers", "network_overhead_ms", "server_total_ms", "server_db_ms",
@@ -82,7 +82,17 @@ def safe_client_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
 SLOW_REQUEST_THRESHOLD_MS = float(os.getenv("PERF_SLOW_REQUEST_MS", "300"))
 SLOW_QUERY_THRESHOLD_MS = float(os.getenv("PERF_SLOW_QUERY_MS", "50"))
 N_PLUS_ONE_THRESHOLD = int(os.getenv("PERF_N_PLUS_ONE_COUNT", "4"))
-TELEMETRY_LOG_PATH = Path(os.getenv("PERF_LOG_PATH", "logs/perf_telemetry.live.jsonl"))
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_DEFAULT_LOG_PATH = _REPO_ROOT / "logs" / "perf_telemetry.jsonl"
+_CONFIGURED_LOG_PATH = os.getenv("PERF_LOG_PATH")
+if _CONFIGURED_LOG_PATH:
+    _raw_path = Path(_CONFIGURED_LOG_PATH)
+    TELEMETRY_LOG_PATH = _raw_path if _raw_path.is_absolute() else (_REPO_ROOT / _raw_path).resolve()
+else:
+    TELEMETRY_LOG_PATH = _DEFAULT_LOG_PATH
+LEGACY_LIVE_LOG_PATH = TELEMETRY_LOG_PATH.with_name("perf_telemetry.live.jsonl")
+TELEMETRY_MAX_LOG_BYTES = int(os.getenv("PERF_LOG_MAX_BYTES", str(5 * 1024 * 1024)))
+TELEMETRY_BACKUP_COUNT = int(os.getenv("PERF_LOG_BACKUPS", "3"))
 
 
 @dataclass
@@ -168,6 +178,7 @@ class MongoPerformanceListener(monitoring.CommandListener):
         "getMore",
         "commitTransaction",
         "abortTransaction",
+        "ping",
     }
 
     def __init__(self) -> None:
@@ -183,6 +194,8 @@ class MongoPerformanceListener(monitoring.CommandListener):
             return
         if event.command_name == "getMore":
             collection = str(event.command.get("collection") or event.command.get("getMore") or "cursor")
+        elif event.command_name == "ping":
+            collection = "admin"
         else:
             collection = str(event.command.get(event.command_name) or event.command.get("collection") or "session")
         with self._lock:
@@ -263,36 +276,132 @@ class MongoPerformanceListener(monitoring.CommandListener):
 class TelemetryAggregator:
     """Mantém janela móvel em memória e grava JSONL estruturado para acompanhamento histórico."""
 
-    def __init__(self, max_samples_per_key: int = 500) -> None:
+    def __init__(
+        self,
+        max_samples_per_key: int = 500,
+        log_path: Path | None = None,
+        max_log_bytes: int | None = None,
+        backup_count: int | None = None,
+    ) -> None:
         self.max_samples = max_samples_per_key
+        self.log_path = log_path or TELEMETRY_LOG_PATH
+        self.max_log_bytes = max_log_bytes if max_log_bytes is not None else TELEMETRY_MAX_LOG_BYTES
+        self.backup_count = backup_count if backup_count is not None else TELEMETRY_BACKUP_COUNT
         self._lock = Lock()
+        self._file_lock = Lock()
         self._backend_routes: dict[str, deque[dict[str, Any]]] = defaultdict(
+            lambda: deque(maxlen=self.max_samples)
+        )
+        self._backend_spans: dict[str, deque[float]] = defaultdict(
             lambda: deque(maxlen=self.max_samples)
         )
         self._client_events: dict[str, deque[dict[str, Any]]] = defaultdict(
             lambda: deque(maxlen=self.max_samples)
         )
-        TELEMETRY_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        if log_path is None:
+            self._consolidate_legacy_live_log()
+        self._load_existing_log()
+
+    def _consolidate_legacy_live_log(self) -> None:
+        try:
+            legacy_path = self.log_path.with_name("perf_telemetry.live.jsonl")
+            if not legacy_path.exists() or legacy_path.resolve() == self.log_path.resolve():
+                return
+            existing = set()
+            if self.log_path.exists():
+                existing = set(self.log_path.read_text(encoding="utf-8", errors="ignore").splitlines())
+            new_lines = [
+                line.strip()
+                for line in legacy_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+                if line.strip() and line.strip() not in existing
+            ]
+            if new_lines:
+                with self.log_path.open("a", encoding="utf-8") as fh:
+                    for line in new_lines:
+                        fh.write(line + "\n")
+            legacy_path.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.debug("Telemetry legacy live log consolidation skipped: %s", exc)
+
+    def _ingest_memory_record(self, payload: dict[str, Any]) -> None:
+        source = payload.get("source")
+        if source == "backend" and payload.get("method") and payload.get("route"):
+            key = f"{payload['method']} {payload['route']}"
+            self._backend_routes[key].append(payload)
+            for span in payload.get("spans") or []:
+                if isinstance(span, dict) and span.get("span") and isinstance(span.get("duration_ms"), (int, float)):
+                    self._backend_spans[str(span["span"])].append(float(span["duration_ms"]))
+        elif source == "mobile":
+            key = f"{payload.get('category', 'unknown')}:{payload.get('name', 'unknown')}"
+            self._client_events[key].append(payload)
+
+    def _load_existing_log(self, max_tail_lines: int = 2000) -> None:
+        try:
+            if not self.log_path.exists():
+                return
+            lines = self.log_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+            with self._lock:
+                for raw in lines[-max_tail_lines:]:
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        payload = json.loads(raw)
+                    except Exception:
+                        continue
+                    if isinstance(payload, dict):
+                        self._ingest_memory_record(payload)
+        except Exception as exc:
+            logger.debug("Telemetry boot hydration skipped: %s", exc)
+
+    def _rotate_if_needed(self) -> None:
+        if self.max_log_bytes <= 0 or not self.log_path.exists():
+            return
+        try:
+            if self.log_path.stat().st_size < self.max_log_bytes:
+                return
+            lines = self.log_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+            for idx in range(self.backup_count, 0, -1):
+                src = self.log_path.with_name(f"{self.log_path.name}.{idx - 1}" if idx > 1 else self.log_path.name)
+                dst = self.log_path.with_name(f"{self.log_path.name}.{idx}")
+                if idx == 1:
+                    src.replace(dst)
+                elif src.exists():
+                    src.replace(dst)
+            kept = lines[-min(len(lines), self.max_samples):]
+            if kept:
+                self.log_path.write_text("\n".join(kept) + "\n", encoding="utf-8")
+        except Exception as exc:
+            logger.debug("Telemetry log rotation skipped: %s", exc)
 
     def record_backend(self, record: dict[str, Any]) -> None:
-        key = f"{record['method']} {record['route']}"
         with self._lock:
-            self._backend_routes[key].append(record)
+            self._ingest_memory_record({"source": "backend", **record})
         self._append_jsonl({"source": "backend", **record})
 
     def record_client_batch(self, events: list[dict[str, Any]]) -> int:
         with self._lock:
             for ev in events:
-                key = f"{ev.get('category', 'unknown')}:{ev.get('name', 'unknown')}"
-                self._client_events[key].append(ev)
-        for ev in events:
-            self._append_jsonl({"source": "mobile", **ev})
+                self._ingest_memory_record({"source": "mobile", **ev})
+        self._append_jsonl_batch([{"source": "mobile", **ev} for ev in events])
         return len(events)
 
     def _append_jsonl(self, payload: dict[str, Any]) -> None:
+        self._append_jsonl_batch([payload])
+
+    def _append_jsonl_batch(self, payloads: list[dict[str, Any]]) -> None:
+        if not payloads:
+            return
         try:
-            with TELEMETRY_LOG_PATH.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+            serialized = "".join(
+                json.dumps(item, ensure_ascii=False, default=str) + "\n"
+                for item in payloads
+            )
+            with self._file_lock:
+                self._rotate_if_needed()
+                with self.log_path.open("a", encoding="utf-8") as fh:
+                    fh.write(serialized)
         except Exception as exc:
             logger.debug("Telemetry JSONL write skipped: %s", exc)
 
@@ -332,20 +441,37 @@ class TelemetryAggregator:
                     "slow_requests": sum(1 for t in totals if t >= SLOW_REQUEST_THRESHOLD_MS),
                 }
 
+            span_summary = {
+                span_name: self._percentiles(list(values))
+                for span_name, values in self._backend_spans.items()
+                if values
+            }
+
             client_summary = {}
             for key, samples in self._client_events.items():
                 items = list(samples)
                 durations = [float(s.get("duration_ms", 0.0)) for s in items if s.get("duration_ms") is not None]
-                failures = sum(1 for s in items if s.get("status") not in ("ok", None))
+                failures = sum(1 for s in items if s.get("status") not in ("ok", "cache_hit", "deduped", None))
+                status_counts: dict[str, int] = defaultdict(int)
+                for s in items:
+                    status_counts[str(s.get("status") or "ok")] += 1
                 client_summary[key] = {
                     **self._percentiles(durations),
                     "error_or_abort_count": failures,
+                    "status_counts": dict(status_counts),
                 }
 
         ranked_backend = dict(
             sorted(
                 backend_summary.items(),
                 key=lambda item: item[1]["latency"]["p95_ms"],
+                reverse=True,
+            )
+        )
+        ranked_spans = dict(
+            sorted(
+                span_summary.items(),
+                key=lambda item: item[1]["p95_ms"],
                 reverse=True,
             )
         )
@@ -364,6 +490,7 @@ class TelemetryAggregator:
                 "n_plus_one_count": N_PLUS_ONE_THRESHOLD,
             },
             "backend_routes_by_p95": ranked_backend,
+            "backend_spans_by_p95": ranked_spans,
             "mobile_events_by_p95": ranked_client,
         }
 

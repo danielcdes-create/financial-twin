@@ -38,9 +38,11 @@ export function dismissDialog(button?: AlertButton, expected = dialogSnapshot())
   // Start that confirmation's next step only after the previous step finishes.
   setUserDialogOpen(false);
   listeners.forEach(listener => listener());
+  const btnText = typeof button.text === 'string' ? button.text.trim() : '';
+  const dialogActionLabel = btnText && btnText.length <= 32 && !/\d/.test(btnText) ? `Dialogo: ${btnText}` : 'Processando…';
   afterUserOperation(() => {
     if (epoch !== generation) return;
-    runUserAction(() => button.onPress?.(), 'Processando…', error => {
+    runUserAction(() => button.onPress?.(), dialogActionLabel, error => {
       if (error instanceof Error && error.name === 'AbortError') return;
       Alert.alert('Não foi possível concluir', error instanceof Error ? error.message : 'Tente novamente.');
     });

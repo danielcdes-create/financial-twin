@@ -4,10 +4,12 @@ import re
 from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
 from bson import ObjectId
+from pymongo.database import Database
 from app.atomic import with_batch_size
 from app.economic_policy import amount, eligible_payment
 from app.financial_time import local_date, today
 from app.account_profiles import legacy_accounts_by_profile
+from app.reference_cache import dashboard_snapshot_cache, unwrap_database
 
 PATTERNS = {
     'cemig': r'\bCEMIG\b',
@@ -117,7 +119,7 @@ def estimate(db, item, rule, as_of=None, legacy_map=None, *, preloaded_transacti
     return result
 
 
-def effective_commitments(db, documents, as_of=None, *, preloaded_transactions=None, preloaded_captures=None):
+def effective_commitments(db, documents, as_of=None, *, preloaded_transactions=None, preloaded_captures=None, legacy_map=None):
     documents = list(documents)
     if not documents:
         return []
@@ -132,7 +134,13 @@ def effective_commitments(db, documents, as_of=None, *, preloaded_transactions=N
     ]
     if not estimate_items:
         return documents
-    legacy_map = legacy_accounts_by_profile(db)
+    if legacy_map is None:
+        legacy_map = legacy_accounts_by_profile(db)
+    raw_db = unwrap_database(db)
+    if preloaded_transactions is None and preloaded_captures is None and isinstance(raw_db, Database):
+        snap = dashboard_snapshot_cache.peek(raw_db)
+        if snap is not None:
+            preloaded_transactions, preloaded_captures = snap[0], snap[1]
     # When multiple commitments need bill estimates and no preloaded snapshot was passed,
     # batch-fetch matching transactions and captures in one query per collection instead of N+1.
     if preloaded_transactions is None and preloaded_captures is None and len(estimate_items) > 1:
