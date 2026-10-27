@@ -68,6 +68,11 @@ import {canReviewAsStatement, queueFailureLabel, reconcileImportedFiles, requeue
 import { useForeground } from "./utils/useForeground";
 import { withDevicePrompt } from "./utils/devicePrompt";
 import { telemetry } from "./utils/telemetry";
+import {
+  formatSignedPct,
+  resolveCostControlView,
+  statusPalette,
+} from "./utils/costControlInsights";
 
 type Tab =
   | "Início"
@@ -1541,6 +1546,13 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
                 </View>
               </View>
               <ComparisonCard data={dashboard?.comparison} money={dashboardMoney} />
+              <CostControlCard
+                dashboard={dashboard}
+                monthDashboard={monthDashboard}
+                yearDashboard={yearDashboard}
+                money={dashboardMoney}
+                onOpenCategory={openCategory}
+              />
               <View style={s.metricGrid}>
                 <Metric
                   label="Revisões"
@@ -2209,12 +2221,22 @@ function ComparisonCard({ data, money: formatMoney }: { data: any; money: (value
           <Text style={[s.comparisonValue, income >= 0 ? s.good : s.bad]}>
             {pct(income)}
           </Text>
+          {data.income != null && (
+            <Text style={s.comparisonSubvalue}>
+              {`Ant. ${formatMoney(Number(data.income || 0))}`}
+            </Text>
+          )}
         </View>
         <View style={s.comparisonMetric}>
           <Text style={s.muted}>Despesas</Text>
           <Text style={[s.comparisonValue, expenses <= 0 ? s.good : s.bad]}>
             {pct(expenses)}
           </Text>
+          {data.expenses != null && (
+            <Text style={s.comparisonSubvalue}>
+              {`Ant. ${formatMoney(Number(data.expenses || 0))}`}
+            </Text>
+          )}
         </View>
         <View style={s.comparisonMetric}>
           <Text style={s.muted}>Saldo</Text>
@@ -2226,8 +2248,525 @@ function ComparisonCard({ data, money: formatMoney }: { data: any; money: (value
           >
             {formatMoney(Number(data.net_change || 0))}
           </SingleLineValue>
+          {data.net_flow != null && (
+            <Text style={s.comparisonSubvalue}>
+              {`Ant. ${formatMoney(Number(data.net_flow || 0))}`}
+            </Text>
+          )}
         </View>
       </View>
+    </View>
+  );
+}
+function CostControlCard({
+  dashboard,
+  monthDashboard,
+  yearDashboard,
+  money: formatMoney,
+  onOpenCategory,
+}: {
+  dashboard: any;
+  monthDashboard: any;
+  yearDashboard: any;
+  money: (value: number) => string;
+  onOpenCategory: (category: string) => void;
+}) {
+  const { width, fontScale } = useWindowDimensions();
+  const narrow = compactLayout(width, fontScale);
+  const [chartMode, setChartMode] = useState<"mtd" | "weekly" | "monthly">("mtd");
+  const model = useMemo(
+    () =>
+      resolveCostControlView(
+        dashboard,
+        monthDashboard,
+        yearDashboard,
+        formatMoney,
+      ),
+    [dashboard, monthDashboard, yearDashboard, formatMoney],
+  );
+  const palette = statusPalette(model.status);
+  const mtd = model.mtd;
+  const paceMax = Math.max(
+    1,
+    mtd.current_expenses,
+    mtd.previous_mtd_expenses,
+    mtd.previous_full_expenses,
+    mtd.projected_month_expenses,
+  );
+  const curPaceWidth =
+    `${Math.max(3, Math.min(100, (mtd.current_expenses / paceMax) * 100))}%` as `${number}%`;
+  const prevMtdPaceWidth =
+    `${Math.max(3, Math.min(100, (mtd.previous_mtd_expenses / paceMax) * 100))}%` as `${number}%`;
+  const mtdBarMax = Math.max(
+    1,
+    ...mtd.buckets.flatMap((b) => [
+      b.current_expenses,
+      b.previous_mtd_expenses,
+    ]),
+  );
+  const mtdCumMax = Math.max(
+    1,
+    ...mtd.buckets.flatMap((b) => [
+      Number(b.current_cumulative || 0),
+      b.previous_mtd_cumulative,
+    ]),
+  );
+  const weeklyMax = Math.max(
+    1,
+    ...model.weekly_series.flatMap((w) => [
+      w.current_expenses,
+      w.previous_expenses,
+    ]),
+  );
+  const monthlyMax = Math.max(
+    1,
+    ...model.monthly_comparison_series.flatMap((m) => [
+      m.current_expenses,
+      m.previous_expenses,
+    ]),
+  );
+  const deltaIsGood = mtd.delta_amount <= 0;
+  return (
+    <View style={s.costControlCard} accessibilityRole="summary">
+      <View style={s.costControlHeader}>
+        <View style={{ flex: 1, minWidth: 160 }}>
+          <Text style={s.costControlEyebrow}>
+            TENDÊNCIA E CONTROLE DE CUSTOS
+          </Text>
+          <Text style={s.costControlTitle}>
+            Ritmo atual vs. período anterior
+          </Text>
+        </View>
+        <View
+          style={[
+            s.costStatusBadge,
+            { backgroundColor: palette.bg, borderColor: palette.border },
+          ]}
+        >
+          <View style={[s.costStatusDot, { backgroundColor: palette.dot }]} />
+          <Text style={[s.costStatusText, { color: palette.text }]}>
+            {model.status_label}
+          </Text>
+        </View>
+      </View>
+      {Boolean(model.headline) && (
+        <Text style={s.costHeadline}>{model.headline}</Text>
+      )}
+      <View style={[s.mtdScoreGrid, narrow && { flexDirection: "column" }]}>
+        <View style={s.mtdScoreBox}>
+          <Text style={s.mtdScoreLabel}>
+            {`MTD atual (${mtd.current_period_label})`}
+          </Text>
+          <SingleLineValue style={s.mtdScoreValue}>
+            {formatMoney(mtd.current_expenses)}
+          </SingleLineValue>
+          <Text style={s.mtdScoreMeta}>
+            {`Ritmo ${formatMoney(mtd.daily_burn_current)}/dia`}
+          </Text>
+        </View>
+        <View style={s.mtdScoreBox}>
+          <Text style={s.mtdScoreLabel}>
+            {`Mesmo período ant. (${mtd.previous_period_label})`}
+          </Text>
+          <SingleLineValue style={s.mtdScoreValue}>
+            {formatMoney(mtd.previous_mtd_expenses)}
+          </SingleLineValue>
+          <Text style={s.mtdScoreMeta}>
+            {`Ritmo ${formatMoney(mtd.daily_burn_previous)}/dia`}
+          </Text>
+        </View>
+        <View style={s.mtdScoreBox}>
+          <Text style={s.mtdScoreLabel}>Diferença MTD e projeção</Text>
+          <SingleLineValue
+            style={[s.mtdScoreValue, deltaIsGood ? s.good : s.bad]}
+          >
+            {`${mtd.delta_amount > 0 ? "+" : ""}${formatMoney(mtd.delta_amount)} (${formatSignedPct(mtd.delta_pct)})`}
+          </SingleLineValue>
+          <Text style={s.mtdScoreMeta}>
+            {`Projeção mês: ${formatMoney(mtd.projected_month_expenses)}`}
+          </Text>
+        </View>
+      </View>
+      <View style={s.paceGaugeBox}>
+        <View style={s.paceGaugeRow}>
+          <Text style={s.paceGaugeLabel}>Acumulado MTD atual</Text>
+          <Text style={[s.paceGaugeValue, deltaIsGood ? s.good : s.bad]}>
+            {formatMoney(mtd.current_expenses)}
+          </Text>
+        </View>
+        <View style={s.paceTrack}>
+          <View
+            style={[
+              s.paceFill,
+              {
+                width: curPaceWidth,
+                backgroundColor: deltaIsGood ? "#4FD1B5" : "#FF8C83",
+              },
+            ]}
+          />
+        </View>
+        <View style={[s.paceGaugeRow, { marginTop: 8 }]}>
+          <Text style={s.paceGaugeLabel}>Mesmo período do mês anterior</Text>
+          <Text style={s.paceGaugeValueMuted}>
+            {`${formatMoney(mtd.previous_mtd_expenses)} · mês fechado ${formatMoney(mtd.previous_full_expenses)}`}
+          </Text>
+        </View>
+        <View style={s.paceTrack}>
+          <View
+            style={[
+              s.paceFill,
+              { width: prevMtdPaceWidth, backgroundColor: "#5C7D7A" },
+            ]}
+          />
+        </View>
+      </View>
+      <View style={s.chartModeRow}>
+        {(
+          [
+            ["mtd", "MTD · Mesmo período"],
+            ["weekly", "Semanal"],
+            ["monthly", "Mensal"],
+          ] as const
+        ).map(([key, label]) => (
+          <Pressable
+            key={key}
+            accessibilityRole="button"
+            accessibilityState={{ selected: chartMode === key }}
+            onPress={() => setChartMode(key)}
+            style={[
+              s.chartModeChip,
+              chartMode === key && s.chartModeChipActive,
+            ]}
+          >
+            <Text
+              style={[
+                s.chartModeChipText,
+                chartMode === key && s.chartModeChipTextActive,
+              ]}
+            >
+              {label}
+            </Text>
+          </Pressable>
+        ))}
+      </View>
+      {chartMode === "mtd" && (
+        <View style={s.trendChartBox}>
+          <View style={s.chartLegend}>
+            <View style={[s.legendDot, { backgroundColor: "#5C7D7A" }]} />
+            <Text style={s.legendText}>Mês anterior (mesmos dias)</Text>
+            <View style={[s.legendDot, { backgroundColor: "#4FD1B5" }]} />
+            <Text style={s.legendText}>Atual ≤ anterior</Text>
+            <View style={[s.legendDot, { backgroundColor: "#FF8C83" }]} />
+            <Text style={s.legendText}>Atual &gt; anterior</Text>
+          </View>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={s.trendBarsScroll}
+          >
+            {mtd.buckets.map((bucket) => {
+              const prevH = Math.max(
+                4,
+                Math.round((bucket.previous_mtd_expenses / mtdBarMax) * 96),
+              );
+              const curH = bucket.reached
+                ? Math.max(
+                    4,
+                    Math.round((bucket.current_expenses / mtdBarMax) * 96),
+                  )
+                : 4;
+              const underOrEqual =
+                bucket.current_expenses <= bucket.previous_mtd_expenses;
+              const curColor = !bucket.reached
+                ? "#263A3D"
+                : underOrEqual
+                  ? "#4FD1B5"
+                  : "#FF8C83";
+              return (
+                <View
+                  key={bucket.key}
+                  style={[
+                    s.trendBarColumn,
+                    { minWidth: 58 * Math.max(1, fontScale || 1) },
+                  ]}
+                >
+                  <Text
+                    style={[
+                      s.trendDeltaText,
+                      !bucket.reached
+                        ? s.muted
+                        : underOrEqual
+                          ? s.good
+                          : s.bad,
+                    ]}
+                  >
+                    {bucket.reached
+                      ? formatSignedPct(bucket.delta_pct)
+                      : "futuro"}
+                  </Text>
+                  <View style={s.trendBarsPair}>
+                    <View
+                      style={[
+                        s.trendBarItem,
+                        { height: prevH, backgroundColor: "#5C7D7A" },
+                      ]}
+                    />
+                    <View
+                      style={[
+                        s.trendBarItem,
+                        { height: curH, backgroundColor: curColor },
+                      ]}
+                    />
+                  </View>
+                  <Text style={s.trendBucketTitle}>{bucket.label}</Text>
+                  <Text style={s.trendBucketRange}>{bucket.range_label}</Text>
+                </View>
+              );
+            })}
+          </ScrollView>
+          <View style={s.cumulativeBox}>
+            <Text style={s.cumulativeTitle}>
+              Curva de tendência acumulada no mês (MTD vs. mês anterior)
+            </Text>
+            {mtd.buckets
+              .filter((b) => b.reached)
+              .map((bucket) => {
+                const curCum = Number(bucket.current_cumulative || 0);
+                const prevCum = bucket.previous_mtd_cumulative;
+                const curW =
+                  `${Math.max(3, Math.min(100, (curCum / mtdCumMax) * 100))}%` as `${number}%`;
+                const prevW =
+                  `${Math.max(3, Math.min(100, (prevCum / mtdCumMax) * 100))}%` as `${number}%`;
+                const controlled = curCum <= prevCum;
+                return (
+                  <View key={`cum-${bucket.key}`} style={s.cumulativeRow}>
+                    <View style={s.cumulativeRowHeader}>
+                      <Text style={s.cumulativeLabel}>
+                        {`Até ${bucket.label} (${bucket.range_label})`}
+                      </Text>
+                      <Text
+                        style={[
+                          s.cumulativeValues,
+                          controlled ? s.good : s.bad,
+                        ]}
+                      >
+                        {`${formatMoney(curCum)} vs. ${formatMoney(prevCum)}`}
+                      </Text>
+                    </View>
+                    <View style={s.cumulativeDualTrack}>
+                      <View
+                        style={[
+                          s.cumulativeBarCurrent,
+                          {
+                            width: curW,
+                            backgroundColor: controlled ? "#4FD1B5" : "#FF8C83",
+                          },
+                        ]}
+                      />
+                      <View
+                        style={[
+                          s.cumulativeBarPrev,
+                          { width: prevW, backgroundColor: "#5C7D7A" },
+                        ]}
+                      />
+                    </View>
+                  </View>
+                );
+              })}
+          </View>
+        </View>
+      )}
+      {chartMode === "weekly" && (
+        <View style={s.trendChartBox}>
+          <View style={s.weeklySummaryBanner}>
+            <View style={{ flex: 1 }}>
+              <Text style={s.mtdScoreLabel}>Últimas 4 semanas vs. anteriores</Text>
+              <Text style={s.body}>
+                {`${formatMoney(model.weekly_summary.rolling_4w_expenses)} vs. ${formatMoney(model.weekly_summary.prior_4w_expenses)} (${formatSignedPct(model.weekly_summary.rolling_4w_change_pct)})`}
+              </Text>
+            </View>
+            <View style={{ alignItems: "flex-end" }}>
+              <Text style={s.mtdScoreLabel}>Média semanal</Text>
+              <Text style={s.body}>
+                {formatMoney(model.weekly_summary.weekly_avg_current)}
+              </Text>
+            </View>
+          </View>
+          <View style={s.chartLegend}>
+            <View style={[s.legendDot, { backgroundColor: "#5C7D7A" }]} />
+            <Text style={s.legendText}>Semana imediatamente anterior</Text>
+            <View style={[s.legendDot, { backgroundColor: "#4FD1B5" }]} />
+            <Text style={s.legendText}>Semana atual ≤ anterior</Text>
+            <View style={[s.legendDot, { backgroundColor: "#FF8C83" }]} />
+            <Text style={s.legendText}>Semana atual &gt; anterior</Text>
+          </View>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={s.trendBarsScroll}
+          >
+            {model.weekly_series.map((week) => {
+              const prevH = Math.max(
+                4,
+                Math.round((week.previous_expenses / weeklyMax) * 96),
+              );
+              const curH = Math.max(
+                4,
+                Math.round((week.current_expenses / weeklyMax) * 96),
+              );
+              const controlled = week.current_expenses <= week.previous_expenses;
+              return (
+                <View
+                  key={week.key}
+                  style={[
+                    s.trendBarColumn,
+                    { minWidth: 68 * Math.max(1, fontScale || 1) },
+                  ]}
+                >
+                  <Text
+                    style={[
+                      s.trendDeltaText,
+                      controlled ? s.good : s.bad,
+                    ]}
+                  >
+                    {formatSignedPct(week.delta_pct)}
+                  </Text>
+                  <View style={s.trendBarsPair}>
+                    <View
+                      style={[
+                        s.trendBarItem,
+                        { height: prevH, backgroundColor: "#5C7D7A" },
+                      ]}
+                    />
+                    <View
+                      style={[
+                        s.trendBarItem,
+                        {
+                          height: curH,
+                          backgroundColor: controlled ? "#4FD1B5" : "#FF8C83",
+                        },
+                      ]}
+                    />
+                  </View>
+                  <Text style={s.trendBucketTitle}>{week.label}</Text>
+                  <Text style={s.trendBucketRange}>{week.period_label}</Text>
+                </View>
+              );
+            })}
+          </ScrollView>
+        </View>
+      )}
+      {chartMode === "monthly" && (
+        <View style={s.trendChartBox}>
+          <View style={s.chartLegend}>
+            <View style={[s.legendDot, { backgroundColor: "#5C7D7A" }]} />
+            <Text style={s.legendText}>Saídas do mês anterior</Text>
+            <View style={[s.legendDot, { backgroundColor: "#4FD1B5" }]} />
+            <Text style={s.legendText}>Mês ≤ anterior</Text>
+            <View style={[s.legendDot, { backgroundColor: "#FF8C83" }]} />
+            <Text style={s.legendText}>Mês &gt; anterior</Text>
+          </View>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={s.trendBarsScroll}
+          >
+            {model.monthly_comparison_series.map((mItem) => {
+              const prevH = Math.max(
+                4,
+                Math.round((mItem.previous_expenses / monthlyMax) * 96),
+              );
+              const curH = Math.max(
+                4,
+                Math.round((mItem.current_expenses / monthlyMax) * 96),
+              );
+              const controlled =
+                mItem.current_expenses <= mItem.previous_expenses;
+              return (
+                <View
+                  key={mItem.month}
+                  style={[
+                    s.trendBarColumn,
+                    { minWidth: 58 * Math.max(1, fontScale || 1) },
+                  ]}
+                >
+                  <Text
+                    style={[
+                      s.trendDeltaText,
+                      controlled ? s.good : s.bad,
+                    ]}
+                  >
+                    {formatSignedPct(mItem.delta_pct)}
+                  </Text>
+                  <View style={s.trendBarsPair}>
+                    <View
+                      style={[
+                        s.trendBarItem,
+                        { height: prevH, backgroundColor: "#5C7D7A" },
+                      ]}
+                    />
+                    <View
+                      style={[
+                        s.trendBarItem,
+                        {
+                          height: curH,
+                          backgroundColor: controlled ? "#4FD1B5" : "#FF8C83",
+                        },
+                      ]}
+                    />
+                  </View>
+                  <Text style={s.trendBucketTitle}>{mItem.label}</Text>
+                  <Text style={s.trendBucketRange}>
+                    {formatMoney(mItem.current_expenses)}
+                  </Text>
+                </View>
+              );
+            })}
+          </ScrollView>
+        </View>
+      )}
+      {model.insights.length > 0 && (
+        <View style={s.insightsContainer}>
+          <Text style={s.insightsHeaderTitle}>
+            INSIGHTS DE CONTROLE DE CUSTOS
+          </Text>
+          {model.insights.map((ins) => {
+            const dotColor =
+              ins.tone === "good"
+                ? "#4FD1B5"
+                : ins.tone === "bad"
+                  ? "#FF8C83"
+                  : ins.tone === "warning"
+                    ? "#F4B942"
+                    : "#92A4A2";
+            return (
+              <View key={ins.id} style={s.insightItemCard}>
+                <View style={s.insightItemTop}>
+                  <View
+                    style={[s.insightToneDot, { backgroundColor: dotColor }]}
+                  />
+                  <Text style={s.insightItemTitle}>{ins.title}</Text>
+                  <Text style={[s.insightMetricBadge, { color: dotColor }]}>
+                    {ins.metric}
+                  </Text>
+                </View>
+                <Text style={s.insightItemDetail}>{ins.detail}</Text>
+                {Boolean(ins.category) && (
+                  <Pressable
+                    accessibilityRole="button"
+                    onPress={() => onOpenCategory(ins.category!)}
+                    style={s.insightCategoryAction}
+                  >
+                    <Text style={s.syncButtonText}>
+                      {`Ver ${ins.category} no Extrato ›`}
+                    </Text>
+                  </Pressable>
+                )}
+              </View>
+            );
+          })}
+        </View>
+      )}
     </View>
   );
 }
@@ -2510,6 +3049,225 @@ const s = StyleSheet.create({
   comparisonRow: { flexDirection: "row", gap: 8, marginTop: 11 },
   comparisonMetric: { flex: 1 },
   comparisonValue: { fontSize: 14, fontWeight: "800", marginTop: 4 },
+  comparisonSubvalue: { color: "#8DA3A0", fontSize: 10, marginTop: 2 },
+  costControlCard: {
+    backgroundColor: "#112326",
+    borderWidth: 1,
+    borderColor: "#28534D",
+    borderRadius: 16,
+    padding: 15,
+    marginBottom: 14,
+  },
+  costControlHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    flexWrap: "wrap",
+    gap: 10,
+  },
+  costControlEyebrow: {
+    color: "#4FD1B5",
+    fontSize: 9,
+    fontWeight: "800",
+    letterSpacing: 1.4,
+  },
+  costControlTitle: {
+    color: "#F4F7F5",
+    fontSize: 16,
+    fontWeight: "800",
+    marginTop: 3,
+  },
+  costStatusBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    borderWidth: 1,
+    borderRadius: 20,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+  },
+  costStatusDot: { width: 7, height: 7, borderRadius: 4 },
+  costStatusText: { fontSize: 11, fontWeight: "800" },
+  costHeadline: {
+    color: "#DCE8E5",
+    fontSize: 12,
+    lineHeight: 18,
+    marginTop: 9,
+    marginBottom: 4,
+  },
+  mtdScoreGrid: {
+    flexDirection: "row",
+    gap: 8,
+    marginTop: 10,
+  },
+  mtdScoreBox: {
+    flex: 1,
+    backgroundColor: "#162C30",
+    borderRadius: 12,
+    padding: 11,
+    borderWidth: 1,
+    borderColor: "#234246",
+  },
+  mtdScoreLabel: { color: "#92A4A2", fontSize: 10, fontWeight: "700" },
+  mtdScoreValue: {
+    color: "#F4F7F5",
+    fontSize: 15,
+    fontWeight: "800",
+    marginTop: 4,
+  },
+  mtdScoreMeta: { color: "#8DA3A0", fontSize: 10, marginTop: 3 },
+  paceGaugeBox: {
+    backgroundColor: "#15282B",
+    borderRadius: 12,
+    padding: 11,
+    marginTop: 10,
+  },
+  paceGaugeRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 8,
+  },
+  paceGaugeLabel: { color: "#AFC1BF", fontSize: 11, fontWeight: "600" },
+  paceGaugeValue: { fontSize: 11, fontWeight: "800" },
+  paceGaugeValueMuted: { color: "#92A4A2", fontSize: 10 },
+  paceTrack: {
+    height: 6,
+    backgroundColor: "#0D1A1C",
+    borderRadius: 4,
+    overflow: "hidden",
+    marginTop: 5,
+  },
+  paceFill: { height: 6, borderRadius: 4 },
+  chartModeRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 7,
+    marginTop: 12,
+    marginBottom: 8,
+  },
+  chartModeChip: {
+    borderWidth: 1,
+    borderColor: "#2D4B4E",
+    backgroundColor: "#15282B",
+    borderRadius: 16,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    minHeight: 34,
+    justifyContent: "center",
+  },
+  chartModeChipActive: {
+    backgroundColor: "#49C5AA",
+    borderColor: "#49C5AA",
+  },
+  chartModeChipText: { color: "#AFC1BF", fontSize: 11, fontWeight: "700" },
+  chartModeChipTextActive: { color: "#061412" },
+  trendChartBox: {
+    backgroundColor: "#15282B",
+    borderRadius: 12,
+    padding: 12,
+    marginTop: 4,
+  },
+  trendBarsScroll: {
+    alignItems: "flex-end",
+    gap: 10,
+    minHeight: 148,
+    paddingHorizontal: 4,
+    paddingTop: 6,
+  },
+  trendBarColumn: { alignItems: "center" },
+  trendDeltaText: { fontSize: 9, fontWeight: "800", marginBottom: 4 },
+  trendBarsPair: {
+    height: 100,
+    flexDirection: "row",
+    alignItems: "flex-end",
+    gap: 5,
+  },
+  trendBarItem: { width: 13, borderRadius: 4 },
+  trendBucketTitle: {
+    color: "#DCE8E5",
+    fontSize: 10,
+    fontWeight: "700",
+    marginTop: 6,
+  },
+  trendBucketRange: { color: "#8DA3A0", fontSize: 9, marginTop: 1 },
+  cumulativeBox: {
+    marginTop: 12,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderColor: "#233B3E",
+    gap: 7,
+  },
+  cumulativeTitle: {
+    color: "#AFC1BF",
+    fontSize: 11,
+    fontWeight: "700",
+    marginBottom: 2,
+  },
+  cumulativeRow: { gap: 4 },
+  cumulativeRowHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  cumulativeLabel: { color: "#92A4A2", fontSize: 10 },
+  cumulativeValues: { fontSize: 10, fontWeight: "700" },
+  cumulativeDualTrack: {
+    backgroundColor: "#0D1A1C",
+    borderRadius: 4,
+    padding: 2,
+    gap: 2,
+  },
+  cumulativeBarCurrent: { height: 4, borderRadius: 2 },
+  cumulativeBarPrev: { height: 3, borderRadius: 2, opacity: 0.85 },
+  weeklySummaryBanner: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    backgroundColor: "#102023",
+    borderRadius: 10,
+    padding: 10,
+    marginBottom: 10,
+    gap: 10,
+  },
+  insightsContainer: {
+    marginTop: 12,
+    gap: 8,
+  },
+  insightsHeaderTitle: {
+    color: "#92A4A2",
+    fontSize: 10,
+    fontWeight: "800",
+    letterSpacing: 1.2,
+    marginBottom: 2,
+  },
+  insightItemCard: {
+    backgroundColor: "#15282B",
+    borderRadius: 12,
+    padding: 11,
+    borderWidth: 1,
+    borderColor: "#223D40",
+    gap: 5,
+  },
+  insightItemTop: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+  },
+  insightToneDot: { width: 8, height: 8, borderRadius: 4 },
+  insightItemTitle: {
+    color: "#F4F7F5",
+    fontSize: 12,
+    fontWeight: "800",
+    flex: 1,
+  },
+  insightMetricBadge: { fontSize: 11, fontWeight: "800" },
+  insightItemDetail: { color: "#B5C5C4", fontSize: 11, lineHeight: 16 },
+  insightCategoryAction: {
+    alignSelf: "flex-start",
+    marginTop: 3,
+    paddingVertical: 2,
+  },
   activeFilter: {
     backgroundColor: "#183034",
     borderWidth: 1,

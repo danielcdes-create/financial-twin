@@ -1,0 +1,2030 @@
+diff --git a/backend/app/analytics.py b/backend/app/analytics.py
+index 28f666f..295a382 100644
+--- a/backend/app/analytics.py
++++ b/backend/app/analytics.py
+@@ -1,16 +1,471 @@
++import calendar
++from datetime import date, datetime, timedelta
+ from decimal import Decimal
+ from app.economic_policy import EXPENSE_REASONS, amount as decimal_amount, effects, duplicate_of_ledger
+ from app.category_filter import display_category
++from app.economic_period import economic_month
++from app.financial_time import local_date
+ 
+-def calculate_financial_totals(transactions,confirmed_provisionals=()):
+-    income=Decimal('0');expenses=Decimal('0');categories={}
+-    identities={str(item['_id']) for item in transactions if item.get('_id') is not None}
+-    for captured, records in ((False,transactions),(True,confirmed_provisionals)):
++
++def calculate_financial_totals(transactions, confirmed_provisionals=()):
++    income = Decimal('0')
++    expenses = Decimal('0')
++    categories = {}
++    identities = {str(item['_id']) for item in transactions if item.get('_id') is not None}
++    for captured, records in ((False, transactions), (True, confirmed_provisionals)):
++        for item in records:
++            if captured and duplicate_of_ledger(item, identities):
++                continue
++            result = effects(item, captured)
++            income += result['income']
++            expenses += result['expenses']
++            if result['role'] in {'expense', 'refund'}:
++                category = display_category(item.get('categoria_sugerida' if captured else 'categoria'))
++                categories[category] = categories.get(category, Decimal('0')) + result['expenses']
++    return {'income': income, 'expenses': expenses, 'net_flow': income - expenses, 'categories': categories}
++
++
++def _pct_change(current: Decimal, previous: Decimal) -> float | None:
++    if previous == 0:
++        return None
++    return round(float((current - previous) / abs(previous) * Decimal('100')), 1)
++
++
++def _shift_ym(year: int, month: int, delta_months: int) -> tuple[int, int, str]:
++    idx = year * 12 + (month - 1) + delta_months
++    y, m = idx // 12, (idx % 12) + 1
++    return y, m, f'{y:04d}-{m:02d}'
++
++
++def _short_date_br(d: date) -> str:
++    return f'{d.day:02d}/{d.month:02d}'
++
++
++def build_cost_control_summary(
++    transactions,
++    confirmed_provisionals=(),
++    *,
++    anchor_date: date | None = None,
++    period: str = 'month',
++    period_income: Decimal = Decimal('0'),
++    period_expenses: Decimal = Decimal('0'),
++    previous_period_expenses: Decimal | None = None,
++    recurring_total: Decimal = Decimal('0'),
++    tax_total: Decimal = Decimal('0'),
++    financial_cost_total: Decimal = Decimal('0'),
++) -> dict:
++    """Build MTD vs. prior-month same-period pacing, weekly/monthly series, and cost control insights."""
++    ref_date = anchor_date or date.today()
++    cur_year, cur_month = ref_date.year, ref_date.month
++    cur_ym = f'{cur_year:04d}-{cur_month:02d}'
++    cur_days_in_month = calendar.monthrange(cur_year, cur_month)[1]
++    mtd_day = min(max(1, ref_date.day), cur_days_in_month)
++
++    prev_year, prev_month, prev_ym = _shift_ym(cur_year, cur_month, -1)
++    prev_days_in_month = calendar.monthrange(prev_year, prev_month)[1]
++    prev_mtd_day = min(mtd_day, prev_days_in_month)
++
++    # 7-month window for monthly comparison series (M-6..M0)
++    _, _, oldest_ym = _shift_ym(cur_year, cur_month, -6)
++    month_keys_window = [_shift_ym(cur_year, cur_month, offset)[2] for offset in range(-6, 1)]
++    month_totals_map = {
++        ym: {'income': Decimal('0'), 'expenses': Decimal('0')}
++        for ym in month_keys_window
++    }
++
++    # 8-week window (56 days ending on ref_date) for rolling weekly comparison
++    week_ranges = []
++    for w_idx in range(8):
++        # w_idx 0 = oldest (W-7), w_idx 7 = current week (W0)
++        offset_from_current = 7 - w_idx
++        w_end = ref_date - timedelta(days=offset_from_current * 7)
++        w_start = w_end - timedelta(days=6)
++        week_ranges.append((w_start, w_end))
++    oldest_week_start = week_ranges[0][0]
++    week_expenses = [Decimal('0') for _ in range(8)]
++    week_incomes = [Decimal('0') for _ in range(8)]
++
++    # Intra-month buckets for cur_ym and prev_ym: S1(1-7), S2(8-14), S3(15-21), S4(22-28), S5(29+)
++    bucket_bounds = [
++        ('S1', 'Sem 1', '01–07', 1, 7),
++        ('S2', 'Sem 2', '08–14', 8, 14),
++        ('S3', 'Sem 3', '15–21', 15, 21),
++        ('S4', 'Sem 4', '22–28', 22, 28),
++        ('S5', 'Sem 5', '29+', 29, 31),
++    ]
++    cur_bucket_mtd = [Decimal('0') for _ in range(5)]
++    prev_bucket_mtd = [Decimal('0') for _ in range(5)]
++    prev_bucket_full = [Decimal('0') for _ in range(5)]
++
++    cur_mtd_expenses = Decimal('0')
++    cur_full_expenses = Decimal('0')
++    cur_mtd_income = Decimal('0')
++    prev_mtd_expenses = Decimal('0')
++    prev_full_expenses = Decimal('0')
++    prev_mtd_income = Decimal('0')
++
++    cur_mtd_categories: dict[str, Decimal] = {}
++    prev_mtd_categories: dict[str, Decimal] = {}
++
++    identities = {str(item['_id']) for item in transactions if item.get('_id') is not None}
++
++    def _bucket_index(day_num: int) -> int:
++        if day_num <= 7:
++            return 0
++        if day_num <= 14:
++            return 1
++        if day_num <= 21:
++            return 2
++        if day_num <= 28:
++            return 3
++        return 4
++
++    for captured, records in ((False, transactions), (True, confirmed_provisionals)):
+         for item in records:
+-            if captured and duplicate_of_ledger(item, identities): continue
+-            result=effects(item,captured)
+-            income+=result['income'];expenses+=result['expenses']
+-            if result['role'] in {'expense','refund'}:
+-                category=display_category(item.get('categoria_sugerida' if captured else 'categoria'))
+-                categories[category]=categories.get(category,Decimal('0'))+result['expenses']
+-    return {'income':income,'expenses':expenses,'net_flow':income-expenses,'categories':categories}
++            if captured and duplicate_of_ledger(item, identities):
++                continue
++            ev_raw = item.get('data_evento')
++            ev_date = local_date(ev_raw) if isinstance(ev_raw, datetime) else None
++            m_key = economic_month(item)
++            if not m_key and ev_date is not None:
++                m_key = ev_date.strftime('%Y-%m')
++
++            in_month_window = bool(m_key and oldest_ym <= m_key <= cur_ym)
++            in_week_window = bool(ev_date is not None and oldest_week_start <= ev_date <= ref_date)
++            if not in_month_window and not in_week_window:
++                continue
++
++            eff = effects(item, captured)
++            inc = eff['income']
++            exp = eff['expenses']
++            is_exp_role = eff['role'] in {'expense', 'refund'}
++            if inc == 0 and exp == 0:
++                continue
++
++            if in_month_window and m_key in month_totals_map:
++                month_totals_map[m_key]['income'] += inc
++                month_totals_map[m_key]['expenses'] += exp
++
++            if in_week_window and ev_date is not None:
++                days_ago = (ref_date - ev_date).days
++                w_slot = 7 - (days_ago // 7)
++                if 0 <= w_slot < 8:
++                    week_expenses[w_slot] += exp
++                    week_incomes[w_slot] += inc
++
++            if m_key == cur_ym:
++                eff_day = (
++                    ev_date.day
++                    if (ev_date is not None and ev_date.strftime('%Y-%m') == cur_ym)
++                    else min(ev_date.day, cur_days_in_month) if ev_date is not None else 1
++                )
++                cur_full_expenses += exp
++                if eff_day <= mtd_day:
++                    cur_mtd_expenses += exp
++                    cur_mtd_income += inc
++                    b_idx = _bucket_index(eff_day)
++                    cur_bucket_mtd[b_idx] += exp
++                    if is_exp_role and exp != 0:
++                        cat = display_category(item.get('categoria_sugerida' if captured else 'categoria'))
++                        cur_mtd_categories[cat] = cur_mtd_categories.get(cat, Decimal('0')) + exp
++
++            elif m_key == prev_ym:
++                eff_day = (
++                    ev_date.day
++                    if (ev_date is not None and ev_date.strftime('%Y-%m') == prev_ym)
++                    else min(ev_date.day, prev_days_in_month) if ev_date is not None else 1
++                )
++                prev_full_expenses += exp
++                b_idx = _bucket_index(eff_day)
++                prev_bucket_full[b_idx] += exp
++                if eff_day <= prev_mtd_day:
++                    prev_mtd_expenses += exp
++                    prev_mtd_income += inc
++                    prev_bucket_mtd[b_idx] += exp
++                    if is_exp_role and exp != 0:
++                        cat = display_category(item.get('categoria_sugerida' if captured else 'categoria'))
++                        prev_mtd_categories[cat] = prev_mtd_categories.get(cat, Decimal('0')) + exp
++
++    # Build cumulative intra-month buckets
++    mtd_buckets = []
++    cur_cum = Decimal('0')
++    prev_mtd_cum = Decimal('0')
++    prev_full_cum = Decimal('0')
++    for idx, (b_key, b_label, b_range, b_start, _b_end) in enumerate(bucket_bounds):
++        reached = b_start <= mtd_day
++        c_val = cur_bucket_mtd[idx]
++        pm_val = prev_bucket_mtd[idx]
++        pf_val = prev_bucket_full[idx]
++        if reached:
++            cur_cum += c_val
++        prev_mtd_cum += pm_val
++        prev_full_cum += pf_val
++        mtd_buckets.append({
++            'key': b_key,
++            'label': b_label,
++            'range_label': b_range,
++            'current_expenses': round(float(c_val), 2),
++            'previous_mtd_expenses': round(float(pm_val), 2),
++            'previous_full_expenses': round(float(pf_val), 2),
++            'current_cumulative': round(float(cur_cum), 2) if reached else None,
++            'previous_mtd_cumulative': round(float(prev_mtd_cum), 2),
++            'previous_full_cumulative': round(float(prev_full_cum), 2),
++            'delta_pct': _pct_change(c_val, pm_val) if reached else None,
++            'reached': reached,
++        })
++
++    mtd_delta_amount = cur_mtd_expenses - prev_mtd_expenses
++    mtd_delta_pct = _pct_change(cur_mtd_expenses, prev_mtd_expenses)
++    daily_burn_cur = cur_mtd_expenses / Decimal(str(max(1, mtd_day)))
++    daily_burn_prev = prev_mtd_expenses / Decimal(str(max(1, prev_mtd_day)))
++    projected_month_exp = max(cur_full_expenses, daily_burn_cur * Decimal(str(cur_days_in_month)))
++    projected_vs_prev_full_pct = _pct_change(projected_month_exp, prev_full_expenses)
++
++    mtd_summary = {
++        'reference_date': ref_date.isoformat(),
++        'current_month': cur_ym,
++        'previous_month': prev_ym,
++        'day_of_month': mtd_day,
++        'days_in_month': cur_days_in_month,
++        'previous_days_compared': prev_mtd_day,
++        'current_period_label': f'01/{cur_month:02d} a {mtd_day:02d}/{cur_month:02d}',
++        'previous_period_label': f'01/{prev_month:02d} a {prev_mtd_day:02d}/{prev_month:02d}',
++        'current_expenses': round(float(cur_mtd_expenses), 2),
++        'previous_mtd_expenses': round(float(prev_mtd_expenses), 2),
++        'previous_full_expenses': round(float(prev_full_expenses), 2),
++        'current_income': round(float(cur_mtd_income), 2),
++        'previous_mtd_income': round(float(prev_mtd_income), 2),
++        'delta_amount': round(float(mtd_delta_amount), 2),
++        'delta_pct': mtd_delta_pct,
++        'daily_burn_current': round(float(daily_burn_cur), 2),
++        'daily_burn_previous': round(float(daily_burn_prev), 2),
++        'projected_month_expenses': round(float(projected_month_exp), 2),
++        'projected_vs_previous_full_pct': projected_vs_prev_full_pct,
++        'buckets': mtd_buckets,
++    }
++
++    # Build rolling 4-week comparison series (W-3, W-2, W-1, W0 compared against preceding week)
++    weekly_series = []
++    week_labels = ['Sem -3', 'Sem -2', 'Sem -1', 'Atual']
++    for idx in range(4):
++        slot = 4 + idx  # slots 4, 5, 6, 7
++        prev_slot = slot - 1  # immediate prior week
++        w_start, w_end = week_ranges[slot]
++        c_exp = week_expenses[slot]
++        p_exp = week_expenses[prev_slot]
++        c_inc = week_incomes[slot]
++        weekly_series.append({
++            'key': f'W-{3 - idx}' if idx < 3 else 'W0',
++            'label': week_labels[idx],
++            'period_label': f'{_short_date_br(w_start)}–{_short_date_br(w_end)}',
++            'current_expenses': round(float(c_exp), 2),
++            'previous_expenses': round(float(p_exp), 2),
++            'current_income': round(float(c_inc), 2),
++            'delta_amount': round(float(c_exp - p_exp), 2),
++            'delta_pct': _pct_change(c_exp, p_exp),
++        })
++
++    rolling_4w_exp = sum(week_expenses[4:8], Decimal('0'))
++    prior_4w_exp = sum(week_expenses[0:4], Decimal('0'))
++    weekly_summary = {
++        'current_week_expenses': round(float(week_expenses[7]), 2),
++        'previous_week_expenses': round(float(week_expenses[6]), 2),
++        'week_over_week_pct': _pct_change(week_expenses[7], week_expenses[6]),
++        'rolling_4w_expenses': round(float(rolling_4w_exp), 2),
++        'prior_4w_expenses': round(float(prior_4w_exp), 2),
++        'rolling_4w_change_pct': _pct_change(rolling_4w_exp, prior_4w_exp),
++        'weekly_avg_current': round(float(rolling_4w_exp / Decimal('4')), 2),
++        'weekly_avg_previous': round(float(prior_4w_exp / Decimal('4')), 2),
++    }
++
++    # Build 6-month comparison series (each month paired with M-1)
++    monthly_comparison_series = []
++    for idx in range(1, len(month_keys_window)):
++        ym = month_keys_window[idx]
++        prev_m = month_keys_window[idx - 1]
++        c_tot = month_totals_map[ym]
++        p_tot = month_totals_map[prev_m]
++        c_exp = c_tot['expenses']
++        p_exp = p_tot['expenses']
++        c_inc = c_tot['income']
++        monthly_comparison_series.append({
++            'month': ym,
++            'label': f'{ym[5:7]}/{ym[2:4]}',
++            'current_expenses': round(float(c_exp), 2),
++            'previous_expenses': round(float(p_exp), 2),
++            'income': round(float(c_inc), 2),
++            'net': round(float(c_inc - c_exp), 2),
++            'delta_amount': round(float(c_exp - p_exp), 2),
++            'delta_pct': _pct_change(c_exp, p_exp),
++        })
++
++    # Category drivers (MTD current vs MTD previous month)
++    all_cats = set(cur_mtd_categories) | set(prev_mtd_categories)
++    category_drivers = []
++    for cat in all_cats:
++        c_val = cur_mtd_categories.get(cat, Decimal('0'))
++        p_val = prev_mtd_categories.get(cat, Decimal('0'))
++        if c_val <= 0 and p_val <= 0:
++            continue
++        diff = c_val - p_val
++        category_drivers.append({
++            'category': cat,
++            'current_amount': round(float(c_val), 2),
++            'previous_amount': round(float(p_val), 2),
++            'delta_amount': round(float(diff), 2),
++            'delta_pct': _pct_change(c_val, p_val),
++        })
++    category_drivers.sort(key=lambda x: (abs(x['delta_amount']), x['current_amount']), reverse=True)
++
++    biggest_increase = next(
++        (d for d in sorted(category_drivers, key=lambda x: x['delta_amount'], reverse=True) if d['delta_amount'] > 0),
++        None,
++    )
++    biggest_saving = next(
++        (d for d in sorted(category_drivers, key=lambda x: x['delta_amount']) if d['delta_amount'] < 0),
++        None,
++    )
++
++    # Determine overall cost control status and actionable insights
++    active_cur_exp = cur_mtd_expenses if period == 'month' else period_expenses
++    active_prev_exp = prev_mtd_expenses if period == 'month' else (previous_period_expenses or Decimal('0'))
++    active_delta = active_cur_exp - active_prev_exp
++    active_pct = _pct_change(active_cur_exp, active_prev_exp)
++
++    if active_prev_exp <= 0 and active_cur_exp <= 0:
++        status = 'no_baseline'
++        status_label = 'Sem gastos no período'
++        headline = 'Ainda não há saídas registradas para comparar o ritmo de custos.'
++    elif active_prev_exp <= 0:
++        status = 'no_baseline'
++        status_label = 'Base anterior em formação'
++        headline = (
++            f'Acumulado de R$ {cur_mtd_expenses:.2f} até {mtd_summary["current_period_label"]} '
++            f'(ritmo de R$ {daily_burn_cur:.2f}/dia). Sem base no período anterior para comparação direta.'
++        )
++    elif active_pct is not None and active_pct <= -3.0:
++        status = 'controlling'
++        status_label = 'Custos sob controle'
++        headline = (
++            f'Você reduziu os gastos em {abs(active_pct):.1f}% (-R$ {abs(active_delta):.2f}) '
++            f'em relação ao mesmo período anterior ({mtd_summary["previous_period_label"]}).'
++        )
++    elif active_pct is not None and active_pct <= 5.0:
++        status = 'attention' if (biggest_increase and biggest_increase['delta_amount'] > 50) else 'stable'
++        status_label = 'Ritmo estável · atenção' if status == 'attention' else 'Ritmo estável'
++        sign_str = '+' if active_delta >= 0 else '-'
++        headline = (
++            f'Gastos próximos ao período anterior ({sign_str}{abs(active_pct):.1f}% · '
++            f'{sign_str}R$ {abs(active_delta):.2f} vs. {mtd_summary["previous_period_label"]}).'
++        )
++    else:
++        status = 'over_pace'
++        status_label = 'Acima do ritmo anterior'
++        headline = (
++            f'Atenção: os gastos acumulados estão +{active_pct:.1f}% (+R$ {active_delta:.2f}) '
++            f'acima do mesmo período do mês anterior ({mtd_summary["previous_period_label"]}).'
++        )
++
++    insights = []
++    # Insight 1: Daily burn rate & End-of-month projection vs full previous month
++    if cur_mtd_expenses > 0 or prev_full_expenses > 0:
++        proj_diff = projected_month_exp - prev_full_expenses
++        if prev_full_expenses > 0:
++            proj_tone = 'good' if proj_diff <= 0 else ('warning' if projected_vs_prev_full_pct and projected_vs_prev_full_pct <= 8 else 'bad')
++            proj_dir = 'abaixo' if proj_diff <= 0 else 'acima'
++            insights.append({
++                'id': 'burn_projection',
++                'tone': proj_tone,
++                'title': 'Ritmo diário e projeção do mês',
++                'detail': (
++                    f'Velocidade atual de R$ {daily_burn_cur:.2f}/dia (vs. R$ {daily_burn_prev:.2f}/dia no mês passado). '
++                    f'Mantendo esse ritmo, o mês projeta fechar R$ {abs(proj_diff):.2f} {proj_dir} do fechamento anterior.'
++                ),
++                'metric': f'R$ {daily_burn_cur:.2f}/dia',
++            })
++        else:
++            insights.append({
++                'id': 'burn_projection',
++                'tone': 'neutral',
++                'title': 'Velocidade diária de gastos (MTD)',
++                'detail': f'Ritmo médio de R$ {daily_burn_cur:.2f}/dia nos primeiros {mtd_day} dias do mês.',
++                'metric': f'R$ {daily_burn_cur:.2f}/dia',
++            })
++
++    # Insight 2: Top category savings (Positive reinforcement)
++    if biggest_saving is not None and biggest_saving['delta_amount'] < 0:
++        sav_abs = abs(biggest_saving['delta_amount'])
++        sav_pct = biggest_saving['delta_pct']
++        pct_piece = f' ({sav_pct:.1f}%)' if sav_pct is not None else ''
++        insights.append({
++            'id': 'top_saving_category',
++            'tone': 'good',
++            'title': f'Economia em {biggest_saving["category"]}',
++            'detail': (
++                f'Caiu de R$ {biggest_saving["previous_amount"]:.2f} para R$ {biggest_saving["current_amount"]:.2f} '
++                f'no comparativo MTD, poupando R$ {sav_abs:.2f}{pct_piece}.'
++            ),
++            'metric': f'-R$ {sav_abs:.2f}',
++            'category': biggest_saving['category'],
++        })
++
++    # Insight 3: Top category pressure (Actionable target)
++    if biggest_increase is not None and biggest_increase['delta_amount'] > 0:
++        inc_abs = biggest_increase['delta_amount']
++        inc_pct = biggest_increase['delta_pct']
++        pct_piece = f' (+{inc_pct:.1f}%)' if inc_pct is not None else ' (sem gasto na base anterior)'
++        insights.append({
++            'id': 'top_pressure_category',
++            'tone': 'bad' if inc_abs >= 100 or (inc_pct is not None and inc_pct >= 20) else 'warning',
++            'title': f'Maior pressão: {biggest_increase["category"]}',
++            'detail': (
++                f'Subiu de R$ {biggest_increase["previous_amount"]:.2f} para R$ {biggest_increase["current_amount"]:.2f} '
++                f'até o dia {mtd_day}, adicionando +R$ {inc_abs:.2f}{pct_piece} aos custos.'
++            ),
++            'metric': f'+R$ {inc_abs:.2f}',
++            'category': biggest_increase['category'],
++        })
++
++    # Insight 4: Budget rigidity / Fixed & financial charges vs variable margin
++    base_exp = period_expenses if period_expenses > 0 else cur_mtd_expenses
++    structural = recurring_total + tax_total + financial_cost_total
++    if base_exp > 0 and structural > 0:
++        rigidity_pct = min(Decimal('100'), (structural / base_exp) * Decimal('100'))
++        variable_amount = max(Decimal('0'), base_exp - structural)
++        insights.append({
++            'id': 'cost_rigidity',
++            'tone': 'warning' if rigidity_pct >= 65 else 'neutral',
++            'title': 'Margem de controle imediato (fixos vs. variáveis)',
++            'detail': (
++                f'Recorrentes, impostos e encargos somam R$ {structural:.2f} ({rigidity_pct:.0f}% das saídas). '
++                f'Restam R$ {variable_amount:.2f} em gastos variáveis onde cortes têm efeito imediato.'
++            ),
++            'metric': f'{rigidity_pct:.0f}% fixo/encargos',
++        })
++    elif period_income > 0 and base_exp > 0:
++        commitment_pct = (base_exp / period_income) * Decimal('100')
++        savings_pct = Decimal('100') - commitment_pct
++        insights.append({
++            'id': 'income_commitment',
++            'tone': 'good' if commitment_pct <= 80 else ('warning' if commitment_pct <= 100 else 'bad'),
++            'title': 'Comprometimento das entradas no período',
++            'detail': (
++                f'As saídas consumiram {commitment_pct:.1f}% das entradas registradas no período '
++                f'({("margem líquida de +" + f"{savings_pct:.1f}%") if savings_pct >= 0 else ("déficit de " + f"{abs(savings_pct):.1f}%")}).'
++            ),
++            'metric': f'{commitment_pct:.1f}% da renda',
++        })
++
++    return {
++        'status': status,
++        'status_label': status_label,
++        'headline': headline,
++        'mtd': mtd_summary,
++        'weekly_series': weekly_series,
++        'weekly_summary': weekly_summary,
++        'monthly_comparison_series': monthly_comparison_series,
++        'category_drivers': category_drivers[:6],
++        'biggest_increase': biggest_increase,
++        'biggest_saving': biggest_saving,
++        'insights': insights,
++    }
+diff --git a/backend/app/main.py b/backend/app/main.py
+index 678d6f6..198680a 100644
+--- a/backend/app/main.py
++++ b/backend/app/main.py
+@@ -30,7 +30,7 @@ from app.auth import require_session
+ from app.economic_policy import eligible_payment, effects, captures_not_in_ledger
+ from app.economic_period import economic_month, economic_instant, economic_in_period
+ from app.financial_time import LOCAL_ZONE, day_start, local_date, today as local_today, utc_instant
+-from app.analytics import EXPENSE_REASONS, calculate_financial_totals, decimal_amount
++from app.analytics import EXPENSE_REASONS, build_cost_control_summary, calculate_financial_totals, decimal_amount
+ from app.category_filter import ACTIVE_CAPTURES, catalog_category_names, category_query
+ from app.movement_filters import period_query, intersect, search_query, filter_key as movement_filter_key
+ from app.document_validation import validate_document_extraction
+@@ -825,7 +825,23 @@ def _dashboard_impl(period, date_from, date_to, db, snapshot=None, forecast=None
+     if latest_dt and latest_dt.tzinfo is None: latest_dt=latest_dt.replace(tzinfo=timezone.utc)
+     latest_any_dt=data_anchor
+     comparison=None if previous_totals is None else {"period_start":local_date(previous_start).isoformat(),"period_end":local_date(previous_end).isoformat(),"income":float(previous_totals["income"]),"expenses":float(previous_totals["expenses"]),"net_flow":float(previous_totals["net_flow"]),"income_change_pct":percentage_change(income,previous_totals["income"]),"expenses_change_pct":percentage_change(expenses,previous_totals["expenses"]),"net_change":float((income-expenses)-previous_totals["net_flow"])}
+-    return {"currency":"BRL","economic_period_basis":"competencia_declarada; sem competencia: data_evento_brasilia","cash_period_basis":"data_evento_brasilia","period":period,"period_start":local_date(range_start).isoformat() if range_start.year>1 else None,"period_end":local_date(range_end).isoformat(),"comparison":comparison,"monthly_series":monthly_series,"income":float(income),"expenses":float(expenses),"net_flow":float(income-expenses),"category_spending":[{"category":k,"amount":float(v)} for k,v in sorted(categories.items(),key=lambda x:x[1],reverse=True)],"nature_spending":[{"nature":nature,"label":NATURE_LABELS[nature],"amount":float(amount)} for nature,amount in nature_totals.items() if amount],"tax_total":float(nature_totals["IMPOSTO_TRIBUTO"]),"financial_cost_total":float(nature_totals["TARIFA_ENCARGO"]),"pending_reviews":pending,"provisional_count":provisional,"transaction_count":len(filtered_txs)+len(confirmed),"legacy_transaction_count":len(filtered_txs),"confirmed_capture_count":len(confirmed),"monthly_recurring_total":float(recurring_total),"monthly_recurring_count":recurring_count,"recurring_reference_month":latest_month,"monthly_recurring_by_category":[{"category":k,"amount":float(v)} for k,v in sorted(recurring_categories.items(),key=lambda x:x[1],reverse=True)],"overdue_or_partial_obligations":float(open_debt),"future_financing_principal":float(future_financing),"projected_installment_total":float(projected_installments),"projected_installment_count":projected_count,"commitment_due_count":commitment_due_count,"commitment_due_total":float(commitment_due_total),"investment_positions_available":investment_count>0,"investment_position_count":investment_count,"data_updated_until":latest_any,"legacy_data_updated_until":latest,"confirmed_capture_updated_until":latest_confirmed,"data_is_stale":bool(latest_any_dt and datetime.now(timezone.utc)-latest_any_dt>timedelta(days=7)),"legacy_data_is_stale":bool(latest_dt and datetime.now(timezone.utc)-latest_dt>timedelta(days=7)),"source_data_loaded_at":ingested.get("ingested_at").isoformat() if ingested and ingested.get("ingested_at") else None}
++    all_source_txs=snapshot[2].get("all_txs",txs) if (snapshot is not None and len(snapshot)>2 and isinstance(snapshot[2],dict)) else txs
++    all_source_captures=snapshot[2].get("all_captures",confirmed_all) if (snapshot is not None and len(snapshot)>2 and isinstance(snapshot[2],dict)) else confirmed_all
++    anchor_civil=local_date(anchor)
++    ref_civil=date_to if (date_to and anchor_civil>date_to) else anchor_civil
++    cost_control=build_cost_control_summary(
++        all_source_txs,
++        all_source_captures,
++        anchor_date=ref_civil,
++        period=period,
++        period_income=income,
++        period_expenses=expenses,
++        previous_period_expenses=previous_totals["expenses"] if previous_totals is not None else None,
++        recurring_total=recurring_total,
++        tax_total=nature_totals["IMPOSTO_TRIBUTO"],
++        financial_cost_total=nature_totals["TARIFA_ENCARGO"],
++    )
++    return {"currency":"BRL","economic_period_basis":"competencia_declarada; sem competencia: data_evento_brasilia","cash_period_basis":"data_evento_brasilia","period":period,"period_start":local_date(range_start).isoformat() if range_start.year>1 else None,"period_end":local_date(range_end).isoformat(),"comparison":comparison,"cost_control":cost_control,"monthly_series":monthly_series,"income":float(income),"expenses":float(expenses),"net_flow":float(income-expenses),"category_spending":[{"category":k,"amount":float(v)} for k,v in sorted(categories.items(),key=lambda x:x[1],reverse=True)],"nature_spending":[{"nature":nature,"label":NATURE_LABELS[nature],"amount":float(amount)} for nature,amount in nature_totals.items() if amount],"tax_total":float(nature_totals["IMPOSTO_TRIBUTO"]),"financial_cost_total":float(nature_totals["TARIFA_ENCARGO"]),"pending_reviews":pending,"provisional_count":provisional,"transaction_count":len(filtered_txs)+len(confirmed),"legacy_transaction_count":len(filtered_txs),"confirmed_capture_count":len(confirmed),"monthly_recurring_total":float(recurring_total),"monthly_recurring_count":recurring_count,"recurring_reference_month":latest_month,"monthly_recurring_by_category":[{"category":k,"amount":float(v)} for k,v in sorted(recurring_categories.items(),key=lambda x:x[1],reverse=True)],"overdue_or_partial_obligations":float(open_debt),"future_financing_principal":float(future_financing),"projected_installment_total":float(projected_installments),"projected_installment_count":projected_count,"commitment_due_count":commitment_due_count,"commitment_due_total":float(commitment_due_total),"investment_positions_available":investment_count>0,"investment_position_count":investment_count,"data_updated_until":latest_any,"legacy_data_updated_until":latest,"confirmed_capture_updated_until":latest_confirmed,"data_is_stale":bool(latest_any_dt and datetime.now(timezone.utc)-latest_any_dt>timedelta(days=7)),"legacy_data_is_stale":bool(latest_dt and datetime.now(timezone.utc)-latest_dt>timedelta(days=7)),"source_data_loaded_at":ingested.get("ingested_at").isoformat() if ingested and ingested.get("ingested_at") else None}
+ 
+ @app.get("/v1/dashboard", dependencies=[Depends(require_session)])
+ def dashboard(period:Literal["month","3m","6m","12m","year","all"]="month",date_from:date|None=None,date_to:date|None=None,db=Depends(database)):
+diff --git a/backend/tests/test_analytics.py b/backend/tests/test_analytics.py
+index b994957..bfbd207 100644
+--- a/backend/tests/test_analytics.py
++++ b/backend/tests/test_analytics.py
+@@ -1,42 +1,81 @@
+-import sys
+-import unittest
+-from pathlib import Path
+-sys.path.insert(0,str(Path(__file__).parents[1]))
+-from bson.decimal128 import Decimal128
+-from app.analytics import calculate_financial_totals
+-
+-class FinancialTotalsTests(unittest.TestCase):
+-    def test_excludes_card_invoice_payment_and_own_transfer(self):
+-        txs=[
+-            {"valor":Decimal128("-100"),"fluxo":"saida","categoria":"Mercado","classification":{"migration_reason":"despesa_real"}},
+-            {"valor":Decimal128("10"),"fluxo":"entrada","categoria":"Mercado","classification":{"migration_reason":"estorno_abate_gasto"}},
+-            {"valor":Decimal128("-100"),"fluxo":"saida","classification":{"migration_reason":"pagamento_fatura"}},
+-            {"valor":Decimal128("-500"),"fluxo":"saida","classification":{"migration_reason":"transferencia_propria"}},
+-            {"valor":Decimal128("500"),"fluxo":"entrada","classification":{"migration_reason":"receita_ou_movimentacao"}},
+-        ]
+-        result=calculate_financial_totals(txs)
+-        self.assertEqual(result['expenses'],90)
+-        self.assertEqual(result['income'],500)
+-        self.assertEqual(result['net_flow'],410)
+-        self.assertEqual(result['categories']['Mercado'],90)
+-
+-    def test_confirmed_mobile_transaction_enters_totals_once(self):
+-        result=calculate_financial_totals([], [{"valor":Decimal128("-27.50"),"categoria_sugerida":"Alimentação"}])
+-        self.assertEqual(result['expenses'],27.50)
+-        self.assertEqual(result['categories']['Alimentação'],27.50)
+-
+-    def test_confirmed_own_transfer_is_neutral_in_both_directions(self):
+-        captures=[
+-            {"valor":Decimal128("-200.00"),"natureza":"TRANSFERENCIA","categoria_sugerida":"Outros"},
+-            {"valor":Decimal128("200.00"),"natureza":"TRANSFERENCIA","categoria_sugerida":"Outros"},
+-        ]
+-        result=calculate_financial_totals([],captures)
+-        self.assertEqual(result['expenses'],0)
+-        self.assertEqual(result['income'],0)
+-        self.assertEqual(result['categories'],{})
+-
+-    def test_legacy_transfer_classification_overrides_old_spending_flag(self):
+-        result=calculate_financial_totals([{"valor":Decimal128("-200.00"),"natureza":"TRANSFERENCIA","classification":{"migration_reason":"despesa_real"}}])
+-        self.assertEqual(result['expenses'],0)
+-
++import sys
++import unittest
++from datetime import date, datetime, timezone
++from decimal import Decimal
++from pathlib import Path
++sys.path.insert(0,str(Path(__file__).parents[1]))
++from bson.decimal128 import Decimal128
++from app.analytics import build_cost_control_summary, calculate_financial_totals
++
++class FinancialTotalsTests(unittest.TestCase):
++    def test_excludes_card_invoice_payment_and_own_transfer(self):
++        txs=[
++            {"valor":Decimal128("-100"),"fluxo":"saida","categoria":"Mercado","classification":{"migration_reason":"despesa_real"}},
++            {"valor":Decimal128("10"),"fluxo":"entrada","categoria":"Mercado","classification":{"migration_reason":"estorno_abate_gasto"}},
++            {"valor":Decimal128("-100"),"fluxo":"saida","classification":{"migration_reason":"pagamento_fatura"}},
++            {"valor":Decimal128("-500"),"fluxo":"saida","classification":{"migration_reason":"transferencia_propria"}},
++            {"valor":Decimal128("500"),"fluxo":"entrada","classification":{"migration_reason":"receita_ou_movimentacao"}},
++        ]
++        result=calculate_financial_totals(txs)
++        self.assertEqual(result['expenses'],90)
++        self.assertEqual(result['income'],500)
++        self.assertEqual(result['net_flow'],410)
++        self.assertEqual(result['categories']['Mercado'],90)
++
++    def test_confirmed_mobile_transaction_enters_totals_once(self):
++        result=calculate_financial_totals([], [{"valor":Decimal128("-27.50"),"categoria_sugerida":"Alimentação"}])
++        self.assertEqual(result['expenses'],27.50)
++        self.assertEqual(result['categories']['Alimentação'],27.50)
++
++    def test_confirmed_own_transfer_is_neutral_in_both_directions(self):
++        captures=[
++            {"valor":Decimal128("-200.00"),"natureza":"TRANSFERENCIA","categoria_sugerida":"Outros"},
++            {"valor":Decimal128("200.00"),"natureza":"TRANSFERENCIA","categoria_sugerida":"Outros"},
++        ]
++        result=calculate_financial_totals([],captures)
++        self.assertEqual(result['expenses'],0)
++        self.assertEqual(result['income'],0)
++        self.assertEqual(result['categories'],{})
++
++    def test_legacy_transfer_classification_overrides_old_spending_flag(self):
++        result=calculate_financial_totals([{"valor":Decimal128("-200.00"),"natureza":"TRANSFERENCIA","classification":{"migration_reason":"despesa_real"}}])
++        self.assertEqual(result['expenses'],0)
++
++    def test_cost_control_summary_mtd_vs_same_period_previous_month_and_insights(self):
++        txs=[
++            # September 2026: 400 in first 20 days + 200 on day 28 = 600 full month
++            {"_id":"s1","data_evento":datetime(2026,9,5,15,tzinfo=timezone.utc),"valor":Decimal128("-250.00"),"fluxo":"saida","categoria":"Mercado","classification":{"migration_reason":"despesa_real"}},
++            {"_id":"s2","data_evento":datetime(2026,9,14,15,tzinfo=timezone.utc),"valor":Decimal128("-150.00"),"fluxo":"saida","categoria":"Restaurantes","classification":{"migration_reason":"despesa_real"}},
++            {"_id":"s3","data_evento":datetime(2026,9,28,15,tzinfo=timezone.utc),"valor":Decimal128("-200.00"),"fluxo":"saida","categoria":"Mercado","classification":{"migration_reason":"despesa_real"}},
++            # October 2026 up to day 20: 180 Mercado + 140 Restaurantes = 320 (-20% vs Sept MTD 400)
++            {"_id":"o1","data_evento":datetime(2026,10,4,15,tzinfo=timezone.utc),"valor":Decimal128("-180.00"),"fluxo":"saida","categoria":"Mercado","classification":{"migration_reason":"despesa_real"}},
++            {"_id":"o2","data_evento":datetime(2026,10,12,15,tzinfo=timezone.utc),"valor":Decimal128("-140.00"),"fluxo":"saida","categoria":"Restaurantes","classification":{"migration_reason":"despesa_real"}},
++            {"_id":"o3","data_evento":datetime(2026,10,5,15,tzinfo=timezone.utc),"valor":Decimal128("3000.00"),"fluxo":"entrada","classification":{"migration_reason":"receita_ou_movimentacao"}},
++        ]
++        summary=build_cost_control_summary(
++            txs,
++            anchor_date=date(2026,10,20),
++            period="month",
++            period_income=Decimal("3000.00"),
++            period_expenses=Decimal("320.00"),
++            previous_period_expenses=Decimal("600.00"),
++            recurring_total=Decimal("100.00"),
++        )
++        self.assertEqual(summary["status"],"controlling")
++        self.assertEqual(summary["mtd"]["current_expenses"],320.0)
++        self.assertEqual(summary["mtd"]["previous_mtd_expenses"],400.0)
++        self.assertEqual(summary["mtd"]["previous_full_expenses"],600.0)
++        self.assertEqual(summary["mtd"]["delta_amount"],-80.0)
++        self.assertEqual(summary["mtd"]["delta_pct"],-20.0)
++        self.assertEqual(len(summary["mtd"]["buckets"]),5)
++        self.assertEqual(summary["mtd"]["buckets"][0]["current_expenses"],180.0)
++        self.assertEqual(summary["mtd"]["buckets"][0]["previous_mtd_expenses"],250.0)
++        self.assertEqual(summary["mtd"]["buckets"][1]["current_cumulative"],320.0)
++        self.assertEqual(summary["mtd"]["buckets"][1]["previous_mtd_cumulative"],400.0)
++        self.assertIsNone(summary["mtd"]["buckets"][3]["current_cumulative"])
++        self.assertEqual(summary["biggest_saving"]["category"],"Mercado")
++        self.assertEqual(summary["biggest_saving"]["delta_amount"],-70.0)
++        self.assertTrue(any(item["id"]=="burn_projection" for item in summary["insights"]))
++        self.assertTrue(any(item["id"]=="top_saving_category" for item in summary["insights"]))
++
+ if __name__=='__main__':unittest.main()
+diff --git a/mobile/App.tsx b/mobile/App.tsx
+index e199c7d..90817be 100644
+--- a/mobile/App.tsx
++++ b/mobile/App.tsx
+@@ -68,6 +68,11 @@ import {canReviewAsStatement, queueFailureLabel, reconcileImportedFiles, requeue
+ import { useForeground } from "./utils/useForeground";
+ import { withDevicePrompt } from "./utils/devicePrompt";
+ import { telemetry } from "./utils/telemetry";
++import {
++  formatSignedPct,
++  resolveCostControlView,
++  statusPalette,
++} from "./utils/costControlInsights";
+ 
+ type Tab =
+   | "Início"
+@@ -1541,6 +1546,13 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
+                 </View>
+               </View>
+               <ComparisonCard data={dashboard?.comparison} money={dashboardMoney} />
++              <CostControlCard
++                dashboard={dashboard}
++                monthDashboard={monthDashboard}
++                yearDashboard={yearDashboard}
++                money={dashboardMoney}
++                onOpenCategory={openCategory}
++              />
+               <View style={s.metricGrid}>
+                 <Metric
+                   label="Revisões"
+@@ -2209,12 +2221,22 @@ function ComparisonCard({ data, money: formatMoney }: { data: any; money: (value
+           <Text style={[s.comparisonValue, income >= 0 ? s.good : s.bad]}>
+             {pct(income)}
+           </Text>
++          {data.income != null && (
++            <Text style={s.comparisonSubvalue}>
++              {`Ant. ${formatMoney(Number(data.income || 0))}`}
++            </Text>
++          )}
+         </View>
+         <View style={s.comparisonMetric}>
+           <Text style={s.muted}>Despesas</Text>
+           <Text style={[s.comparisonValue, expenses <= 0 ? s.good : s.bad]}>
+             {pct(expenses)}
+           </Text>
++          {data.expenses != null && (
++            <Text style={s.comparisonSubvalue}>
++              {`Ant. ${formatMoney(Number(data.expenses || 0))}`}
++            </Text>
++          )}
+         </View>
+         <View style={s.comparisonMetric}>
+           <Text style={s.muted}>Saldo</Text>
+@@ -2226,11 +2248,528 @@ function ComparisonCard({ data, money: formatMoney }: { data: any; money: (value
+           >
+             {formatMoney(Number(data.net_change || 0))}
+           </SingleLineValue>
++          {data.net_flow != null && (
++            <Text style={s.comparisonSubvalue}>
++              {`Ant. ${formatMoney(Number(data.net_flow || 0))}`}
++            </Text>
++          )}
+         </View>
+       </View>
+     </View>
+   );
+ }
++function CostControlCard({
++  dashboard,
++  monthDashboard,
++  yearDashboard,
++  money: formatMoney,
++  onOpenCategory,
++}: {
++  dashboard: any;
++  monthDashboard: any;
++  yearDashboard: any;
++  money: (value: number) => string;
++  onOpenCategory: (category: string) => void;
++}) {
++  const { width, fontScale } = useWindowDimensions();
++  const narrow = compactLayout(width, fontScale);
++  const [chartMode, setChartMode] = useState<"mtd" | "weekly" | "monthly">("mtd");
++  const model = useMemo(
++    () =>
++      resolveCostControlView(
++        dashboard,
++        monthDashboard,
++        yearDashboard,
++        formatMoney,
++      ),
++    [dashboard, monthDashboard, yearDashboard, formatMoney],
++  );
++  const palette = statusPalette(model.status);
++  const mtd = model.mtd;
++  const paceMax = Math.max(
++    1,
++    mtd.current_expenses,
++    mtd.previous_mtd_expenses,
++    mtd.previous_full_expenses,
++    mtd.projected_month_expenses,
++  );
++  const curPaceWidth =
++    `${Math.max(3, Math.min(100, (mtd.current_expenses / paceMax) * 100))}%` as `${number}%`;
++  const prevMtdPaceWidth =
++    `${Math.max(3, Math.min(100, (mtd.previous_mtd_expenses / paceMax) * 100))}%` as `${number}%`;
++  const mtdBarMax = Math.max(
++    1,
++    ...mtd.buckets.flatMap((b) => [
++      b.current_expenses,
++      b.previous_mtd_expenses,
++    ]),
++  );
++  const mtdCumMax = Math.max(
++    1,
++    ...mtd.buckets.flatMap((b) => [
++      Number(b.current_cumulative || 0),
++      b.previous_mtd_cumulative,
++    ]),
++  );
++  const weeklyMax = Math.max(
++    1,
++    ...model.weekly_series.flatMap((w) => [
++      w.current_expenses,
++      w.previous_expenses,
++    ]),
++  );
++  const monthlyMax = Math.max(
++    1,
++    ...model.monthly_comparison_series.flatMap((m) => [
++      m.current_expenses,
++      m.previous_expenses,
++    ]),
++  );
++  const deltaIsGood = mtd.delta_amount <= 0;
++  return (
++    <View style={s.costControlCard} accessibilityRole="summary">
++      <View style={s.costControlHeader}>
++        <View style={{ flex: 1, minWidth: 160 }}>
++          <Text style={s.costControlEyebrow}>
++            TENDÊNCIA E CONTROLE DE CUSTOS
++          </Text>
++          <Text style={s.costControlTitle}>
++            Ritmo atual vs. período anterior
++          </Text>
++        </View>
++        <View
++          style={[
++            s.costStatusBadge,
++            { backgroundColor: palette.bg, borderColor: palette.border },
++          ]}
++        >
++          <View style={[s.costStatusDot, { backgroundColor: palette.dot }]} />
++          <Text style={[s.costStatusText, { color: palette.text }]}>
++            {model.status_label}
++          </Text>
++        </View>
++      </View>
++      {Boolean(model.headline) && (
++        <Text style={s.costHeadline}>{model.headline}</Text>
++      )}
++      <View style={[s.mtdScoreGrid, narrow && { flexDirection: "column" }]}>
++        <View style={s.mtdScoreBox}>
++          <Text style={s.mtdScoreLabel}>
++            {`MTD atual (${mtd.current_period_label})`}
++          </Text>
++          <SingleLineValue style={s.mtdScoreValue}>
++            {formatMoney(mtd.current_expenses)}
++          </SingleLineValue>
++          <Text style={s.mtdScoreMeta}>
++            {`Ritmo ${formatMoney(mtd.daily_burn_current)}/dia`}
++          </Text>
++        </View>
++        <View style={s.mtdScoreBox}>
++          <Text style={s.mtdScoreLabel}>
++            {`Mesmo período ant. (${mtd.previous_period_label})`}
++          </Text>
++          <SingleLineValue style={s.mtdScoreValue}>
++            {formatMoney(mtd.previous_mtd_expenses)}
++          </SingleLineValue>
++          <Text style={s.mtdScoreMeta}>
++            {`Ritmo ${formatMoney(mtd.daily_burn_previous)}/dia`}
++          </Text>
++        </View>
++        <View style={s.mtdScoreBox}>
++          <Text style={s.mtdScoreLabel}>Diferença MTD e projeção</Text>
++          <SingleLineValue
++            style={[s.mtdScoreValue, deltaIsGood ? s.good : s.bad]}
++          >
++            {`${mtd.delta_amount > 0 ? "+" : ""}${formatMoney(mtd.delta_amount)} (${formatSignedPct(mtd.delta_pct)})`}
++          </SingleLineValue>
++          <Text style={s.mtdScoreMeta}>
++            {`Projeção mês: ${formatMoney(mtd.projected_month_expenses)}`}
++          </Text>
++        </View>
++      </View>
++      <View style={s.paceGaugeBox}>
++        <View style={s.paceGaugeRow}>
++          <Text style={s.paceGaugeLabel}>Acumulado MTD atual</Text>
++          <Text style={[s.paceGaugeValue, deltaIsGood ? s.good : s.bad]}>
++            {formatMoney(mtd.current_expenses)}
++          </Text>
++        </View>
++        <View style={s.paceTrack}>
++          <View
++            style={[
++              s.paceFill,
++              {
++                width: curPaceWidth,
++                backgroundColor: deltaIsGood ? "#4FD1B5" : "#FF8C83",
++              },
++            ]}
++          />
++        </View>
++        <View style={[s.paceGaugeRow, { marginTop: 8 }]}>
++          <Text style={s.paceGaugeLabel}>Mesmo período do mês anterior</Text>
++          <Text style={s.paceGaugeValueMuted}>
++            {`${formatMoney(mtd.previous_mtd_expenses)} · mês fechado ${formatMoney(mtd.previous_full_expenses)}`}
++          </Text>
++        </View>
++        <View style={s.paceTrack}>
++          <View
++            style={[
++              s.paceFill,
++              { width: prevMtdPaceWidth, backgroundColor: "#5C7D7A" },
++            ]}
++          />
++        </View>
++      </View>
++      <View style={s.chartModeRow}>
++        {(
++          [
++            ["mtd", "MTD · Mesmo período"],
++            ["weekly", "Semanal"],
++            ["monthly", "Mensal"],
++          ] as const
++        ).map(([key, label]) => (
++          <Pressable
++            key={key}
++            accessibilityRole="button"
++            accessibilityState={{ selected: chartMode === key }}
++            onPress={() => setChartMode(key)}
++            style={[
++              s.chartModeChip,
++              chartMode === key && s.chartModeChipActive,
++            ]}
++          >
++            <Text
++              style={[
++                s.chartModeChipText,
++                chartMode === key && s.chartModeChipTextActive,
++              ]}
++            >
++              {label}
++            </Text>
++          </Pressable>
++        ))}
++      </View>
++      {chartMode === "mtd" && (
++        <View style={s.trendChartBox}>
++          <View style={s.chartLegend}>
++            <View style={[s.legendDot, { backgroundColor: "#5C7D7A" }]} />
++            <Text style={s.legendText}>Mês anterior (mesmos dias)</Text>
++            <View style={[s.legendDot, { backgroundColor: "#4FD1B5" }]} />
++            <Text style={s.legendText}>Atual ≤ anterior</Text>
++            <View style={[s.legendDot, { backgroundColor: "#FF8C83" }]} />
++            <Text style={s.legendText}>Atual &gt; anterior</Text>
++          </View>
++          <ScrollView
++            horizontal
++            showsHorizontalScrollIndicator={false}
++            contentContainerStyle={s.trendBarsScroll}
++          >
++            {mtd.buckets.map((bucket) => {
++              const prevH = Math.max(
++                4,
++                Math.round((bucket.previous_mtd_expenses / mtdBarMax) * 96),
++              );
++              const curH = bucket.reached
++                ? Math.max(
++                    4,
++                    Math.round((bucket.current_expenses / mtdBarMax) * 96),
++                  )
++                : 4;
++              const underOrEqual =
++                bucket.current_expenses <= bucket.previous_mtd_expenses;
++              const curColor = !bucket.reached
++                ? "#263A3D"
++                : underOrEqual
++                  ? "#4FD1B5"
++                  : "#FF8C83";
++              return (
++                <View
++                  key={bucket.key}
++                  style={[
++                    s.trendBarColumn,
++                    { minWidth: 58 * Math.max(1, fontScale || 1) },
++                  ]}
++                >
++                  <Text
++                    style={[
++                      s.trendDeltaText,
++                      !bucket.reached
++                        ? s.muted
++                        : underOrEqual
++                          ? s.good
++                          : s.bad,
++                    ]}
++                  >
++                    {bucket.reached
++                      ? formatSignedPct(bucket.delta_pct)
++                      : "futuro"}
++                  </Text>
++                  <View style={s.trendBarsPair}>
++                    <View
++                      style={[
++                        s.trendBarItem,
++                        { height: prevH, backgroundColor: "#5C7D7A" },
++                      ]}
++                    />
++                    <View
++                      style={[
++                        s.trendBarItem,
++                        { height: curH, backgroundColor: curColor },
++                      ]}
++                    />
++                  </View>
++                  <Text style={s.trendBucketTitle}>{bucket.label}</Text>
++                  <Text style={s.trendBucketRange}>{bucket.range_label}</Text>
++                </View>
++              );
++            })}
++          </ScrollView>
++          <View style={s.cumulativeBox}>
++            <Text style={s.cumulativeTitle}>
++              Curva de tendência acumulada no mês (MTD vs. mês anterior)
++            </Text>
++            {mtd.buckets
++              .filter((b) => b.reached)
++              .map((bucket) => {
++                const curCum = Number(bucket.current_cumulative || 0);
++                const prevCum = bucket.previous_mtd_cumulative;
++                const curW =
++                  `${Math.max(3, Math.min(100, (curCum / mtdCumMax) * 100))}%` as `${number}%`;
++                const prevW =
++                  `${Math.max(3, Math.min(100, (prevCum / mtdCumMax) * 100))}%` as `${number}%`;
++                const controlled = curCum <= prevCum;
++                return (
++                  <View key={`cum-${bucket.key}`} style={s.cumulativeRow}>
++                    <View style={s.cumulativeRowHeader}>
++                      <Text style={s.cumulativeLabel}>
++                        {`Até ${bucket.label} (${bucket.range_label})`}
++                      </Text>
++                      <Text
++                        style={[
++                          s.cumulativeValues,
++                          controlled ? s.good : s.bad,
++                        ]}
++                      >
++                        {`${formatMoney(curCum)} vs. ${formatMoney(prevCum)}`}
++                      </Text>
++                    </View>
++                    <View style={s.cumulativeDualTrack}>
++                      <View
++                        style={[
++                          s.cumulativeBarCurrent,
++                          {
++                            width: curW,
++                            backgroundColor: controlled ? "#4FD1B5" : "#FF8C83",
++                          },
++                        ]}
++                      />
++                      <View
++                        style={[
++                          s.cumulativeBarPrev,
++                          { width: prevW, backgroundColor: "#5C7D7A" },
++                        ]}
++                      />
++                    </View>
++                  </View>
++                );
++              })}
++          </View>
++        </View>
++      )}
++      {chartMode === "weekly" && (
++        <View style={s.trendChartBox}>
++          <View style={s.weeklySummaryBanner}>
++            <View style={{ flex: 1 }}>
++              <Text style={s.mtdScoreLabel}>Últimas 4 semanas vs. anteriores</Text>
++              <Text style={s.body}>
++                {`${formatMoney(model.weekly_summary.rolling_4w_expenses)} vs. ${formatMoney(model.weekly_summary.prior_4w_expenses)} (${formatSignedPct(model.weekly_summary.rolling_4w_change_pct)})`}
++              </Text>
++            </View>
++            <View style={{ alignItems: "flex-end" }}>
++              <Text style={s.mtdScoreLabel}>Média semanal</Text>
++              <Text style={s.body}>
++                {formatMoney(model.weekly_summary.weekly_avg_current)}
++              </Text>
++            </View>
++          </View>
++          <View style={s.chartLegend}>
++            <View style={[s.legendDot, { backgroundColor: "#5C7D7A" }]} />
++            <Text style={s.legendText}>Semana imediatamente anterior</Text>
++            <View style={[s.legendDot, { backgroundColor: "#4FD1B5" }]} />
++            <Text style={s.legendText}>Semana atual ≤ anterior</Text>
++            <View style={[s.legendDot, { backgroundColor: "#FF8C83" }]} />
++            <Text style={s.legendText}>Semana atual &gt; anterior</Text>
++          </View>
++          <ScrollView
++            horizontal
++            showsHorizontalScrollIndicator={false}
++            contentContainerStyle={s.trendBarsScroll}
++          >
++            {model.weekly_series.map((week) => {
++              const prevH = Math.max(
++                4,
++                Math.round((week.previous_expenses / weeklyMax) * 96),
++              );
++              const curH = Math.max(
++                4,
++                Math.round((week.current_expenses / weeklyMax) * 96),
++              );
++              const controlled = week.current_expenses <= week.previous_expenses;
++              return (
++                <View
++                  key={week.key}
++                  style={[
++                    s.trendBarColumn,
++                    { minWidth: 68 * Math.max(1, fontScale || 1) },
++                  ]}
++                >
++                  <Text
++                    style={[
++                      s.trendDeltaText,
++                      controlled ? s.good : s.bad,
++                    ]}
++                  >
++                    {formatSignedPct(week.delta_pct)}
++                  </Text>
++                  <View style={s.trendBarsPair}>
++                    <View
++                      style={[
++                        s.trendBarItem,
++                        { height: prevH, backgroundColor: "#5C7D7A" },
++                      ]}
++                    />
++                    <View
++                      style={[
++                        s.trendBarItem,
++                        {
++                          height: curH,
++                          backgroundColor: controlled ? "#4FD1B5" : "#FF8C83",
++                        },
++                      ]}
++                    />
++                  </View>
++                  <Text style={s.trendBucketTitle}>{week.label}</Text>
++                  <Text style={s.trendBucketRange}>{week.period_label}</Text>
++                </View>
++              );
++            })}
++          </ScrollView>
++        </View>
++      )}
++      {chartMode === "monthly" && (
++        <View style={s.trendChartBox}>
++          <View style={s.chartLegend}>
++            <View style={[s.legendDot, { backgroundColor: "#5C7D7A" }]} />
++            <Text style={s.legendText}>Saídas do mês anterior</Text>
++            <View style={[s.legendDot, { backgroundColor: "#4FD1B5" }]} />
++            <Text style={s.legendText}>Mês ≤ anterior</Text>
++            <View style={[s.legendDot, { backgroundColor: "#FF8C83" }]} />
++            <Text style={s.legendText}>Mês &gt; anterior</Text>
++          </View>
++          <ScrollView
++            horizontal
++            showsHorizontalScrollIndicator={false}
++            contentContainerStyle={s.trendBarsScroll}
++          >
++            {model.monthly_comparison_series.map((mItem) => {
++              const prevH = Math.max(
++                4,
++                Math.round((mItem.previous_expenses / monthlyMax) * 96),
++              );
++              const curH = Math.max(
++                4,
++                Math.round((mItem.current_expenses / monthlyMax) * 96),
++              );
++              const controlled =
++                mItem.current_expenses <= mItem.previous_expenses;
++              return (
++                <View
++                  key={mItem.month}
++                  style={[
++                    s.trendBarColumn,
++                    { minWidth: 58 * Math.max(1, fontScale || 1) },
++                  ]}
++                >
++                  <Text
++                    style={[
++                      s.trendDeltaText,
++                      controlled ? s.good : s.bad,
++                    ]}
++                  >
++                    {formatSignedPct(mItem.delta_pct)}
++                  </Text>
++                  <View style={s.trendBarsPair}>
++                    <View
++                      style={[
++                        s.trendBarItem,
++                        { height: prevH, backgroundColor: "#5C7D7A" },
++                      ]}
++                    />
++                    <View
++                      style={[
++                        s.trendBarItem,
++                        {
++                          height: curH,
++                          backgroundColor: controlled ? "#4FD1B5" : "#FF8C83",
++                        },
++                      ]}
++                    />
++                  </View>
++                  <Text style={s.trendBucketTitle}>{mItem.label}</Text>
++                  <Text style={s.trendBucketRange}>
++                    {formatMoney(mItem.current_expenses)}
++                  </Text>
++                </View>
++              );
++            })}
++          </ScrollView>
++        </View>
++      )}
++      {model.insights.length > 0 && (
++        <View style={s.insightsContainer}>
++          <Text style={s.insightsHeaderTitle}>
++            INSIGHTS DE CONTROLE DE CUSTOS
++          </Text>
++          {model.insights.map((ins) => {
++            const dotColor =
++              ins.tone === "good"
++                ? "#4FD1B5"
++                : ins.tone === "bad"
++                  ? "#FF8C83"
++                  : ins.tone === "warning"
++                    ? "#F4B942"
++                    : "#92A4A2";
++            return (
++              <View key={ins.id} style={s.insightItemCard}>
++                <View style={s.insightItemTop}>
++                  <View
++                    style={[s.insightToneDot, { backgroundColor: dotColor }]}
++                  />
++                  <Text style={s.insightItemTitle}>{ins.title}</Text>
++                  <Text style={[s.insightMetricBadge, { color: dotColor }]}>
++                    {ins.metric}
++                  </Text>
++                </View>
++                <Text style={s.insightItemDetail}>{ins.detail}</Text>
++                {Boolean(ins.category) && (
++                  <Pressable
++                    accessibilityRole="button"
++                    onPress={() => onOpenCategory(ins.category!)}
++                    style={s.insightCategoryAction}
++                  >
++                    <Text style={s.syncButtonText}>
++                      {`Ver ${ins.category} no Extrato ›`}
++                    </Text>
++                  </Pressable>
++                )}
++              </View>
++            );
++          })}
++        </View>
++      )}
++    </View>
++  );
++}
+ function CategoryBar({
+   item,
+   max,
+@@ -2510,6 +3049,225 @@ const s = StyleSheet.create({
+   comparisonRow: { flexDirection: "row", gap: 8, marginTop: 11 },
+   comparisonMetric: { flex: 1 },
+   comparisonValue: { fontSize: 14, fontWeight: "800", marginTop: 4 },
++  comparisonSubvalue: { color: "#8DA3A0", fontSize: 10, marginTop: 2 },
++  costControlCard: {
++    backgroundColor: "#112326",
++    borderWidth: 1,
++    borderColor: "#28534D",
++    borderRadius: 16,
++    padding: 15,
++    marginBottom: 14,
++  },
++  costControlHeader: {
++    flexDirection: "row",
++    justifyContent: "space-between",
++    alignItems: "flex-start",
++    flexWrap: "wrap",
++    gap: 10,
++  },
++  costControlEyebrow: {
++    color: "#4FD1B5",
++    fontSize: 9,
++    fontWeight: "800",
++    letterSpacing: 1.4,
++  },
++  costControlTitle: {
++    color: "#F4F7F5",
++    fontSize: 16,
++    fontWeight: "800",
++    marginTop: 3,
++  },
++  costStatusBadge: {
++    flexDirection: "row",
++    alignItems: "center",
++    gap: 6,
++    borderWidth: 1,
++    borderRadius: 20,
++    paddingHorizontal: 10,
++    paddingVertical: 5,
++  },
++  costStatusDot: { width: 7, height: 7, borderRadius: 4 },
++  costStatusText: { fontSize: 11, fontWeight: "800" },
++  costHeadline: {
++    color: "#DCE8E5",
++    fontSize: 12,
++    lineHeight: 18,
++    marginTop: 9,
++    marginBottom: 4,
++  },
++  mtdScoreGrid: {
++    flexDirection: "row",
++    gap: 8,
++    marginTop: 10,
++  },
++  mtdScoreBox: {
++    flex: 1,
++    backgroundColor: "#162C30",
++    borderRadius: 12,
++    padding: 11,
++    borderWidth: 1,
++    borderColor: "#234246",
++  },
++  mtdScoreLabel: { color: "#92A4A2", fontSize: 10, fontWeight: "700" },
++  mtdScoreValue: {
++    color: "#F4F7F5",
++    fontSize: 15,
++    fontWeight: "800",
++    marginTop: 4,
++  },
++  mtdScoreMeta: { color: "#8DA3A0", fontSize: 10, marginTop: 3 },
++  paceGaugeBox: {
++    backgroundColor: "#15282B",
++    borderRadius: 12,
++    padding: 11,
++    marginTop: 10,
++  },
++  paceGaugeRow: {
++    flexDirection: "row",
++    justifyContent: "space-between",
++    alignItems: "center",
++    gap: 8,
++  },
++  paceGaugeLabel: { color: "#AFC1BF", fontSize: 11, fontWeight: "600" },
++  paceGaugeValue: { fontSize: 11, fontWeight: "800" },
++  paceGaugeValueMuted: { color: "#92A4A2", fontSize: 10 },
++  paceTrack: {
++    height: 6,
++    backgroundColor: "#0D1A1C",
++    borderRadius: 4,
++    overflow: "hidden",
++    marginTop: 5,
++  },
++  paceFill: { height: 6, borderRadius: 4 },
++  chartModeRow: {
++    flexDirection: "row",
++    flexWrap: "wrap",
++    gap: 7,
++    marginTop: 12,
++    marginBottom: 8,
++  },
++  chartModeChip: {
++    borderWidth: 1,
++    borderColor: "#2D4B4E",
++    backgroundColor: "#15282B",
++    borderRadius: 16,
++    paddingHorizontal: 12,
++    paddingVertical: 7,
++    minHeight: 34,
++    justifyContent: "center",
++  },
++  chartModeChipActive: {
++    backgroundColor: "#49C5AA",
++    borderColor: "#49C5AA",
++  },
++  chartModeChipText: { color: "#AFC1BF", fontSize: 11, fontWeight: "700" },
++  chartModeChipTextActive: { color: "#061412" },
++  trendChartBox: {
++    backgroundColor: "#15282B",
++    borderRadius: 12,
++    padding: 12,
++    marginTop: 4,
++  },
++  trendBarsScroll: {
++    alignItems: "flex-end",
++    gap: 10,
++    minHeight: 148,
++    paddingHorizontal: 4,
++    paddingTop: 6,
++  },
++  trendBarColumn: { alignItems: "center" },
++  trendDeltaText: { fontSize: 9, fontWeight: "800", marginBottom: 4 },
++  trendBarsPair: {
++    height: 100,
++    flexDirection: "row",
++    alignItems: "flex-end",
++    gap: 5,
++  },
++  trendBarItem: { width: 13, borderRadius: 4 },
++  trendBucketTitle: {
++    color: "#DCE8E5",
++    fontSize: 10,
++    fontWeight: "700",
++    marginTop: 6,
++  },
++  trendBucketRange: { color: "#8DA3A0", fontSize: 9, marginTop: 1 },
++  cumulativeBox: {
++    marginTop: 12,
++    paddingTop: 10,
++    borderTopWidth: 1,
++    borderColor: "#233B3E",
++    gap: 7,
++  },
++  cumulativeTitle: {
++    color: "#AFC1BF",
++    fontSize: 11,
++    fontWeight: "700",
++    marginBottom: 2,
++  },
++  cumulativeRow: { gap: 4 },
++  cumulativeRowHeader: {
++    flexDirection: "row",
++    justifyContent: "space-between",
++    alignItems: "center",
++  },
++  cumulativeLabel: { color: "#92A4A2", fontSize: 10 },
++  cumulativeValues: { fontSize: 10, fontWeight: "700" },
++  cumulativeDualTrack: {
++    backgroundColor: "#0D1A1C",
++    borderRadius: 4,
++    padding: 2,
++    gap: 2,
++  },
++  cumulativeBarCurrent: { height: 4, borderRadius: 2 },
++  cumulativeBarPrev: { height: 3, borderRadius: 2, opacity: 0.85 },
++  weeklySummaryBanner: {
++    flexDirection: "row",
++    justifyContent: "space-between",
++    alignItems: "center",
++    backgroundColor: "#102023",
++    borderRadius: 10,
++    padding: 10,
++    marginBottom: 10,
++    gap: 10,
++  },
++  insightsContainer: {
++    marginTop: 12,
++    gap: 8,
++  },
++  insightsHeaderTitle: {
++    color: "#92A4A2",
++    fontSize: 10,
++    fontWeight: "800",
++    letterSpacing: 1.2,
++    marginBottom: 2,
++  },
++  insightItemCard: {
++    backgroundColor: "#15282B",
++    borderRadius: 12,
++    padding: 11,
++    borderWidth: 1,
++    borderColor: "#223D40",
++    gap: 5,
++  },
++  insightItemTop: {
++    flexDirection: "row",
++    alignItems: "center",
++    gap: 7,
++  },
++  insightToneDot: { width: 8, height: 8, borderRadius: 4 },
++  insightItemTitle: {
++    color: "#F4F7F5",
++    fontSize: 12,
++    fontWeight: "800",
++    flex: 1,
++  },
++  insightMetricBadge: { fontSize: 11, fontWeight: "800" },
++  insightItemDetail: { color: "#B5C5C4", fontSize: 11, lineHeight: 16 },
++  insightCategoryAction: {
++    alignSelf: "flex-start",
++    marginTop: 3,
++    paddingVertical: 2,
++  },
+   activeFilter: {
+     backgroundColor: "#183034",
+     borderWidth: 1,
+diff --git a/mobile/scripts/test-cost-control-cover.cjs b/mobile/scripts/test-cost-control-cover.cjs
+new file mode 100644
+index 0000000..28e2b98
+--- /dev/null
++++ b/mobile/scripts/test-cost-control-cover.cjs
+@@ -0,0 +1,123 @@
++// Cover screen CostControlCard: MTD vs prior month same period, weekly/monthly mode switching, insights and category drilldown.
++const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
++const ts=require('typescript'),React=require('react'),{act,create}=require('react-test-renderer');
++global.IS_REACT_ACT_ENVIRONMENT=true;
++const cache=new Map(),requests=[];let renderer;
++const sqliteDb={getAllAsync:async()=>[],runAsync:async()=>{},execAsync:async()=>{}};
++const queueSync=async()=>{};
++const costControl={
++  status:'controlling',
++  status_label:'Custos sob controle',
++  headline:'Você reduziu os gastos em 20.0% (-R$ 80.00) em relação ao mesmo período anterior (01/09 a 20/09).',
++  mtd:{
++    reference_date:'2026-10-20',
++    current_month:'2026-10',
++    previous_month:'2026-09',
++    day_of_month:20,
++    days_in_month:31,
++    previous_days_compared:20,
++    current_period_label:'01/10 a 20/10',
++    previous_period_label:'01/09 a 20/09',
++    current_expenses:320,
++    previous_mtd_expenses:400,
++    previous_full_expenses:600,
++    current_income:3000,
++    previous_mtd_income:2800,
++    delta_amount:-80,
++    delta_pct:-20,
++    daily_burn_current:16,
++    daily_burn_previous:20,
++    projected_month_expenses:496,
++    projected_vs_previous_full_pct:-17.3,
++    buckets:[
++      {key:'S1',label:'Sem 1',range_label:'01–07',current_expenses:180,previous_mtd_expenses:250,previous_full_expenses:250,current_cumulative:180,previous_mtd_cumulative:250,previous_full_cumulative:250,delta_pct:-28,reached:true},
++      {key:'S2',label:'Sem 2',range_label:'08–14',current_expenses:140,previous_mtd_expenses:150,previous_full_expenses:150,current_cumulative:320,previous_mtd_cumulative:400,previous_full_cumulative:400,delta_pct:-6.7,reached:true},
++      {key:'S3',label:'Sem 3',range_label:'15–21',current_expenses:0,previous_mtd_expenses:0,previous_full_expenses:0,current_cumulative:320,previous_mtd_cumulative:400,previous_full_cumulative:400,delta_pct:null,reached:true},
++      {key:'S4',label:'Sem 4',range_label:'22–28',current_expenses:0,previous_mtd_expenses:0,previous_full_expenses:200,current_cumulative:null,previous_mtd_cumulative:400,previous_full_cumulative:600,delta_pct:null,reached:false},
++      {key:'S5',label:'Sem 5',range_label:'29+',current_expenses:0,previous_mtd_expenses:0,previous_full_expenses:0,current_cumulative:null,previous_mtd_cumulative:400,previous_full_cumulative:600,delta_pct:null,reached:false},
++    ],
++  },
++  weekly_series:[
++    {key:'W-3',label:'Sem -3',period_label:'23/09–29/09',current_expenses:200,previous_expenses:150,current_income:0,delta_amount:50,delta_pct:33.3},
++    {key:'W-2',label:'Sem -2',period_label:'30/09–06/10',current_expenses:180,previous_expenses:200,current_income:3000,delta_amount:-20,delta_pct:-10},
++    {key:'W-1',label:'Sem -1',period_label:'07/10–13/10',current_expenses:140,previous_expenses:180,current_income:0,delta_amount:-40,delta_pct:-22.2},
++    {key:'W0',label:'Atual',period_label:'14/10–20/10',current_expenses:95,previous_expenses:140,current_income:0,delta_amount:-45,delta_pct:-32.1},
++  ],
++  weekly_summary:{
++    current_week_expenses:95,
++    previous_week_expenses:140,
++    week_over_week_pct:-32.1,
++    rolling_4w_expenses:615,
++    prior_4w_expenses:720,
++    rolling_4w_change_pct:-14.6,
++    weekly_avg_current:153.75,
++    weekly_avg_previous:180,
++  },
++  monthly_comparison_series:[
++    {month:'2026-09',label:'09/26',current_expenses:600,previous_expenses:650,income:2800,net:2200,delta_amount:-50,delta_pct:-7.7},
++    {month:'2026-10',label:'10/26',current_expenses:320,previous_expenses:600,income:3000,net:2680,delta_amount:-280,delta_pct:-46.7},
++  ],
++  category_drivers:[
++    {category:'Mercado',current_amount:180,previous_amount:250,delta_amount:-70,delta_pct:-28},
++  ],
++  insights:[
++    {id:'burn_projection',tone:'good',title:'Ritmo diário e projeção do mês',detail:'Velocidade atual de R$ 16.00/dia.',metric:'R$ 16.00/dia'},
++    {id:'top_saving_category',tone:'good',title:'Economia em Mercado',detail:'Caiu de R$ 250.00 para R$ 180.00.',metric:'-R$ 70.00',category:'Mercado'},
++  ],
++};
++const summary={
++  period_start:'2026-10-01',
++  period_end:'2026-10-20',
++  category_spending:[{category:'Mercado',amount:180},{category:'Restaurantes',amount:140}],
++  monthly_series:[{month:'2026-09',income:2800,expenses:600,net:2200},{month:'2026-10',income:3000,expenses:320,net:2680}],
++  income:3000,
++  expenses:320,
++  net_flow:2680,
++  comparison:{period_start:'2026-09-01',period_end:'2026-09-20',income:2800,expenses:400,net_flow:2400,income_change_pct:7.1,expenses_change_pct:-20,net_change:280},
++  cost_control:costControl,
++};
++const api={json:async url=>{
++  requests.push(url);
++  if(url.startsWith('/v1/dashboard/overview'))return{selected:summary,month:summary,year:summary};
++  if(url.startsWith('/v1/movements?'))return{items:[],total:0,has_more:false};
++  return{items:[],total:0,mongodb:'connected',auth_required:true};
++},upload:async()=>{},getReadGeneration:()=>0,subscribeAvailability:()=>()=>{},getAvailability:()=> 'connected',
++configureMutationStore(){},pendingMutations:async()=>[],subscribeMutations:()=>()=>{}};
++const native={Platform:{OS:'android'},StyleSheet:{create:x=>x},useWindowDimensions:()=>({width:390,height:844,fontScale:1}),
++  ...Object.fromEntries(['ActivityIndicator','Pressable','ScrollView','Text','TextInput','View'].map(name=>[name,name])),
++  FlatList:props=>React.createElement('ListSurface',{data:props.data},props.ListHeaderComponent,props.ListFooterComponent)};
++const mocks={'react':React,'react-native':{...native,BackHandler:{addEventListener:()=>({remove(){}})}},'react-native-safe-area-context':{SafeAreaView:'View',useSafeAreaInsets:()=>({top:0,bottom:0})},
++  'expo-document-picker':{},'expo-image-picker':{},'expo-router':{usePathname:()=> '/',router:{push(){}}},'expo-notification-capture':{__esModule:true,default:{available:false}},
++  './components/AuthProvider':{useAuth:()=>({lock(){}})},'./utils/queueDb':{useSQLiteContext:()=>sqliteDb},
++  './utils/useQueueSync':{useQueueSync:()=>queueSync},'./utils/useForeground':{useForeground:()=>true},
++  './utils/sessionClient':{API:'https://synthetic.invalid',api,authState:{getToken:()=> 'session',unlocked:()=>true,sessionIdentity:()=>1}},
++  './utils/appAlert':{Alert:{alert(){}}},'../utils/appAlert':{Alert:{alert(){}}},'./sessionStore':{getItemAsync:async()=>null},'./utils/durableFiles':{},'./uploadFile':{appendQueuedFile:async()=>{}}};
++function load(file){file=path.resolve(file);if(cache.has(file))return cache.get(file);const m={exports:{}};
++  vm.runInNewContext(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText,
++    {module:m,exports:m.exports,console,Error,Date,Intl,Symbol,Promise,URLSearchParams,AbortController,setTimeout,clearTimeout,setInterval,clearInterval,
++      require:name=>{if(mocks[name])return mocks[name];if(name.startsWith('./components/')&&name!=='./components/InteractionControls')return{__esModule:true,default:props=>React.createElement(name.slice(13)+'Stub',props)};
++        if(!name.startsWith('.'))return require(name);const target=path.resolve(path.dirname(file),name);return load(fs.existsSync(target+'.tsx')?target+'.tsx':target+'.ts');}},{filename:file});cache.set(file,m.exports);return m.exports;}
++const App=load('App.tsx').default;
++const settle=()=>act(async()=>{await new Promise(resolve=>setTimeout(resolve,25));});
++const allText=()=>renderer.root.findAllByType('Text').map(n=>[n.props.children].flat(Infinity).filter(Boolean).join('')).join('\n');
++const button=label=>{const node=renderer.root.findAllByType('Pressable').find(node=>node.findAllByType('Text').some(text=>text.props.children===label));assert.ok(node,label);return node;};
++const press=label=>act(async()=>{await button(label).props.onPress();});
++(async()=>{
++  await act(async()=>{renderer=create(React.createElement(App),{createNodeMock:()=>({scrollTo(){}})});});await settle();
++  const rendered=allText();
++  assert.match(rendered,/Custos sob controle/);
++  assert.match(rendered,/MTD atual \(01\/10 a 20\/10\)/);
++  assert.match(rendered,/Mesmo período ant\. \(01\/09 a 20\/09\)/);
++  assert.match(rendered,/Curva de tendência acumulada no mês/);
++  assert.match(rendered,/Economia em Mercado/);
++  await press('Semanal');await settle();
++  assert.match(allText(),/Últimas 4 semanas vs\. anteriores/);
++  assert.match(allText(),/14\/10–20\/10/);
++  await press('Mensal');await settle();
++  assert.match(allText(),/Saídas do mês anterior/);
++  await press('Ver Mercado no Extrato ›');await settle();
++  const lastMov=requests.filter(u=>u.startsWith('/v1/movements?')).at(-1);
++  assert.ok(lastMov && lastMov.includes('category=Mercado'));
++  console.log('PASS cover screen CostControlCard MTD, weekly, monthly charts, cost control insights and category drilldown');
++  await act(async()=>renderer.unmount());
++})().catch(async error=>{console.error(error);if(renderer)await act(async()=>renderer.unmount());process.exitCode=1;});
+diff --git a/mobile/utils/costControlInsights.ts b/mobile/utils/costControlInsights.ts
+new file mode 100644
+index 0000000..2954a6d
+--- /dev/null
++++ b/mobile/utils/costControlInsights.ts
+@@ -0,0 +1,435 @@
++export type CostControlStatus =
++  | "controlling"
++  | "stable"
++  | "attention"
++  | "over_pace"
++  | "no_baseline";
++
++export type CostControlInsight = {
++  id: string;
++  tone: "good" | "warning" | "bad" | "neutral";
++  title: string;
++  detail: string;
++  metric: string;
++  category?: string;
++};
++
++export type MtdBucket = {
++  key: string;
++  label: string;
++  range_label: string;
++  current_expenses: number;
++  previous_mtd_expenses: number;
++  previous_full_expenses: number;
++  current_cumulative: number | null;
++  previous_mtd_cumulative: number;
++  previous_full_cumulative: number;
++  delta_pct: number | null;
++  reached: boolean;
++};
++
++export type WeeklyComparisonItem = {
++  key: string;
++  label: string;
++  period_label: string;
++  current_expenses: number;
++  previous_expenses: number;
++  current_income: number;
++  delta_amount: number;
++  delta_pct: number | null;
++};
++
++export type MonthlyComparisonItem = {
++  month: string;
++  label: string;
++  current_expenses: number;
++  previous_expenses: number;
++  income: number;
++  net: number;
++  delta_amount: number;
++  delta_pct: number | null;
++};
++
++export type CategoryDriver = {
++  category: string;
++  current_amount: number;
++  previous_amount: number;
++  delta_amount: number;
++  delta_pct: number | null;
++};
++
++export type CostControlViewModel = {
++  status: CostControlStatus;
++  status_label: string;
++  headline: string;
++  mtd: {
++    reference_date: string;
++    current_month: string;
++    previous_month: string;
++    day_of_month: number;
++    days_in_month: number;
++    previous_days_compared: number;
++    current_period_label: string;
++    previous_period_label: string;
++    current_expenses: number;
++    previous_mtd_expenses: number;
++    previous_full_expenses: number;
++    current_income: number;
++    previous_mtd_income: number;
++    delta_amount: number;
++    delta_pct: number | null;
++    daily_burn_current: number;
++    daily_burn_previous: number;
++    projected_month_expenses: number;
++    projected_vs_previous_full_pct: number | null;
++    buckets: MtdBucket[];
++  };
++  weekly_series: WeeklyComparisonItem[];
++  weekly_summary: {
++    current_week_expenses: number;
++    previous_week_expenses: number;
++    week_over_week_pct: number | null;
++    rolling_4w_expenses: number;
++    prior_4w_expenses: number;
++    rolling_4w_change_pct: number | null;
++    weekly_avg_current: number;
++    weekly_avg_previous: number;
++  };
++  monthly_comparison_series: MonthlyComparisonItem[];
++  category_drivers: CategoryDriver[];
++  insights: CostControlInsight[];
++};
++
++export function formatSignedPct(value: number | null | undefined): string {
++  if (value == null || !Number.isFinite(Number(value))) return "sem base";
++  const num = Number(value);
++  return `${num >= 0 ? "+" : ""}${num.toFixed(1)}%`;
++}
++
++export function statusPalette(status: CostControlStatus): {
++  bg: string;
++  border: string;
++  text: string;
++  dot: string;
++} {
++  if (status === "controlling") {
++    return {
++      bg: "#0F2E29",
++      border: "#2E7D6B",
++      text: "#4FD1B5",
++      dot: "#4FD1B5",
++    };
++  }
++  if (status === "over_pace") {
++    return {
++      bg: "#311B1D",
++      border: "#7A373B",
++      text: "#FF8C83",
++      dot: "#FF8C83",
++    };
++  }
++  if (status === "attention" || status === "stable") {
++    return {
++      bg: "#2B2515",
++      border: "#705D23",
++      text: "#F4B942",
++      dot: "#F4B942",
++    };
++  }
++  return {
++    bg: "#162629",
++    border: "#315054",
++    text: "#AFC1BF",
++    dot: "#92A4A2",
++  };
++}
++
++function pctChange(current: number, previous: number): number | null {
++  if (!Number.isFinite(previous) || previous === 0) return null;
++  return Math.round(((current - previous) / Math.abs(previous)) * 1000) / 10;
++}
++
++export function resolveCostControlView(
++  dashboard: any,
++  monthDashboard?: any,
++  yearDashboard?: any,
++  moneyFormatter: (v: number) => string = (v) => `R$ ${(v || 0).toFixed(2)}`,
++): CostControlViewModel {
++  const source = dashboard?.cost_control || monthDashboard?.cost_control;
++  if (source && source.mtd && Array.isArray(source.mtd.buckets)) {
++    return {
++      status: (source.status as CostControlStatus) || "no_baseline",
++      status_label: String(source.status_label || "Análise de ritmo"),
++      headline: String(source.headline || ""),
++      mtd: {
++        reference_date: String(source.mtd.reference_date || ""),
++        current_month: String(source.mtd.current_month || ""),
++        previous_month: String(source.mtd.previous_month || ""),
++        day_of_month: Number(source.mtd.day_of_month || 1),
++        days_in_month: Number(source.mtd.days_in_month || 30),
++        previous_days_compared: Number(source.mtd.previous_days_compared || 1),
++        current_period_label: String(source.mtd.current_period_label || "Mês atual"),
++        previous_period_label: String(source.mtd.previous_period_label || "Mês anterior"),
++        current_expenses: Number(source.mtd.current_expenses || 0),
++        previous_mtd_expenses: Number(source.mtd.previous_mtd_expenses || 0),
++        previous_full_expenses: Number(source.mtd.previous_full_expenses || 0),
++        current_income: Number(source.mtd.current_income || 0),
++        previous_mtd_income: Number(source.mtd.previous_mtd_income || 0),
++        delta_amount: Number(source.mtd.delta_amount || 0),
++        delta_pct: source.mtd.delta_pct == null ? null : Number(source.mtd.delta_pct),
++        daily_burn_current: Number(source.mtd.daily_burn_current || 0),
++        daily_burn_previous: Number(source.mtd.daily_burn_previous || 0),
++        projected_month_expenses: Number(source.mtd.projected_month_expenses || 0),
++        projected_vs_previous_full_pct:
++          source.mtd.projected_vs_previous_full_pct == null
++            ? null
++            : Number(source.mtd.projected_vs_previous_full_pct),
++        buckets: (source.mtd.buckets || []).map((b: any) => ({
++          key: String(b.key || ""),
++          label: String(b.label || ""),
++          range_label: String(b.range_label || ""),
++          current_expenses: Number(b.current_expenses || 0),
++          previous_mtd_expenses: Number(b.previous_mtd_expenses || 0),
++          previous_full_expenses: Number(b.previous_full_expenses || 0),
++          current_cumulative:
++            b.current_cumulative == null ? null : Number(b.current_cumulative),
++          previous_mtd_cumulative: Number(b.previous_mtd_cumulative || 0),
++          previous_full_cumulative: Number(b.previous_full_cumulative || 0),
++          delta_pct: b.delta_pct == null ? null : Number(b.delta_pct),
++          reached: Boolean(b.reached),
++        })),
++      },
++      weekly_series: Array.isArray(source.weekly_series)
++        ? source.weekly_series.map((w: any) => ({
++            key: String(w.key || ""),
++            label: String(w.label || ""),
++            period_label: String(w.period_label || ""),
++            current_expenses: Number(w.current_expenses || 0),
++            previous_expenses: Number(w.previous_expenses || 0),
++            current_income: Number(w.current_income || 0),
++            delta_amount: Number(w.delta_amount || 0),
++            delta_pct: w.delta_pct == null ? null : Number(w.delta_pct),
++          }))
++        : [],
++      weekly_summary: {
++        current_week_expenses: Number(source.weekly_summary?.current_week_expenses || 0),
++        previous_week_expenses: Number(source.weekly_summary?.previous_week_expenses || 0),
++        week_over_week_pct:
++          source.weekly_summary?.week_over_week_pct == null
++            ? null
++            : Number(source.weekly_summary.week_over_week_pct),
++        rolling_4w_expenses: Number(source.weekly_summary?.rolling_4w_expenses || 0),
++        prior_4w_expenses: Number(source.weekly_summary?.prior_4w_expenses || 0),
++        rolling_4w_change_pct:
++          source.weekly_summary?.rolling_4w_change_pct == null
++            ? null
++            : Number(source.weekly_summary.rolling_4w_change_pct),
++        weekly_avg_current: Number(source.weekly_summary?.weekly_avg_current || 0),
++        weekly_avg_previous: Number(source.weekly_summary?.weekly_avg_previous || 0),
++      },
++      monthly_comparison_series: Array.isArray(source.monthly_comparison_series)
++        ? source.monthly_comparison_series.map((m: any) => ({
++            month: String(m.month || ""),
++            label: String(m.label || ""),
++            current_expenses: Number(m.current_expenses || 0),
++            previous_expenses: Number(m.previous_expenses || 0),
++            income: Number(m.income || 0),
++            net: Number(m.net || 0),
++            delta_amount: Number(m.delta_amount || 0),
++            delta_pct: m.delta_pct == null ? null : Number(m.delta_pct),
++          }))
++        : [],
++      category_drivers: Array.isArray(source.category_drivers)
++        ? source.category_drivers.map((c: any) => ({
++            category: String(c.category || ""),
++            current_amount: Number(c.current_amount || 0),
++            previous_amount: Number(c.previous_amount || 0),
++            delta_amount: Number(c.delta_amount || 0),
++            delta_pct: c.delta_pct == null ? null : Number(c.delta_pct),
++          }))
++        : [],
++      insights: Array.isArray(source.insights)
++        ? source.insights.map((ins: any) => ({
++            id: String(ins.id || ""),
++            tone: (ins.tone as CostControlInsight["tone"]) || "neutral",
++            title: String(ins.title || ""),
++            detail: String(ins.detail || ""),
++            metric: String(ins.metric || ""),
++            ...(ins.category ? { category: String(ins.category) } : {}),
++          }))
++        : [],
++    };
++  }
++
++  // Fallback synthesis when backend cost_control field is not present
++  const activeDash = monthDashboard || dashboard || {};
++  const curExp = Number(activeDash.expenses ?? dashboard?.expenses ?? 0);
++  const curInc = Number(activeDash.income ?? dashboard?.income ?? 0);
++  const comp = activeDash.comparison || dashboard?.comparison || null;
++  const prevExp = Number(comp?.expenses ?? 0);
++  const prevInc = Number(comp?.income ?? 0);
++  const periodEndStr = String(activeDash.period_end || dashboard?.period_end || "2026-10-26");
++  const dayOfMonth = Math.max(1, Number(periodEndStr.slice(8, 10)) || 26);
++  const curMonthNum = Number(periodEndStr.slice(5, 7)) || 10;
++  const curYearNum = Number(periodEndStr.slice(0, 4)) || 2026;
++  const daysInMonth = new Date(Date.UTC(curYearNum, curMonthNum, 0)).getUTCDate() || 30;
++  const prevMonthNum = curMonthNum === 1 ? 12 : curMonthNum - 1;
++
++  const deltaAmount = curExp - prevExp;
++  const deltaPct = pctChange(curExp, prevExp);
++  const dailyCur = curExp / Math.max(1, dayOfMonth);
++  const dailyPrev = prevExp / Math.max(1, dayOfMonth);
++  const projectedExp = Math.max(curExp, dailyCur * daysInMonth);
++  const projectedVsPrevPct = pctChange(projectedExp, prevExp);
++
++  const weights = [0.22, 0.24, 0.23, 0.21, 0.1];
++  const bucketDefs = [
++    { key: "S1", label: "Sem 1", range: "01–07", start: 1 },
++    { key: "S2", label: "Sem 2", range: "08–14", start: 8 },
++    { key: "S3", label: "Sem 3", range: "15–21", start: 15 },
++    { key: "S4", label: "Sem 4", range: "22–28", start: 22 },
++    { key: "S5", label: "Sem 5", range: "29+", start: 29 },
++  ];
++  const reachedCount = Math.max(1, bucketDefs.filter((b) => b.start <= dayOfMonth).length);
++  let curCum = 0;
++  let prevCum = 0;
++  const buckets: MtdBucket[] = bucketDefs.map((b, i) => {
++    const reached = b.start <= dayOfMonth;
++    const cVal = reached ? Math.round((curExp / reachedCount) * 100) / 100 : 0;
++    const pVal = Math.round(prevExp * weights[i] * 100) / 100;
++    if (reached) curCum += cVal;
++    prevCum += pVal;
++    return {
++      key: b.key,
++      label: b.label,
++      range_label: b.range,
++      current_expenses: cVal,
++      previous_mtd_expenses: pVal,
++      previous_full_expenses: pVal,
++      current_cumulative: reached ? Math.round(curCum * 100) / 100 : null,
++      previous_mtd_cumulative: Math.round(prevCum * 100) / 100,
++      previous_full_cumulative: Math.round(prevCum * 100) / 100,
++      delta_pct: reached ? pctChange(cVal, pVal) : null,
++      reached,
++    };
++  });
++
++  const rawMonthly: any[] =
++    yearDashboard?.monthly_series || dashboard?.monthly_series || [];
++  const monthlyComparison: MonthlyComparisonItem[] = rawMonthly
++    .slice(-6)
++    .map((item: any, idx: number, arr: any[]) => {
++      const cVal = Number(item.expenses || 0);
++      const pVal = idx > 0 ? Number(arr[idx - 1].expenses || 0) : prevExp;
++      const mStr = String(item.month || "");
++      return {
++        month: mStr,
++        label: mStr.length >= 7 ? `${mStr.slice(5, 7)}/${mStr.slice(2, 4)}` : mStr,
++        current_expenses: cVal,
++        previous_expenses: pVal,
++        income: Number(item.income || 0),
++        net: Number(item.net || 0),
++        delta_amount: cVal - pVal,
++        delta_pct: pctChange(cVal, pVal),
++      };
++    });
++
++  const weeklySeries: WeeklyComparisonItem[] = ["Sem -3", "Sem -2", "Sem -1", "Atual"].map(
++    (label, idx) => {
++      const cVal = Math.round((curExp / 4) * 100) / 100;
++      const pVal = Math.round((prevExp / 4) * 100) / 100;
++      return {
++        key: idx < 3 ? `W-${3 - idx}` : "W0",
++        label,
++        period_label: `Ciclo ${idx + 1}`,
++        current_expenses: cVal,
++        previous_expenses: pVal,
++        current_income: Math.round((curInc / 4) * 100) / 100,
++        delta_amount: cVal - pVal,
++        delta_pct: pctChange(cVal, pVal),
++      };
++    },
++  );
++
++  let status: CostControlStatus = "no_baseline";
++  let statusLabel = "Base em formação";
++  let headline = `Acumulado no período: ${moneyFormatter(curExp)} (média de ${moneyFormatter(dailyCur)}/dia).`;
++  if (prevExp > 0) {
++    if (deltaPct != null && deltaPct <= -3) {
++      status = "controlling";
++      statusLabel = "Custos sob controle";
++      headline = `Você reduziu os custos em ${Math.abs(deltaPct).toFixed(1)}% (-${moneyFormatter(Math.abs(deltaAmount))}) frente ao período anterior.`;
++    } else if (deltaPct != null && deltaPct <= 5) {
++      status = "stable";
++      statusLabel = "Ritmo estável";
++      headline = `Custos alinhados ao período anterior (${formatSignedPct(deltaPct)}).`;
++    } else {
++      status = "over_pace";
++      statusLabel = "Acima do ritmo anterior";
++      headline = `Custos estão ${formatSignedPct(deltaPct)} (+${moneyFormatter(Math.abs(deltaAmount))}) acima do período anterior.`;
++    }
++  }
++
++  const insights: CostControlInsight[] = [];
++  if (curExp > 0 || prevExp > 0) {
++    insights.push({
++      id: "burn_projection",
++      tone: deltaAmount <= 0 ? "good" : "warning",
++      title: "Ritmo diário e projeção do mês",
++      detail: `Velocidade atual de ${moneyFormatter(dailyCur)}/dia. Projeção de fechamento em ${moneyFormatter(projectedExp)}.`,
++      metric: `${moneyFormatter(dailyCur)}/dia`,
++    });
++  }
++  if (curInc > 0 && curExp > 0) {
++    const share = (curExp / curInc) * 100;
++    insights.push({
++      id: "income_commitment",
++      tone: share <= 80 ? "good" : share <= 100 ? "warning" : "bad",
++      title: "Comprometimento das entradas",
++      detail: `As saídas representam ${share.toFixed(1)}% das entradas registradas no período.`,
++      metric: `${share.toFixed(1)}% da renda`,
++    });
++  }
++
++  return {
++    status,
++    status_label: statusLabel,
++    headline,
++    mtd: {
++      reference_date: periodEndStr,
++      current_month: periodEndStr.slice(0, 7),
++      previous_month: `${curYearNum}-${String(prevMonthNum).padStart(2, "0")}`,
++      day_of_month: dayOfMonth,
++      days_in_month: daysInMonth,
++      previous_days_compared: dayOfMonth,
++      current_period_label: `01/${String(curMonthNum).padStart(2, "0")} a ${String(dayOfMonth).padStart(2, "0")}/${String(curMonthNum).padStart(2, "0")}`,
++      previous_period_label: `01/${String(prevMonthNum).padStart(2, "0")} a ${String(dayOfMonth).padStart(2, "0")}/${String(prevMonthNum).padStart(2, "0")}`,
++      current_expenses: curExp,
++      previous_mtd_expenses: prevExp,
++      previous_full_expenses: prevExp,
++      current_income: curInc,
++      previous_mtd_income: prevInc,
++      delta_amount: deltaAmount,
++      delta_pct: deltaPct,
++      daily_burn_current: dailyCur,
++      daily_burn_previous: dailyPrev,
++      projected_month_expenses: projectedExp,
++      projected_vs_previous_full_pct: projectedVsPrevPct,
++      buckets,
++    },
++    weekly_series: weeklySeries,
++    weekly_summary: {
++      current_week_expenses: weeklySeries[3]?.current_expenses || 0,
++      previous_week_expenses: weeklySeries[3]?.previous_expenses || 0,
++      week_over_week_pct: weeklySeries[3]?.delta_pct ?? null,
++      rolling_4w_expenses: curExp,
++      prior_4w_expenses: prevExp,
++      rolling_4w_change_pct: deltaPct,
++      weekly_avg_current: curExp / 4,
++      weekly_avg_previous: prevExp / 4,
++    },
++    monthly_comparison_series: monthlyComparison,
++    category_drivers: [],
++    insights,
++  };
++}
