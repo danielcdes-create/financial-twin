@@ -42,6 +42,22 @@ foreach ($letter in [char[]]([int][char]'Z'..[int][char]'E')) {
 $repoRoot = Split-Path (Resolve-Path $projectPath).Path -Parent
 $activeProject = $projectPath
 
+$appConfigPath = Join-Path $projectPath 'app.json'
+$versionCode = 1
+$versionName = "1.0.0"
+if (Test-Path -LiteralPath $appConfigPath) {
+    $config = (Get-Content -LiteralPath $appConfigPath -Raw | ConvertFrom-Json).expo
+    if ($config.version) { $versionName = [string]$config.version }
+    if ($config.android.versionCode) { $versionCode = [int]$config.android.versionCode }
+    $gradlePath = Join-Path $projectPath 'android\app\build.gradle'
+    if (Test-Path -LiteralPath $gradlePath) {
+        $gradleContent = Get-Content -LiteralPath $gradlePath -Raw
+        $gradleContent = [regex]::Replace($gradleContent, '(?m)^\s*versionCode\s+\d+', "        versionCode $versionCode")
+        $gradleContent = [regex]::Replace($gradleContent, '(?m)^\s*versionName\s+"[^"]+"', "        versionName `"$versionName`"")
+        Set-Content -LiteralPath $gradlePath -Value $gradleContent -NoNewline
+    }
+}
+
 if ($driveLetter -and [System.Environment]::OSVersion.Platform -eq 'Win32NT') {
     Write-Host "Mapeando unidade virtual $driveLetter -> $repoRoot para contornar limite de 260 caracteres do Ninja..." -ForegroundColor Cyan
     subst $driveLetter $repoRoot
@@ -58,6 +74,21 @@ try {
     $apk = Join-Path $activeProject 'android\app\build\outputs\apk\release\app-release.apk'
     if (!(Test-Path -LiteralPath $apk)) { throw 'O Gradle não produziu o APK esperado.' }
     Copy-Item -LiteralPath $apk -Destination $destination -Force
+
+    # Valida badging do APK gerado contra app.json
+    $aapt = Join-Path $sdkPath 'build-tools\36.0.0\aapt.exe'
+    if (Test-Path -LiteralPath $aapt) {
+        $badging = & $aapt dump badging $destination
+        $pkgMatch = $badging | Select-String "^package: name='com.financialtwin.app' versionCode='(\d+)' versionName='([^']+)'"
+        if ($pkgMatch) {
+            $builtCode = [int]$pkgMatch.Matches[0].Groups[1].Value
+            $builtName = $pkgMatch.Matches[0].Groups[2].Value
+            Write-Host "APK compilado verificado via aapt: v$builtName (build $builtCode)" -ForegroundColor Green
+            if ($builtCode -ne $versionCode -or $builtName -ne $versionName) {
+                throw "Divergência de versão no APK gerado: esperado v$versionName ($versionCode), mas o APK contém v$builtName ($builtCode)"
+            }
+        }
+    }
 
     if (!$SkipPublish) {
         if ($StrictPublish) {
