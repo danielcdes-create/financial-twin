@@ -8,7 +8,7 @@ try {
     New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
     $logStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
     $env:PYTHONUNBUFFERED = '1'
-    $backendProcess = Start-Process -FilePath $pythonPath -ArgumentList 'backend\run_dev.py' `
+    $backendProcess = Start-Process -FilePath $pythonPath -ArgumentList 'scripts\proxy_to_vps.py' `
         -WorkingDirectory $projectRoot -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput (Join-Path $logDirectory "$logStamp.out.log") `
         -RedirectStandardError (Join-Path $logDirectory "$logStamp.err.log")

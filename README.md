@@ -73,9 +73,9 @@ For a private development server, start from `financial-app`:
 .\.venv\Scripts\python.exe backend\run_dev.py
 ```
 
-The development configuration binds the API to `127.0.0.1:8000` and publishes it through private Tailscale Serve HTTPS at `https://gbp360.tail1093e7.ts.net:8443`. The existing HTTPS site on port 443 is preserved. Personal-data routes require the owner's authenticated session, including when `APP_PASSWORD` is empty. Production requires `ENVIRONMENT=production`, a durable owner account, and a random `JWT_SECRET`.
+The production configuration runs inside the `financial-twin-server` Docker container on the DigitalOcean VPS (`ubuntu-s-1vcpu-1gb-nyc1`, `198.199.65.103` / Tailscale `100.101.23.111`) under `/opt/financial-twin` and is published through private Tailscale Serve HTTPS at `https://ubuntu-s-1vcpu-1gb-nyc1.tail1093e7.ts.net:8443` (with `https://gbp360.tail1093e7.ts.net:8443` and local `127.0.0.1:8000` relayed transparently to the VPS for backward compatibility and the desktop launcher). Personal-data routes require the owner's authenticated session, including when `APP_PASSWORD` is empty. Production requires `ENVIRONMENT=production`, a durable owner account, and a random `JWT_SECRET`. Veja a [Nota Técnica de Implantação em Produção (VPS)](docs/NOTA-TECNICA-DEPLOY-VPS.md).
 
-No computador atual, a tarefa do Windows **Financial Twin Backend** inicia `scripts/Start-FinancialBackend.ps1` ao entrar na conta. O script reutiliza o servidor quando a porta 8000 já está ocupada e grava os logs de inicialização em `data/backend-startup`. Se o processo terminar, a tarefa tenta reiniciá-lo até três vezes, com intervalo de um minuto. O computador precisa estar ligado e conectado ao Tailscale para o celular acessar a API.
+No computador local, a tarefa do Windows **Financial Twin Backend** inicia `scripts/Start-FinancialBackend.ps1` (`scripts/proxy_to_vps.py`), mantendo o relay local na porta 8000 apontado para a VPS para o atalho Desktop sem criar segunda instância de escrita no banco. O celular acessa a API diretamente na VPS via Tailscale, mesmo com o computador desligado.
 
 ## Acesso no aplicativo
 
@@ -87,7 +87,9 @@ No navegador, a sessão autenticada dura 12 horas e o token fica só na memória
 
 O Android recebe prints pela opção de compartilhar imagem de outros apps. A leitura pela xAI depende de um toque explícito e todos os campos permanecem editáveis. Nenhuma análise cria lançamento financeiro. Contratos, premissas, testes e recuperação: [PURCHASE-CHECK.md](docs/PURCHASE-CHECK.md).
 
-Release privado atual: **1.20.81 / versionCode 127**, [APK ARM64](mobile/artifacts/financial-twin-1.20.81.apk). SHA256: `EE6581603015939141BB3579BC5B233CCB0EF2A4714FE245E81CC28DE358D3D4`. Registro gerado do manifesto validado; homologação física consta do relatório da entrega.
+Release privado atual: **1.20.82 / versionCode 128**, [APK ARM64](mobile/artifacts/financial-twin-1.20.82.apk). SHA256: `9ED5C38BFC0DD086D51ED1FE919F15B684787A6DE49A29216D083F30EB117E7B`. Registro gerado do manifesto validado; homologação física consta do relatório da entrega.
+
+Histórico preservado (registro anterior): **1.20.81 / versionCode 127**, [APK ARM64](mobile/artifacts/financial-twin-1.20.81.apk). SHA256: `EE6581603015939141BB3579BC5B233CCB0EF2A4714FE245E81CC28DE358D3D4`. Registro gerado do manifesto validado; homologação física consta do relatório da entrega.
 
 Histórico preservado (registro anterior): **1.20.80 / versionCode 126**, [APK ARM64](mobile/artifacts/financial-twin-1.20.80.apk). SHA256: `71A72902933A5F100BD0B8CBA1E6087C7FF7825C85662FCE967A7B311EE2710E`. Registro gerado do manifesto validado; homologação física consta do relatório da entrega.
 
