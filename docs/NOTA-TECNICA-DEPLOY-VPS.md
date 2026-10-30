@@ -3,7 +3,7 @@
 **Documento:** `NT-OPS-2026-001` (Rev. 2 — Multi-Serviço: SpamShield BR + Financial Twin)  
 **Projetos:**
 - **SpamShield BR** (`spamshield-server` & Distribuição OTA `v1.2.9` Build `13`)
-- **Financial Digital Twin** (`financial-twin-server` & Distribuição OTA `v1.20.82` Build `128`)  
+- **Financial Digital Twin** (`financial-twin-server` & Distribuição OTA `v1.20.83` Build `129`)  
 **Data:** 29 de Outubro de 2026  
 **Status:** Produção Ativa (`ONLINE` — Coexistência Multi-Container)  
 
@@ -193,8 +193,8 @@ https://ubuntu-s-1vcpu-1gb-nyc1.tail1093e7.ts.net:8443 (tailnet only)
 
 | Métrica / Artefato | SpamShield BR (`spamshield-server`) | Financial Twin (`financial-twin-server`) |
 | :--- | :--- | :--- |
-| **Versão do APK OTA** | `v1.2.9` (Build `13` — `61.049.783 bytes`) | `v1.20.82` (Build `128` — `48.149.476 bytes`) |
-| **SHA-256 do APK OTA** | `7a77ab97aabbebebd1e4f5530100bf1eb578b03d6dd76431c4b6edc9f3636632` | `9ED5C38BFC0DD086D51ED1FE919F15B684787A6DE49A29216D083F30EB117E7B` |
+| **Versão do APK OTA** | `v1.2.9` (Build `13` — `61.049.783 bytes`) | `v1.20.83` (Build `129` — `48.149.496 bytes`) |
+| **SHA-256 do APK OTA** | `7a77ab97aabbebebd1e4f5530100bf1eb578b03d6dd76431c4b6edc9f3636632` | `3CD60ECC979965E71EAD00357C35007628992FBADCD1432F066DB486F119E17C` |
 | **Tamanho da Imagem Docker** | `34,5 MB` (`9,7 MB` comprimida) | `398 MB` (`99,2 MB` comprimida) |
 | **Consumo de RAM do Container** | **`12,57 MiB`** de `956,3 MiB` (**`1,31%`**) | **`108,9 MiB`** de `956,3 MiB` (**`11,39%`**) |
 | **Consumo de CPU (Idle/Ready)** | **`0,33%`** (3 PIDs ativos) | **`0,35%`** (14 PIDs ativos) |

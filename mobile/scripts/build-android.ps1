@@ -17,6 +17,14 @@ $env:ANDROID_HOME = $sdkPath
 $env:ANDROID_SDK_ROOT = $sdkPath
 $env:PATH = "$javaPath\bin;$env:PATH"
 $env:NODE_ENV = 'production'
+$dotEnvPath = Join-Path $projectPath '.env'
+if (Test-Path -LiteralPath $dotEnvPath) {
+    Get-Content -LiteralPath $dotEnvPath | ForEach-Object {
+        if ($_ -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$') {
+            [System.Environment]::SetEnvironmentVariable($Matches[1], $Matches[2].Trim(), 'Process')
+        }
+    }
+}
 if ($env:JAVA_TOOL_OPTIONS -notmatch '--enable-native-access') {
     $env:JAVA_TOOL_OPTIONS = "$env:JAVA_TOOL_OPTIONS --enable-native-access=ALL-UNNAMED".Trim()
 }
@@ -68,8 +76,11 @@ if ($driveLetter -and [System.Environment]::OSVersion.Platform -eq 'Win32NT') {
 Remove-Item -Path (Join-Path $activeProject 'android\app\.cxx') -Recurse -Force -ErrorAction SilentlyContinue
 Push-Location (Join-Path $activeProject 'android')
 try {
+    Remove-Item -Path (Join-Path $activeProject 'android\app\build\generated\assets\react\release') -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -Path (Join-Path $activeProject 'android\app\build\generated\sourcemaps\react\release') -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -Path (Join-Path $activeProject 'android\app\build\intermediates\assets\release') -Recurse -Force -ErrorAction SilentlyContinue
     $logPath = Join-Path $outputPath 'android-build.log'
-    cmd.exe /c ".\gradlew.bat app:assembleRelease -x lintVitalRelease -x lintVitalAnalyzeRelease -PreactNativeArchitectures=arm64-v8a --max-workers=2 --console=plain --build-cache > `"$logPath`" 2>&1"
+    cmd.exe /c ".\gradlew.bat app:assembleRelease -x lintVitalRelease -x lintVitalAnalyzeRelease -PreactNativeArchitectures=arm64-v8a --max-workers=2 --console=plain --no-build-cache > `"$logPath`" 2>&1"
     if ($LASTEXITCODE -ne 0) { throw "Gradle falhou: $LASTEXITCODE. Consulte android-build.log." }
     $apk = Join-Path $activeProject 'android\app\build\outputs\apk\release\app-release.apk'
     if (!(Test-Path -LiteralPath $apk)) { throw 'O Gradle não produziu o APK esperado.' }

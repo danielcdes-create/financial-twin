@@ -2,7 +2,7 @@
   "expo": {
     "name": "Financial Twin",
     "slug": "financial-twin",
-    "version": "1.20.82",
+    "version": "1.20.83",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -18,7 +18,7 @@
       },
       "predictiveBackGestureEnabled": false,
       "package": "com.financialtwin.app",
-      "versionCode": 128
+      "versionCode": 129
     },
     "web": {
       "favicon": "./assets/favicon.png"

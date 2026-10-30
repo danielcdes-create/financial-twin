@@ -3,7 +3,8 @@ import { AuthState, requirePrivateTransport } from './authState';
 import { Platform } from 'react-native';
 import { uploadFetch } from './uploadTransport';
 
-const configuredApi = (process.env.EXPO_PUBLIC_API_BASE_URL || '').replace(/\/$/, '');
+const DEFAULT_PRODUCTION_API = 'https://ubuntu-s-1vcpu-1gb-nyc1.tail1093e7.ts.net:8443';
+const configuredApi = (process.env.EXPO_PUBLIC_API_BASE_URL || DEFAULT_PRODUCTION_API).replace(/\/$/, '');
 function baseUrl() {
   if (Platform.OS !== 'web') return configuredApi;
   const webApi = (process.env.EXPO_PUBLIC_WEB_API_BASE_URL || '').replace(/\/$/, '');
