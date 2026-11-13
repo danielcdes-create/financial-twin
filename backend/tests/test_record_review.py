@@ -25,7 +25,7 @@ class RecordCursor(Cursor):
             rows.sort(key=lambda row: row.get(key), reverse=direction < 0)
         return RecordCursor(rows)
 
-    def limit(self, count): return RecordCursor(self[:count])
+    def limit(self, count): return RecordCursor(self if not count else self[:count])
 
 
 class RecordCollection(BatchCollection):

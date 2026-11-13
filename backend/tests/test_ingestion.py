@@ -9,7 +9,7 @@ from app.transaction_service import EventConflict, TransactionService
 class Result:
     def __init__(self,inserted_id=None): self.inserted_id=inserted_id
 class Cursor(list):
-    def limit(self,n): return Cursor(self[:n])
+    def limit(self,n): return Cursor(self if not n else self[:n])
 class Collection:
     def __init__(self,docs=None): self.docs=list(docs or [])
     def create_index(self,*a,**k): pass

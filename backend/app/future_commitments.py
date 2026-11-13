@@ -14,7 +14,7 @@ from pymongo.errors import DuplicateKeyError
 from app.auth import require_session
 from app.atomic import mongo_snapshot, mongo_transaction, session_database, with_batch_size
 from app.commitment_estimates import effective_commitments
-from app.commitments import commitment_cutoff, as_date, linked_due_dates, schedule_from
+from app.commitments import COMMITMENT_CUTOFF, commitment_cutoff, as_date, linked_due_dates, schedule_from
 from app.economic_policy import amount, eligible_payment
 from app.financial_time import local_date, today
 from app.source_tokens import require_source_token
@@ -259,7 +259,7 @@ def future_obligations_view(db):
     for original, current in zip(candidates, effective_documents(db, 'obligation', candidates)):
         due_date = due(current)
         # Overdue and still unlinked stays on the list. Editing it remains limited to a due on or after today.
-        if due_date is None or due_date < commitment_cutoff(): continue
+        if due_date is None or due_date < COMMITMENT_CUTOFF: continue
         if not unpaid(db, 'obligation', original, original, linked) or current.get('future_excluded'): continue
         profile = current.get('profile') if isinstance(current.get('profile'), dict) else {}
         items.append({'id': str(original['_id']), 'name': profile.get('display_name') or current.get('descricao') or f'{current.get("tipo", "Obrigação")} · {current.get("competencia", "")}',

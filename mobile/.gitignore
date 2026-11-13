@@ -2,6 +2,7 @@
 
 # dependencies
 node_modules/
+modules/notification-capture/node_modules/
 
 # Expo
 .expo/
@@ -31,18 +32,15 @@ yarn-error.*
 *.pem
 
 # local env files
+.env
 .env*.local
 
 # typescript
 *.tsbuildinfo
 
-# generated native folders
+# generated native and build folders
 /ios
 /android
-.env
-.expo/
-node_modules/
-modules/notification-capture/node_modules/
 /artifacts/
 /.patch-work/
 /desktop-dist/

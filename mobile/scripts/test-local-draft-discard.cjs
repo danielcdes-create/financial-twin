@@ -12,14 +12,14 @@ const db={getAllAsync:async()=>dbRows,runAsync:async()=>{dbWrites++;}};
 const auth={account:{username:'synthetic',display_name:'Synthetic name'},biometricOn:false,biometricSupported:false};
 const mocks={'react':React,'react-native':native,'../utils/queueDb':{useSQLiteContext:()=>db},
   './VoiceCapture':{__esModule:true,default:()=>null},'./StatementBatchReview':{__esModule:true,default:()=>null},'./ControlledChoice':{__esModule:true,default:()=>null},
-  'expo-image-picker':{},'expo-sharing':{},'react-native-view-shot':{},'../utils/devicePrompt':{},
+  'expo-image-picker':{},'expo-sharing':{},'react-native-view-shot':{},'../utils/devicePrompt':{},'expo-router':{router:{push(){},replace(){},back(){},canGoBack:()=>false}},
   '../utils/pdfCpf':{getPdfCpf:async()=> 'synthetic-saved-cpf',setPdfCpf:async()=>{pdfWrites++;},clearPdfCpf:async()=>{pdfWrites++;}},
   '../utils/sessionClient':{api:{json:async(_route,init={})=>{if(init.method)authWrites++;return{items:[]};}}},
   './AuthProvider':{useAuth:()=>auth,authStyles:{},deviceLabel:'synthetic',AuthButton:({title,onPress,disabled})=>React.createElement('Pressable',{accessibilityLabel:title,onPress,disabled},React.createElement('Text',null,title))}};
 function load(file){file=path.resolve(file);if(cache.has(file))return cache.get(file);const m={exports:{}};cache.set(file,m.exports);
   const code=ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText;
   vm.runInNewContext(code,{module:m,exports:m.exports,console,Error,Date,Intl,Math,JSON,URLSearchParams,AbortController,setTimeout,clearTimeout,
-    require:name=>{if(mocks[name])return mocks[name];const target=path.resolve(path.dirname(file),name);return load(fs.existsSync(target+'.tsx')?target+'.tsx':target+'.ts');}},{filename:file});cache.set(file,m.exports);return m.exports;}
+    require:name=>{if(mocks[name])return mocks[name];if(!name.startsWith('.'))return require(name);const target=path.resolve(path.dirname(file),name);return load(fs.existsSync(target+'.tsx')?target+'.tsx':target+'.ts');}},{filename:file});cache.set(file,m.exports);return m.exports;}
 const Discard=load('components/DiscardDraftAction.tsx').default,Controls=load('components/InteractionControls.tsx'),dialogs=load('utils/appAlert.ts'),gate=load('utils/userOperation.ts');
 const Schedule=load('components/ScheduleOverlay.tsx').ScheduleOverlayProvider;
 const hosted=element=>React.createElement(Schedule,null,element);

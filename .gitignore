@@ -9,7 +9,6 @@ audit_work/
 *.log
 *.err.log
 logs/*
-!logs/perf_telemetry.jsonl
 *.jsonl
 !logs/perf_telemetry.jsonl
 *.jks
@@ -22,6 +21,7 @@ logs/*
 !.env.example
 mobile/.claude/
 mobile/.patch-work/
+deploy/packages/*.tar.gz
 **/build/
 **/.gradle/
 **/.kotlin/

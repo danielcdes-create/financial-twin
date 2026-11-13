@@ -94,8 +94,10 @@ export default function PaymentLinkScreen({api, commitment, due, amount, stateLa
       if (current === generation.current) setLoading(false);
     }
   };
+  const runRef = useRef(run);
+  useEffect(() => {runRef.current = run;});
   useEffect(() => {
-    const timer = setTimeout(() => {void run(text);}, text ? 300 : 0);
+    const timer = setTimeout(() => {void runRef.current(text);}, text ? 300 : 0);
     return () => clearTimeout(timer);
   }, [text, commitment.commitment_id, due]);
   const chosen = items.find(row => String(row.id || row.provisional_id) === selected && row.linkable !== false);

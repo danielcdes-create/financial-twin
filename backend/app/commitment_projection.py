@@ -6,7 +6,7 @@ from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from app.atomic import mongo_snapshot, with_batch_size
 from app.auth import require_session
-from app.commitments import commitment_cutoff, advance, linked_due_dates, schedule_from, historical_occurrence_conflicts
+from app.commitments import COMMITMENT_CUTOFF, commitment_cutoff, advance, linked_due_dates, schedule_from, historical_occurrence_conflicts
 from app.commitment_estimates import effective_commitments
 from app.economic_policy import amount
 from app.financial_time import civil_date, today
@@ -35,7 +35,7 @@ def _monthly_projection_impl(db, months=None, as_of: date | None = None):
     if months is not None and (isinstance(months, bool) or not isinstance(months, int) or not 1 <= months <= MAX_MONTHS):
         raise HTTPException(422, 'Escolha de 1 a 120 meses.')
     current = as_of or today()
-    cutoff = commitment_cutoff(current)
+    cutoff = COMMITMENT_CUTOFF
     first = current.replace(day=1)
     last_limit = advance(first, 'mensal', MAX_MONTHS) - timedelta(days=1)
     charges, bills, carried, warnings = [], [], [], []

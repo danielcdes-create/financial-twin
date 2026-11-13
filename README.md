@@ -257,26 +257,27 @@ Use `/docs` on the running backend for request schemas. Personal-data routes alw
 
 ## Tests and checks
 
-From `financial-app`:
+From the repository root:
 
-```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s backend\tests -v
+```bash
+./.venv/bin/python -m pip_audit -r backend/requirements.lock.txt --no-deps --disable-pip
+./.venv/bin/python -m unittest discover -s backend/tests -v
 ```
 
-From `financial-app/mobile`:
+From `mobile/`:
 
-```powershell
-.\node_modules\.bin\tsc.cmd --noEmit
-.\node_modules\.bin\expo.cmd prebuild --platform android --no-install
+```bash
+pnpm exec tsc --noEmit
+pnpm exec eslint App.tsx components utils app
+node scripts/audit-dependencies.cjs
+node scripts/run-client-tests.cjs
 ```
 
 ## Current limitations
 
 - Account balances require a user-confirmed reference amount and date; no opening balance is inferred from incomplete history. Captures without an assigned account and transfers awaiting both bank legs are flagged on the account screen. BTG Pactual, Mercado Pago wallet, and Binance currently have no linked legacy checking-account record.
 - xAI extraction requires the server-side key; no secret key is included in the Android client.
-- On 2026-09-28, the ARM64 Android 1.16.15 (versionCode 32) build completed from the short `C:\ft` build copy to avoid the Windows Ninja path limit. Only the Início dashboard rounds displayed BRL values to whole reais; other screens display cents, while stored amounts and calculations always retain cents. That APK is preserved as `mobile/artifacts/financial-twin-1.16.15.apk`.
-- On 2026-09-29, the ARM64 Android 1.16.16 (versionCode 33) build completed with the queue quarantine, cursor pages, and consistency display. Its APK is `mobile/artifacts/financial-twin-arm64.apk` (also preserved as `financial-twin-1.16.16.apk`). APK v2 signature verification passed; installation and device-level validation await an ADB connection.
-- Open Finance providers, automatic bank balances, crypto market valuation, remote sync background scheduling, category editing, AI chat/goals, and production HTTPS deployment are future work. Deterministic decision simulation is implemented in the NT-001 module.
+- Open Finance providers, automatic bank balances, crypto market valuation, remote sync background scheduling, and AI chat/goals remain out of scope for this MVP. Category/subcategory management (`docs/SUBCATEGORIES.md`), private Tailscale HTTPS production deployment on VPS (`docs/NOTA-TECNICA-DEPLOY-VPS.md`), and deterministic decision simulation (`docs/NT-001-CONFIABILIDADE-E-EVOLUCAO.md`) are implemented.
 - The review API confirms/keeps evidence separate or corrects provisional categories. Promotion remains in the new provisional ledger until a compatible, explicit account is selected; it never fabricates an `account_id` in v1.2 `transactions`.
 
 ## NT-001 reliability and decision features

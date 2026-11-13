@@ -31,12 +31,15 @@ class LoginAttempts:
     def check(self, identity, now=None):
         now = time.monotonic() if now is None else now
         with self.lock:
-            self.attempts = {k: v for k, v in self.attempts.items() if v and v[-1] > now - 60}
+            for k in list(self.attempts):
+                q = self.attempts[k]
+                while q and q[0] <= now - 60:
+                    q.popleft()
+                if not q:
+                    self.attempts.pop(k, None)
             if identity not in self.attempts and len(self.attempts) >= 1024:
                 raise HTTPException(429, 'Muitas tentativas. Aguarde um minuto.')
             queue = self.attempts.setdefault(identity, deque())
-            while queue and queue[0] <= now - 60:
-                queue.popleft()
             if len(queue) >= 10:
                 raise HTTPException(429, 'Muitas tentativas. Aguarde um minuto.', headers={'Retry-After': '60'})
             queue.append(now)

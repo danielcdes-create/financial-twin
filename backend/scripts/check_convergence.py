@@ -133,7 +133,7 @@ def run(output, readonly=False):
             call('PUT',path,body)
         with patch('app.future_commitments.today',return_value=date(2026,11,1)):
             listing=call('GET','/v1/future-commitments/obligations')
-            check('future management does not list corrected overdue obligation',not listing['items'])
+            check('future management marks corrected overdue obligation as non-editable',[item['due_date'] for item in listing['items']]==['2026-10-20'] and not listing['items'][0].get('editable'))
             context=call('GET','/v1/insights/planning-context?start=2026-11-01&end=2026-11-30')
             flow=context['suggested_flows'][0]
             check('overdue correction remains in cash planning, with original due date',flow['overdue'] and flow['original_due_date']=='2026-10-20' and flow['amount']=='-3600.13')

@@ -145,7 +145,7 @@ export function statusPalette(status: CostControlStatus): {
 }
 
 function pctChange(current: number, previous: number): number | null {
-  if (!Number.isFinite(previous) || previous === 0) return null;
+  if (!Number.isFinite(current) || !Number.isFinite(previous) || previous === 0) return null;
   return Math.round(((current - previous) / Math.abs(previous)) * 1000) / 10;
 }
 
@@ -268,12 +268,21 @@ export function resolveCostControlView(
   const comp = activeDash.comparison || dashboard?.comparison || null;
   const prevExp = Number(comp?.expenses ?? 0);
   const prevInc = Number(comp?.income ?? 0);
-  const periodEndStr = String(activeDash.period_end || dashboard?.period_end || "2026-10-26");
-  const dayOfMonth = Math.max(1, Number(periodEndStr.slice(8, 10)) || 26);
-  const curMonthNum = Number(periodEndStr.slice(5, 7)) || 10;
+  const defaultToday = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Sao_Paulo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+  const periodEndStr = String(activeDash.period_end || dashboard?.period_end || defaultToday);
+  const dayOfMonth = Math.max(1, Number(periodEndStr.slice(8, 10)) || 1);
+  const curMonthNum = Number(periodEndStr.slice(5, 7)) || 1;
   const curYearNum = Number(periodEndStr.slice(0, 4)) || 2026;
   const daysInMonth = new Date(Date.UTC(curYearNum, curMonthNum, 0)).getUTCDate() || 30;
   const prevMonthNum = curMonthNum === 1 ? 12 : curMonthNum - 1;
+  const prevYearNum = curMonthNum === 1 ? curYearNum - 1 : curYearNum;
+  const prevDaysInMonth = new Date(Date.UTC(prevYearNum, prevMonthNum, 0)).getUTCDate() || 30;
+  const prevDaysCompared = Math.min(dayOfMonth, prevDaysInMonth);
 
   const deltaAmount = curExp - prevExp;
   const deltaPct = pctChange(curExp, prevExp);
@@ -398,12 +407,12 @@ export function resolveCostControlView(
     mtd: {
       reference_date: periodEndStr,
       current_month: periodEndStr.slice(0, 7),
-      previous_month: `${curYearNum}-${String(prevMonthNum).padStart(2, "0")}`,
+      previous_month: `${prevYearNum}-${String(prevMonthNum).padStart(2, "0")}`,
       day_of_month: dayOfMonth,
       days_in_month: daysInMonth,
-      previous_days_compared: dayOfMonth,
+      previous_days_compared: prevDaysCompared,
       current_period_label: `01/${String(curMonthNum).padStart(2, "0")} a ${String(dayOfMonth).padStart(2, "0")}/${String(curMonthNum).padStart(2, "0")}`,
-      previous_period_label: `01/${String(prevMonthNum).padStart(2, "0")} a ${String(dayOfMonth).padStart(2, "0")}/${String(prevMonthNum).padStart(2, "0")}`,
+      previous_period_label: `01/${String(prevMonthNum).padStart(2, "0")} a ${String(prevDaysCompared).padStart(2, "0")}/${String(prevMonthNum).padStart(2, "0")}`,
       current_expenses: curExp,
       previous_mtd_expenses: prevExp,
       previous_full_expenses: prevExp,

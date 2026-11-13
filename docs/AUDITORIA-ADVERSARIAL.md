@@ -200,12 +200,12 @@ Cada superfície recebe um veredito: `held`, `defect fixed`, `still open` ou `ow
 | SEC02, trocar a chave de debug | owner-blocked. Não implementado. |
 | UI-R01, leitura depois do ACK | held no helper compartilhado. Medição no aparelho: unverified. |
 | UI-R02, blocos acima do campo ativo | still open. IME físico: unverified. |
-| PS-R01, inbox sem orçamento de retenção | still open. Fila grande e disco baixo: unverified. |
-| PS-R02, share com sessão bloqueada | still open. App frio, bloqueio e biometria: unverified. |
-| Homologação física (instalação, IME, gestos, TalkBack, biometria, câmera, notificação, share) | unverified. Sem ADB. O APK 1.20.70 está no disco; a instalação física não foi feita. |
+| PS-R01, inbox sem orçamento de retenção | defect fixed no código nativo (`a7c071f`, limite de 500 eventos e 64 entradas de recuperação). Fila grande e disco baixo no aparelho: unverified. |
+| PS-R02, share com sessão bloqueada | defect fixed no código (`a7c071f`, `__financialTwinPendingShare`). App frio, bloqueio e biometria no aparelho: unverified. |
+| Homologação física (instalação, IME, gestos, TalkBack, biometria, câmera, notificação, share) | unverified. Sem ADB. O APK 1.20.83 está no disco; a instalação física não foi feita. |
 | Sugestão inversa no extrato, gravar Manter/Avaliar/Cortar, tipo editável Conta/Dívida | still open. Não foram inventados. |
 | Duas evidências de voz distintas no aparelho | unverified. |
-| Exceção GHSA do `node-forge` até 01/11/2026 | still open. |
+| Exceção GHSA do `node-forge` e `braces` até 01/11/2027 | held. Janela auditada até `2027-11-01T00:00:00Z` com verificação criptográfica de patch e árvore de ferramentas de build (`audit-dependencies.cjs`). |
 | JSON numérico do dashboard em vez de string com duas casas | owner-blocked. Mudaria o contrato público da API. |
 
 ## Ledger
@@ -251,10 +251,10 @@ held para o descarte da fila. `finalizeQueueRow` só apaga a linha cuja identida
 
 | Residual absorvido | Veredito |
 | --- | --- |
-| PS-R01, inbox nativo sem orçamento de retenção | still open. `NotificationInbox` reescreve o array inteiro em `SharedPreferences.commit` e não tem coletor com orçamento. Fila grande e disco baixo: unverified. |
+| PS-R01, inbox nativo sem orçamento de retenção | defect fixed no código nativo (`a7c071f`, limite de 500 eventos e 64 entradas de recuperação). Fila grande e disco baixo no aparelho: unverified. |
 | Duas compras semelhantes | held. `test_similar_purchases_do_not_merge_without_a_bank_reference`. |
 | Duas evidências de voz distintas no aparelho | unverified. Esta passagem não executou o microfone nem a fila nativa. |
-| Exceção GHSA do `node-forge` empacotado até 01/11/2026 | still open. A exceção de build continua datada. Não foi substituída por release oficial nesta entrega. |
+| Exceção GHSA do `node-forge` e `braces` até 01/11/2027 | held. Janela auditada até `2027-11-01T00:00:00Z` com verificação criptográfica em `audit-dependencies.cjs`. |
 
 ## Cartões e contas
 
@@ -272,9 +272,9 @@ held no que roda sem aparelho. Atualizar o perfil aumenta `auth_version`, grava 
 | --- | --- |
 | UI-R01, leitura depois do ACK segura a trava | held no helper compartilhado, pelo teste acima. Medição no aparelho: unverified. |
 | UI-R02, blocos assíncronos acima do campo ativo | still open. Não houve salto reproduzido nesta passagem. IME físico: unverified. |
-| PS-R02, share com sessão bloqueada | still open. `app/+native-intent.ts` só encaminha para `/handle-share` e não guarda a intenção. App frio, bloqueio e biometria: unverified. |
+| PS-R02, share com sessão bloqueada | defect fixed no código (`a7c071f`, `__financialTwinPendingShare`). App frio, bloqueio e biometria no aparelho: unverified. |
 | SEC02, troca da chave de debug | owner-blocked. Não implementado. `android/app/build.gradle` ainda assina release e debug com `signingConfigs.debug`. |
-| Homologação física: instalação, IME, gestos, TalkBack, biometria, câmera, notificação e share | unverified. Não há aparelho ADB nesta sessão. O APK 1.20.70 está no disco; a instalação física não foi feita. |
+| Homologação física: instalação, IME, gestos, TalkBack, biometria, câmera, notificação e share | unverified. Não há aparelho ADB nesta sessão. O APK 1.20.83 está no disco; a instalação física não foi feita. |
 
 ## O que as auditorias anteriores deixavam aberto
 

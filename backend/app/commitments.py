@@ -45,7 +45,7 @@ def automatic_suggestion(paid: date, due: date, *, related: bool, amount: Decima
 def presentation_state(due: date, linked: bool, as_of: date, cutoff: date | None = None) -> str:
     """Derive a parcel state. Dates are civil dates in America/Sao_Paulo."""
     if cutoff is None:
-        cutoff = commitment_cutoff()
+        cutoff = commitment_cutoff(as_of)
     if linked:
         return 'Pago vinculado'
     if due < cutoff:
@@ -61,7 +61,7 @@ def pending_kind(due: date, linked: bool, as_of: date, cutoff: date | None = Non
     Today only chooses the label. Vencida is before today; a_vencer is today or later.
     """
     if cutoff is None:
-        cutoff = commitment_cutoff()
+        cutoff = commitment_cutoff(as_of)
     if linked or due < cutoff:
         return None
     return 'vencida' if due < as_of else 'a_vencer'
@@ -286,8 +286,9 @@ def next_occurrence_date(item):
 
 
 def occurrence_already_linked(item, due_date, paid_date):
+    next_due = as_date(item["next_due_date"]).isoformat() if item.get("next_due_date") else None
     for link in item.get("linked_transactions", []):
-        if link.get("due_date") and str(link["due_date"])[:10] == due_date:
+        if link.get("due_date") and str(link["due_date"])[:10] in {due_date, next_due}:
             return True
         # Old payment-only links do not prove which occurrence was settled.
         # Preserve them and ask for review instead of assigning one by inference.
@@ -373,7 +374,7 @@ def pending_rows(item: dict, as_of: date, cutoff: date | None = None) -> list[di
     if item.get('status') != 'ativo' or historical_occurrence_conflicts(item):
         return []
     if cutoff is None:
-        cutoff = commitment_cutoff()
+        cutoff = commitment_cutoff(as_of)
     linked = linked_due_dates(item)
     rows = []
     for part in schedule(item, 600):

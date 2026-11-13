@@ -42,10 +42,16 @@ def card_labels(db, card_ids):
             valid.append(ObjectId(str(item)))
     if not valid:
         return {}
-    cards = {str(row['_id']): row for row in db.accounts.find({'_id': {'$in': valid}, 'tipo': 'cartao_credito'})}
+    try:
+        cards = {str(row['_id']): row for row in db.accounts.find({'_id': {'$in': valid}, 'tipo': 'cartao_credito'})}
+    except TypeError:
+        return {}
     if not cards:
         return {}
-    metas = {row['_id']: row for row in db.account_profiles.find({'_id': {'$in': [f'card-profile:{identity}' for identity in cards]}})}
+    try:
+        metas = {row['_id']: row for row in db.account_profiles.find({'_id': {'$in': [f'card-profile:{identity}' for identity in cards]}})}
+    except TypeError:
+        metas = {}
     labels = {}
     for identity, card in cards.items():
         item = card_item(card, metas.get(f'card-profile:{identity}', {}))
@@ -57,7 +63,10 @@ def plan_card_labels(db, plan_ids):
     keys = [str(item) for item in plan_ids if item not in (None, '')]
     if not keys:
         return {}
-    links = list(db.installment_card_links.find({'_id': {'$in': keys}}))
+    try:
+        links = list(db.installment_card_links.find({'_id': {'$in': keys}}))
+    except TypeError:
+        return {}
     names = card_labels(db, [row.get('card_id') for row in links])
     return {str(row['_id']): names.get(str(row.get('card_id') or '')) for row in links if names.get(str(row.get('card_id') or ''))}
 

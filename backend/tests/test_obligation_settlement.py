@@ -96,7 +96,8 @@ class ObligationSettlementTests(unittest.TestCase):
         cursor = MagicMock()
         cursor.sort.return_value.skip.return_value.limit.return_value = []
         db.commitments.find.return_value = cursor
-        listed = list_commitments(limit=1000, offset=0, db=db)
+        with patch("app.financial_time.today", return_value=date(2026, 10, 15)):
+            listed = list_commitments(limit=1000, offset=0, db=db)
         self.assertEqual(listed["commitment_cutoff_date"], "2026-10-01")
 
     def test_parcelado_sentinel_accepts_only_the_concluded_counter(self):

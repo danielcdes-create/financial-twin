@@ -3,6 +3,8 @@
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
 const root=path.resolve(process.argv[2]||path.join(__dirname,'..'));
 const config=JSON.parse(fs.readFileSync(path.join(root,'app.json'),'utf8')).expo;
+const pkgPath=path.join(root,'package.json');
+if(fs.existsSync(pkgPath)){const pkg=JSON.parse(fs.readFileSync(pkgPath,'utf8'));if(pkg.version!==config.version){pkg.version=config.version;fs.writeFileSync(pkgPath,JSON.stringify(pkg,null,2)+'\n');}}
 const {setVersionCode,setVersionName}=require(path.join(root,'node_modules/@expo/config-plugins/build/android/Version.js'));
 const gradle=path.join(root,'android/app/build.gradle');
 assert.ok(fs.existsSync(gradle),'Run Expo prebuild before syncing the native version.');

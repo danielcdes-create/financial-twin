@@ -308,7 +308,7 @@ export function moneyScope(value: number): string {
   return `R$ ${sign}${whole},${String(absolute % 100).padStart(2, '0')}`;
 }
 
-export function sumAmounts(values: Array<number | string>): number {
+export function sumAmounts(values: (number | string)[]): number {
   const cents = values.reduce((total: number, value) => total + Math.round(Number(value) * 100), 0);
   return cents / 100;
 }
@@ -533,7 +533,7 @@ function seriesAmount(value: number): string {
 }
 
 /** Variable bills use the same Conta bucket as the list. The month total stays put. */
-export function alignProjectionSeries<T extends {subscriptions?: string; accounts?: string; items?: Array<{category?: string; estimated?: boolean; amount?: string}>}>(months: T[]): T[] {
+export function alignProjectionSeries<T extends {subscriptions?: string; accounts?: string; items?: {category?: string; estimated?: boolean; amount?: string}[]}>(months: T[]): T[] {
   return months.map(row => {
     let moved = 0;
     const items = (row.items || []).map(entry => {
@@ -548,7 +548,7 @@ export function alignProjectionSeries<T extends {subscriptions?: string; account
   });
 }
 
-export function projectionFigures(data: {items: Array<{total?: string; installments?: string; subscriptions?: string; other?: string; bill_balance?: string}>; summary?: {this_month?: string | number | null; overdue?: string | number | null; upcoming?: string | number | null; next_12?: string | number | null; installments?: string | number | null; subscriptions?: string | number | null; other?: string | number | null; bill_balance?: string | number | null; window_months?: string | number | null} | null}) {
+export function projectionFigures(data: {items: {total?: string; installments?: string; subscriptions?: string; other?: string; bill_balance?: string}[]; summary?: {this_month?: string | number | null; overdue?: string | number | null; upcoming?: string | number | null; next_12?: string | number | null; installments?: string | number | null; subscriptions?: string | number | null; other?: string | number | null; bill_balance?: string | number | null; window_months?: string | number | null} | null}) {
   const summary = data.summary;
   if (summary && summary.this_month != null) {
     return {
@@ -579,7 +579,7 @@ export function projectionFigures(data: {items: Array<{total?: string; installme
 }
 
 /** Small categories stay visible beside a dominant series. Shares are display-only. */
-export function readableShares(parts: Array<{key: string; amount: number}>): Array<{key: string; share: number}> {
+export function readableShares(parts: {key: string; amount: number}[]): {key: string; share: number}[] {
   const positive = parts.filter(part => part.amount > 0);
   if (!positive.length) return parts.map(part => ({key: part.key, share: 0}));
   const minimum = 0.08;

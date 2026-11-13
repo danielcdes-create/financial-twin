@@ -56,7 +56,7 @@ export default function ProvisionalReview({api,money,onUpdated,initialItem,initi
     catch(error:any){if(valid()&&current===optionsGeneration.current)setOptionsError(error.message||'Não foi possível carregar as sugestões.');}
     finally{if(valid()&&current===optionsGeneration.current)setOptionsLoading(false);}
   };
-  const [accountOptions,setAccountOptions]=useState<any[]>(()=>initialAccounts||[]);
+  const [fetchedAccountOptions,setFetchedAccountOptions]=useState<any[]>(()=>initialAccounts||[]); const accountOptions=initialAccounts?.length?initialAccounts:fetchedAccountOptions;
   const [selected,setSelected]=useState<any>(initialItem||null),[draft,setDraft]=useState<Record<string,string>>({});
   const [loading,setLoading]=useState(false),[saving,setSaving]=useState(false);
   const [resumable,setResumable]=useState<ReturnType<typeof parseDraft>>(null);
@@ -123,7 +123,7 @@ export default function ProvisionalReview({api,money,onUpdated,initialItem,initi
         if(version!==generation.current)return;
         setResumable(local);
         setPendingCommands(commands);
-        if(captures.status==='fulfilled'){const nextPage={total:captures.value.total||0,next_cursor:captures.value.next_cursor||null};setItems(nextItems);setPage(nextPage);if(typeof api==='function'){const prev=provisionalListCache.get(api);provisionalListCache.set(api,{items:nextItems,page:nextPage,options:available.status==='fulfilled'&&available.value!==null?(available.value||{}):(prev?.options||options),hasOptions:hasOptionsRef.current||(available.status==='fulfilled'&&available.value!==null),at:Date.now()});}}
+        if(captures.status==='fulfilled'){const nextPage={total:captures.value.total||0,next_cursor:captures.value.next_cursor||null};setItems(nextItems);setPage(nextPage);if(typeof api==='function'){const prev=provisionalListCache.get(api);provisionalListCache.set(api,{items:nextItems,page:nextPage,options:available.status==='fulfilled'&&available.value!==null?(available.value||{}):(prev?.options||{}),hasOptions:hasOptionsRef.current||(available.status==='fulfilled'&&available.value!==null),at:Date.now()});}}
         if(available.status==='fulfilled'){if(available.value!==null){hasOptionsRef.current=true;setOptions(available.value||{});}setOptionsError('');}
         else setOptionsError(available.reason?.message||'Não foi possível carregar as sugestões.');
         if(captures.status==='rejected'&&(available.status==='rejected'||hasOptionsRef.current||!shouldLoadOptions)&&!local)throw captures.reason;
@@ -132,7 +132,7 @@ export default function ProvisionalReview({api,money,onUpdated,initialItem,initi
     finally{if(version===generation.current)setLoading(false)}
   },[api,db,initialItem,storedDraft]);
   useEffect(()=>{const lifetime=generation,task=setTimeout(()=>load(),0);return()=>{clearTimeout(task);lifetime.current++}},[load]);
-  useEffect(()=>{if(initialAccounts?.length){setAccountOptions(initialAccounts);return;}if(!selected&&!initialItem)return;let active=true;void api('/v1/account-positions').then(result=>{if(active)setAccountOptions(result.items||[])}).catch(()=>{});return()=>{active=false}},[api,initialAccounts,initialItem,selected]);
+  useEffect(()=>{if(initialAccounts?.length||(!selected&&!initialItem))return;let active=true;void api('/v1/account-positions').then(result=>{if(active)setFetchedAccountOptions(result.items||[])}).catch(()=>{});return()=>{active=false}},[api,initialAccounts,initialItem,selected]);
   useEffect(()=>{
     if(!selected?.provisional_id||!Object.keys(draft).length||conflict)return;
     if(persistedDraft.current!==selected.provisional_id&&!Object.entries(draft).some(([field,value])=>value!==(selectedSourceDraft[field]||'')))return;

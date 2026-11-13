@@ -1,4 +1,4 @@
-import React, {useLayoutEffect, useMemo, useState} from 'react';
+import React, {useLayoutEffect, useMemo, useRef, useState} from 'react';
 import {ScrollView, StyleSheet, Text, View} from 'react-native';
 import {Pressable, TextInput} from './InteractionControls';
 import {financialDateLabel} from '../utils/classification';
@@ -6,10 +6,9 @@ import {creationId} from '../utils/commitmentCreate';
 import {Alert} from '../utils/appAlert';
 import FutureCommitmentEditor from './FutureCommitmentEditor';
 import PaymentLinkScreen from './PaymentLinkScreen';
-import InstallmentLabelEditor from './InstallmentLabelEditor';
 import {
   amountText, cardLine2, civilToday, closureWarning, commitmentCutoff, commitmentFigures, decisionFilter, dedupeCardLabel, formatCharge, frequencyLabel, futureRemovalLabel, groupObligationSeries, kindLabel,
-  inactiveLine, needsLinkAction, paymentMethodLabel, reconcileCharge, reconcileMeta, reinforcesClosure, renewalLabel, restanteCopy, settledRows, sumAmounts, type CommitmentFigures, type CommitmentFilter, type OccurrenceState,
+  inactiveLine, needsLinkAction, paymentMethodLabel, reconcileCharge, reconcileMeta, reinforcesClosure, renewalLabel, restanteCopy, settledRows, sumAmounts, type CommitmentFigures, type CommitmentFilter,
 } from '../utils/commitmentPresentation';
 import {headingForInstallment, headingForManaged, settlementLabel} from '../utils/commitmentProfile';
 import {useLocalBack} from '../utils/localBack';
@@ -91,7 +90,7 @@ function cardForCharge(cards: Card[], entry: {source_ref?: string}): Card | null
 export default function CommitmentBoard({width, managedLoaded, items, legacy, obligations, money, cardLabelFor, accountLabelFor = () => '', cardChoices = [], accountChoices = [], api, onEdit, onCommitLink, onUpdated, summary, chart, editing = false, paymentStamp = '', linkUndo = null, onUndoLink, monthOpen = false, bindCharge}: {
   width: number; managedLoaded: boolean; items: any[]; legacy: any[]; obligations: any[]; money: (value: number) => string;
   cardLabelFor: (id: string) => string | undefined; accountLabelFor?: (id: string) => string;
-  cardChoices?: Array<{value: string; label: string}>; accountChoices?: Array<{value: string; label: string}>;
+  cardChoices?: {value: string; label: string}[]; accountChoices?: {value: string; label: string}[];
   api: Api; onEdit: (item: any) => void;
   onCommitLink: (item: any, transaction: any) => Promise<boolean | void> | boolean | void;
   onUpdated: () => Promise<void>; editing?: boolean;
@@ -111,14 +110,12 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
   const [filter, setFilter] = useState<CommitmentFilter>('Tudo');
   const [showCompleted, setShowCompleted] = useState(false);
   const [openKey, setOpenKey] = useState<string | null>(null);
-  const [actionsKey, setActionsKey] = useState<string | null>(null);
   const [confirmKey, setConfirmKey] = useState<string | null>(null);
-  const [armedKey, setArmedKey] = useState<string | null>(null);
   const [closeKey, setCloseKey] = useState<string | null>(null);
   const [scheduleKey, setScheduleKey] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   const [collapsedYears, setCollapsedYears] = useState<Record<string, boolean>>({});
-  const [undoOffers, setUndoOffers] = useState<Array<{key: string; source: 'obligation' | 'managed' | 'installment'; title: string; rows: Array<{identity: string; delete_request_id: string}>}>>([]);
+  const [undoOffers, setUndoOffers] = useState<{key: string; source: 'obligation' | 'managed' | 'installment'; title: string; rows: {identity: string; delete_request_id: string}[]}[]>([]);
   const [busy, setBusy] = useState(false);
   const captureScope = useAsyncScope();
   const [reconcileAll, setReconcileAll] = useState(false);
@@ -169,17 +166,15 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
   useLocalBack(() => {
     if (linkRequest) {setLinkRequest(null); return;}
     if (scheduleKey) {setScheduleKey(null); return;}
-    if (confirmKey) {setConfirmKey(null); setArmedKey(null); return;}
+    if (confirmKey) {setConfirmKey(null); return;}
     if (closeKey) {setCloseKey(null); return;}
     if (openKey) setOpenKey(null);
   }, Boolean(linkRequest || scheduleKey || confirmKey || closeKey || openKey), 20);
-  const opened = cards.find(card => card.key === openKey) || null;
   useLayoutEffect(() => {
     bindCharge?.(entry => {
       const card = cardForCharge(cards, entry);
       if (!card) return;
       setScheduleKey(null);
-      setActionsKey(null);
       setOpenKey(card.key);
     });
   }, [bindCharge, cards]);
@@ -188,7 +183,7 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
     if (busy || card.source !== 'obligation' || !captureScope()()) return;
     const valid = captureScope();
     setBusy(true);
-    const done: Array<{identity: string; delete_request_id: string}> = [];
+    const done: {identity: string; delete_request_id: string}[] = [];
     try {
       for (const item of card.payload.items) {
         const path = `/v1/future-commitments/obligation/${encodeURIComponent(item.id)}`;
@@ -209,7 +204,7 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
       Alert.alert('Não foi possível concluir a remoção', failure?.message || 'A remoção parou. O que já foi retirado pode ser desfeito.');
     } finally {if (valid()) setBusy(false);}
   };
-  const rememberUndo = (key: string, source: 'obligation' | 'managed' | 'installment', title: string, rows: Array<{identity: string; delete_request_id: string}>) => {
+  const rememberUndo = (key: string, source: 'obligation' | 'managed' | 'installment', title: string, rows: {identity: string; delete_request_id: string}[]) => {
     setUndoOffers(current => {
       const previous = current.find(item => item.key === key);
       const merged = [...(previous?.rows || [])];
@@ -217,7 +212,7 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
       return [...current.filter(item => item.key !== key), {key, source, title, rows: merged}];
     });
   };
-  const undoOffer = async (offer: {key: string; source: 'obligation' | 'managed' | 'installment'; title: string; rows: Array<{identity: string; delete_request_id: string}>}) => {
+  const undoOffer = async (offer: {key: string; source: 'obligation' | 'managed' | 'installment'; title: string; rows: {identity: string; delete_request_id: string}[]}) => {
     if (busy || !offer.rows.length || !captureScope()()) return;
     const valid = captureScope();
     setBusy(true);
@@ -537,12 +532,17 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
     const saved = await onCommitLink(card.payload, transaction);
     if (saved !== false) setLinkRequest(null);
   };
+  const overlayHandlers = useRef({api, money, onEdit, onUndoLink, onUpdated, askClose, askRemove, confirmSelection, detailBody, scheduleView});
+  useLayoutEffect(() => {
+    overlayHandlers.current = {api, money, onEdit, onUndoLink, onUpdated, askClose, askRemove, confirmSelection, detailBody, scheduleView};
+  });
   useLayoutEffect(() => {
     if (editing) return;
     if (!openKey && !linkRequest && !paidTarget && !scheduleKey) {
       scheduleOverlay.clear();
       return;
     }
+    const h = overlayHandlers.current;
     const opened = openKey ? cards.find(item => item.key === openKey) : null;
     const linking = linkRequest ? cards.find(item => item.key === linkRequest.cardKey) : null;
     const paid = paidTarget ? cards.map(card => card.payload).filter(item => item?.commitment_id && paidTarget.startsWith(`${item.commitment_id}:`)).flatMap(item => (item.linked_transactions || []).map((link: any) => ({item, link}))).find(entry => paidTarget === `${entry.item.commitment_id}:${entry.link.transaction_id || entry.link.provisional_id}`) : null;
@@ -554,12 +554,12 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
         title: 'Vincular pagamento',
         scroll: false,
         onClose: () => setLinkRequest(null),
-        body: <PaymentLinkScreen api={api} commitment={subject} due={linkRequest.due} amount={linkRequest.amount} stateLabel={linkRequest.state} money={money} preferredId={linkRequest.preferredId} disabled={busy} lookup={!managedLink} onConfirm={transaction => {void confirmSelection(transaction);}}/>,
+        body: <PaymentLinkScreen api={h.api} commitment={subject} due={linkRequest.due} amount={linkRequest.amount} stateLabel={linkRequest.state} money={h.money} preferredId={linkRequest.preferredId} disabled={busy} lookup={!managedLink} onConfirm={transaction => {void h.confirmSelection(transaction);}}/>,
       });
     } else if (paid) {
-      scheduleOverlay.setPanel({title: 'Pagamento vinculado', onClose: () => setPaidTarget(null), body: <LinkedPaymentSheet item={paid.item} link={paid.link} api={api} money={money} onChanged={async () => {setPaidTarget(null); await onUpdated();}} onSwap={() => setLinkRequest({cardKey: `managed:${paid.item.commitment_id}`, due: String(paid.link.due_date || paid.item.next_due_date || '').slice(0, 10), amount: Number(paid.link.actual_amount || paid.item.amount || 0), state: 'Pago vinculado', origin: 'detail', swap: {item: paid.item, link: paid.link}})}/>});
+      scheduleOverlay.setPanel({title: 'Pagamento vinculado', onClose: () => setPaidTarget(null), body: <LinkedPaymentSheet item={paid.item} link={paid.link} api={h.api} money={h.money} onChanged={async () => {setPaidTarget(null); await h.onUpdated();}} onSwap={() => setLinkRequest({cardKey: `managed:${paid.item.commitment_id}`, due: String(paid.link.due_date || paid.item.next_due_date || '').slice(0, 10), amount: Number(paid.link.actual_amount || paid.item.amount || 0), state: 'Pago vinculado', origin: 'detail', swap: {item: paid.item, link: paid.link}})}/>});
     } else if (scheduled) {
-      const view = scheduleView(scheduled);
+      const view = h.scheduleView(scheduled);
       scheduleOverlay.show({
         title: scheduled.title,
         rows: view.entries,
@@ -576,27 +576,27 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
       const canClose = !opened.completed && (opened.source !== 'managed' || opened.payload.status === 'ativo');
       const menu = opened.completed ? [] : [
         ...(canEnd ? [{label: 'Terminar em', accessibilityLabel: `Terminar ${opened.title} em`, onPress: () => {const stored = String(opened.payload.end_date || '').slice(0, 10); setEndMonth(stored.length === 10 ? `${stored.slice(5, 7)}/${stored.slice(0, 4)}` : ''); setEndEdit(opened.key);}}] : []),
-        ...(canClose ? [{label: 'Encerrar', accessibilityLabel: `Encerrar ${opened.source === 'managed' ? opened.payload.name : opened.title}`, onPress: () => opened.source === 'managed' ? askClose(opened) : void askRemove(opened, 'encerrar')}] : []),
-        {label: 'Remover parcelas futuras', accessibilityLabel: `Remover parcelas futuras de ${opened.title}`, onPress: () => {void askRemove(opened);}},
+        ...(canClose ? [{label: 'Encerrar', accessibilityLabel: `Encerrar ${opened.source === 'managed' ? opened.payload.name : opened.title}`, onPress: () => opened.source === 'managed' ? h.askClose(opened) : void h.askRemove(opened, 'encerrar')}] : []),
+        {label: 'Remover parcelas futuras', accessibilityLabel: `Remover parcelas futuras de ${opened.title}`, onPress: () => {void h.askRemove(opened);}},
         {label: 'Editar parcelas futuras', accessibilityLabel: `Editar futuras de ${opened.title}`, onPress: () => setFutureEdit(opened.key)},
       ];
       scheduleOverlay.setPanel({
         title: `Detalhe de ${opened.title}`,
-        onClose: () => {setOpenKey(null); setActionsKey(null); setCloseKey(null); setPaidOpen(false); setFutureEdit(null); setProfileEdit(null); setEndEdit(null);},
-        onEdit: opened.completed ? undefined : () => setProfileEdit(opened.key),
+        onClose: () => {setOpenKey(null); setCloseKey(null); setPaidOpen(false); setFutureEdit(null); setProfileEdit(null); setEndEdit(null);},
+        onEdit: opened.source === 'managed' ? () => {setOpenKey(null); h.onEdit(opened.payload);} : opened.completed ? undefined : () => setProfileEdit(opened.key),
         menuLabel: `Mais ações de ${opened.title}`,
         menu,
         scrollToken: paymentStamp,
-        body: detailBody(opened),
+        body: h.detailBody(opened),
       });
     }
     return () => scheduleOverlay.clear();
-  }, [editing, scheduleKey, openKey, paidTarget, paidOpen, futureEdit, profileEdit, endEdit, endMonth, linkRequest, scheduleSegment, collapsedYears, cards, busy, paymentStamp, linkUndo]);
+  }, [editing, scheduleKey, openKey, paidTarget, paidOpen, futureEdit, profileEdit, endEdit, endMonth, linkRequest, scheduleSegment, collapsedYears, cards, busy, paymentStamp, linkUndo, scheduleOverlay]);
   const cardView = (card: Card) => {
     const item = card.payload;
     const figures = card.figures;
     const copy = restanteCopy(figures, money);
-    const open = () => {setScheduleKey(null); setActionsKey(null); setOpenKey(card.key);};
+    const open = () => {setScheduleKey(null); setOpenKey(card.key);};
     const charge = formatCharge(figures.chargeAmount, figures.suffix, figures.estimated && !figures.chargeMuted, money);
     if (card.completed) {
       const when = card.source === 'managed' ? (item.status === 'cancelado' ? item.cancelled_at || item.updated_at : item.updated_at) : item.completed_at;

@@ -49,31 +49,29 @@ Expo ships breaking changes every SDK release. APIs you remember are likely rena
 
 ## Commands
 
-Use `bunx` instead of `npx` if the project uses bun (`bun.lock` present).
+Este projeto utiliza `pnpm` (`nodeLinker: hoisted` em `pnpm-workspace.yaml`).
 
 ```bash
-npx expo install <package>  # ALWAYS use instead of npm/yarn/pnpm/bun add — resolves SDK-compatible versions
-npx expo start              # start the dev server
-npx expo lint               # lint
-npx tsc --noEmit            # typecheck
-npx expo-doctor             # diagnose dependency and config issues
-npx expo install --fix      # fix incompatible package versions
+pnpm exec expo install <package>         # instala versões compatíveis com o SDK do Expo
+pnpm start                               # inicia o servidor de desenvolvimento
+pnpm exec eslint App.tsx components utils app  # lint completo sem warnings/erros
+pnpm exec tsc --noEmit                   # typecheck TypeScript
+pnpm exec expo install --check           # verifica compatibilidade das dependências com o SDK
+node scripts/audit-dependencies.cjs      # gate de segurança de dependências e patches
+node scripts/run-client-tests.cjs        # executa toda a suíte de regressão do cliente
 ```
 
-Run lint and typecheck before declaring any task done.
+Execute lint, typecheck e `node scripts/run-client-tests.cjs` antes de concluir qualquer alteração.
 
 ## Navigation & Routing
 
-- Use **Expo Router** for all navigation. Routes live in `src/app/` — every file there is a screen, `_layout.tsx` files define navigators. Keep non-route code (components, hooks, utils) outside `src/app/`.
-- Import `Link`, `router`, and `useLocalSearchParams` from `expo-router`.
+- As rotas do **Expo Router** ficam em `app/` (`app/index.tsx`, `app/+native-intent.ts`, `app/handle-share.tsx`, `app/compromissos/mes/[month].tsx`) e a composição principal das abas/telas fica em `App.tsx`, com componentes em `components/` e utilitários em `utils/`.
+- **Não** mova a árvore de rotas para `src/app/`.
 - Docs: https://docs.expo.dev/router/introduction.md
 
-## Building with EAS
+## Building with EAS / Script Local
 
-O release privado deste workspace também usa `scripts/build-android.ps1`. No Windows, o caminho longo do checkout pode fazer Ninja falhar com `Filename longer than 260 characters`; em 2026-10-03 esse erro reapareceu. A cópia física curta `C:\ft` é usada para builds locais. Antes de reutilizá-la, preserve diferenças existentes, sincronize as fontes pretendidas e verifique versões das dependências. Passe `-ProjectDirectory C:\ft -OutputDirectory <artifacts do checkout>` ao script. Confira a assinatura, a versão e as fontes do mapa do bundle contra o checkout original antes de anunciar o APK. Não apresente uma cópia antiga como a correção atual.
-
-Use EAS to build, sign, and submit the app in the cloud (`eas build`, `eas submit`) and to ship over-the-air updates (`eas update`) — no local Xcode or Android Studio required. Run EAS CLI as `bunx eas-cli <command>` in Bun projects, or `npx eas-cli@latest <command>` otherwise; substitute that for bare `eas` in docs examples.
-Docs: https://docs.expo.dev/eas/index.md
+O release privado deste workspace usa `scripts/build-android.ps1`. No Windows, o caminho longo do checkout pode fazer Ninja falhar com `Filename longer than 260 characters`; em 2026-10-03 esse erro reapareceu. A cópia física curta `C:\ft` é usada para builds locais. Antes de reutilizá-la, preserve diferenças existentes, sincronize as fontes pretendidas e verifique versões das dependências. Passe `-ProjectDirectory C:\ft -OutputDirectory <artifacts do checkout>` ao script. Confira a assinatura, a versão e as fontes do mapa do bundle contra o checkout original antes de anunciar o APK. Não apresente uma cópia antiga como a correção atual.
 
 ## Rules
 

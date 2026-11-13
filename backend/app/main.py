@@ -247,7 +247,8 @@ async def invalidate_reference_data(request: Request, call_next):
         request.method in {"POST", "PUT", "PATCH", "DELETE"}
         and path != "/v1/capture-batches/file-status"
         and not path.startswith("/v1/telemetry")
-        and not path.endswith(("/preview", "/review"))
+        and not path.endswith("/preview")
+        and path != "/v1/platforms/review"
     )
     mutates_dashboard = is_write and path.startswith((
         "/v1/commitment-profile", "/v1/capture-batches", "/v1/movements",
@@ -858,7 +859,7 @@ def dashboard_overview(period:Literal["month","3m","6m","12m","year","all"]="mon
         end=month_end or local_today()
         month_begin=month_start or end.replace(day=1)
         year_begin=year_start or end.replace(month=1,day=1)
-        snapshot=snapshot_for(reading,[(period,None,None),("year",year_begin,end),("month",month_begin,end)]) if isinstance(reading,(Database,_SessionDatabase)) else (list(with_batch_size(reading.transactions.find({},PROJECTION), 2000).limit(0)),list(with_batch_size(reading.provisional_transactions.find({'status':'confirmed'},PROJECTION), 2000)))
+        snapshot=snapshot_for(reading,[(period,None,None),("year",year_begin,end),("month",month_begin,end),("6m",None,end)]) if isinstance(reading,(Database,_SessionDatabase)) else (list(with_batch_size(reading.transactions.find({},PROJECTION), 2000).limit(0)),list(with_batch_size(reading.provisional_transactions.find({'status':'confirmed'},PROJECTION), 2000)))
         forecast=dashboard_forecast(reading, snapshot=snapshot)
         selected_view=_dashboard(period,None,None,reading,snapshot,forecast)
         if period=="year" and selected_view.get("period_start")==year_begin.isoformat() and (selected_view.get("period_end") or "")<=end.isoformat():
@@ -1052,6 +1053,7 @@ def update_transaction_review(transaction_id:str, update:TransactionReviewUpdate
         resolved_count=resolve_pending_reviews_for_transaction(db, object_id, now,session) if update.status_revisao=="validado" else 0
     if not changed:
         return {"item":with_merchant_name(item,db),"changed":False,"resolved_review_count":resolved_count}
+    dashboard_snapshot_cache.invalidate()
     return {"item":with_merchant_name(db.transactions.find_one({"_id":object_id}),db),"changed":True,"resolved_review_count":resolved_count}
 
 CLASSIFICATION_FIELDS=("tipo","natureza","categoria","subcategoria","metodo_pagamento","fluxo","competencia","localidade","localidade_contexto","status_conciliacao","detalhe")
@@ -1347,7 +1349,8 @@ def _update_transaction_classification(transaction_id:str, update:TransactionCla
     if clear_supplier: supplier_name=None
     platform_name=changes.pop("plataforma",None)
     user_cleared=set(item.get("user_cleared_fields") or [])
-    clear_platform=platform_name=='' and (any(key in item for key in ('platform_id','plataforma')) or 'plataforma' not in user_cleared)
+    has_platform_context=any(key in item for key in ('platform_id','plataforma')) or bool(platform_identity(item.get("estabelecimento_original") or item.get("descricao_original"))) or 'plataforma' in (item.get('historical_prefill_fields') or [])
+    clear_platform=platform_name=='' and has_platform_context
     if changes.get("localidade"): changes["localidade"]=canonical_distinct(db,"localidade",changes["localidade"])
     validate_signed_flow({**item,**changes})
     if apply_similar_classification:
@@ -2042,7 +2045,8 @@ def _atomic_update_provisional(provisional_id:str, update:ProvisionalUpdate, db=
         if platform_unsets:
             unset_values.update(platform_unsets);before['plataforma']=previous_platform
             taxonomy_mutated=True
-        if 'plataforma' not in user_cleared:
+        has_platform_context=bool(platform_unsets or previous_platform or platform_identity(item.get("merchant_raw")) or 'plataforma' in (item.get('historical_prefill_fields') or []))
+        if has_platform_context and 'plataforma' not in user_cleared:
             user_cleared.add('plataforma')
             changed['user_cleared_fields']=sorted(user_cleared)
             taxonomy_mutated=True
@@ -2057,7 +2061,8 @@ def _atomic_update_provisional(provisional_id:str, update:ProvisionalUpdate, db=
         unset_values.update({"merchant_id":"","merchant_name":""})
         before["vendedor"]=previous_vendor
         taxonomy_mutated=True
-    if clear_supplier and nature!="TRANSFERENCIA" and "vendedor" not in user_cleared:
+    has_vendor_context=bool(item.get("merchant_id") or item.get("merchant_name") or item.get("vendedor") or previous_vendor or 'vendedor' in (item.get('historical_prefill_fields') or []))
+    if clear_supplier and nature!="TRANSFERENCIA" and has_vendor_context and "vendedor" not in user_cleared:
         user_cleared.add("vendedor")
         changed["user_cleared_fields"]=sorted(user_cleared)
         taxonomy_mutated=True

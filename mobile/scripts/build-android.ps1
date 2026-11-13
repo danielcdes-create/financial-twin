@@ -135,7 +135,7 @@ try {
                 sha256 = $fileHash
                 size_bytes = $fileSize
                 published_at = $publishedAt
-                download_path = "/apk"
+                download_url = "/v1/app-update/apk"
             }
             
             $jsonString = $manifestData | ConvertTo-Json

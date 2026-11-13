@@ -118,7 +118,7 @@ export default function StatementSearch({api, commitment, suggestionIds, money, 
       if (active && current === generation.current) Alert.alert('Não foi possível consultar o extrato', error.message);
     }).finally(() => {if (active && current === generation.current) setLoading(false);});
     return () => {active = false;};
-  }, [searchPath]);
+  }, [api, searchPath]);
   const hidden = new Set(suggestionIds);
   const visible = items.filter(item => !hidden.has(String(item.id || item.provisional_id || '')));
   const update = (key: keyof Filters, value: string) => setFilters(current => ({...current, [key]: value}));

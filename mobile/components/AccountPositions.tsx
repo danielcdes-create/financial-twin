@@ -12,6 +12,7 @@ import {useAsyncScope} from '../utils/useAsyncScope';
 import {parseMoneyInput} from '../utils/moneyInput';
 import {maskCivilDate, parseCivilDate} from '../utils/formMask';
 import {protectUnsavedBack,useLocalBack} from '../utils/localBack';
+import {civilToday} from '../utils/commitmentPresentation';
 
 type Position = AccountProfile & {balance: number | null; balance_reference?: number | null; balance_as_of?: string; balance_reference_date?: string | null; balance_reference_token?:string; movement_count: number;
   unassigned_capture_count: number; pending_transfer_count: number; legacy_account_ambiguous?: boolean};
@@ -223,7 +224,7 @@ export default function AccountPositions({api, money, onUpdated, onOpen}: Props)
         </Pressable>
         <Text style={s.meta}>{item.tipo === 'criptoativos' ? 'Equivalente em BRL informado por você · ' : ''}
           {item.balance_as_of ? `Referência: ${referenceLabel(item)} · ${item.movement_count} lançamento(s) após a referência` : 'Sem saldo de referência'}</Text>
-        {item.tipo === 'criptoativos' && Boolean(item.balance_reference_date || item.balance_as_of) && (Date.now() - Date.parse(String(item.balance_reference_date || item.balance_as_of))) > 30 * 86400000 && <Text style={s.warning}>Referência de criptoativos com mais de 30 dias. Atualize o saldo equivalente em BRL.</Text>}
+        {item.tipo === 'criptoativos' && Boolean(item.balance_reference_date || item.balance_as_of) && (Date.parse(`${civilToday()}T23:59:59Z`) - Date.parse(String(item.balance_reference_date || item.balance_as_of))) > 30 * 86400000 && <Text style={s.warning}>Referência de criptoativos com mais de 30 dias. Atualize o saldo equivalente em BRL.</Text>}
         {item.unassigned_capture_count > 0 && <Text style={s.warning}>{item.unassigned_capture_count} captura(s) sem conta indicada podem alterar este saldo.</Text>}
         {item.pending_transfer_count > 0 && <Text style={s.warning}>{item.pending_transfer_count} transferência(s) aguardam conciliação. O saldo inclui essas movimentações informadas.</Text>}
         {item.legacy_account_ambiguous && <Text style={s.warning}>Há mais de uma conta histórica deste banco. Os lançamentos importados não foram somados automaticamente a este saldo.</Text>}

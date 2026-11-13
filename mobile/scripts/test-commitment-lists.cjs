@@ -820,36 +820,41 @@ async function renderRedesign() {
   });
 
   await check('detail-open', async () => {
-    const item = {commitment_id: 'energy', name: 'Energia', revision: 1, kind: 'assinatura', purchase_date: '2026-09-10', next_due_date: '2026-10-10', amount: 178.8, amount_mode: 'last_three_bills', amount_estimate: {requires_review: false}, frequency: 'mensal', payment_method: 'debito', renewal_status: 'automatica', status: 'ativo', schedule: [{due_date: '2026-10-10'}], linked_transactions: []};
-    const api = async requestPath => requestPath === '/v1/commitments' ? {items: [item]} : {items: []};
-    await act(async () => {renderer = create(screen(api));});
-    await settle();
-    assert.match(text(), /10\/10\/2026/);
-    assert.doesNotMatch(text(), /Pago \(assumido\)/);
-    await press('Abrir Energia');
-    assert.match(text(), /Próxima cobrança: 10\/11\/2026/);
-    assert.match(text(), /1 parcela vencida sem vínculo \(10\/10\/2026\)/);
-    assert.match(text(), /A pagar/);
-    assert.match(text(), /Vencida · sem vínculo/);
-    assert.doesNotMatch(text(), /Próxima cobrança: 10\/10\/2026/);
-    assert.match(text(), /Média das 3 últimas contas/);
-    assert.equal(buttons('Ver cronograma de Energia').length, 1);
-    assert.equal(buttons('Encerrar Energia').length, 0);
-    await press('Mais ações de Energia');
-    const menu = renderer.root.findAllByProps({accessibilityLabel: 'Menu do compromisso'})[0];
-    assert.equal(menu.props.style.position, 'absolute');
-    assert.equal(menu.findAllByType('Pressable').map(node => node.props.accessibilityLabel)[0], 'Terminar Energia em');
-    assert.equal(buttons('Encerrar Energia').length, 1);
-    assert.equal(buttons('Remover parcelas futuras de Energia').length, 1);
-    await press('Pagas (1)');
-    assert.match(text(), /10\/09\/2026/);
-    assert.match(text(), /Pago \(assumido\)/);
-    assert.doesNotMatch(text(), /10\/10\/2026 · .*Pago \(assumido\)/);
-    await press('Mais ações de Energia');
-    await press('Voltar de Detalhe de Energia');
-    assert.equal(renderer.root.findAllByProps({accessibilityLabel: 'Detalhe de Energia'}).length, 0);
-    assert.equal(buttons('Abrir Energia').length, 1);
-    assert.equal(renderer.root.findAllByType('Modal').length, 0);
+    presentation.setPresentationClock('2026-10-14');
+    try {
+      const item = {commitment_id: 'energy', name: 'Energia', revision: 1, kind: 'assinatura', purchase_date: '2026-09-10', next_due_date: '2026-10-10', amount: 178.8, amount_mode: 'last_three_bills', amount_estimate: {requires_review: false}, frequency: 'mensal', payment_method: 'debito', renewal_status: 'automatica', status: 'ativo', schedule: [{due_date: '2026-10-10'}], linked_transactions: []};
+      const api = async requestPath => requestPath === '/v1/commitments' ? {items: [item]} : {items: []};
+      await act(async () => {renderer = create(screen(api));});
+      await settle();
+      assert.match(text(), /10\/10\/2026/);
+      assert.doesNotMatch(text(), /Pago \(assumido\)/);
+      await press('Abrir Energia');
+      assert.match(text(), /Próxima cobrança: 10\/11\/2026/);
+      assert.match(text(), /1 parcela vencida sem vínculo \(10\/10\/2026\)/);
+      assert.match(text(), /A pagar/);
+      assert.match(text(), /Vencida · sem vínculo/);
+      assert.doesNotMatch(text(), /Próxima cobrança: 10\/10\/2026/);
+      assert.match(text(), /Média das 3 últimas contas/);
+      assert.equal(buttons('Ver cronograma de Energia').length, 1);
+      assert.equal(buttons('Encerrar Energia').length, 0);
+      await press('Mais ações de Energia');
+      const menu = renderer.root.findAllByProps({accessibilityLabel: 'Menu do compromisso'})[0];
+      assert.equal(menu.props.style.position, 'absolute');
+      assert.equal(menu.findAllByType('Pressable').map(node => node.props.accessibilityLabel)[0], 'Terminar Energia em');
+      assert.equal(buttons('Encerrar Energia').length, 1);
+      assert.equal(buttons('Remover parcelas futuras de Energia').length, 1);
+      await press('Pagas (1)');
+      assert.match(text(), /10\/09\/2026/);
+      assert.match(text(), /Pago \(assumido\)/);
+      assert.doesNotMatch(text(), /10\/10\/2026 · .*Pago \(assumido\)/);
+      await press('Mais ações de Energia');
+      await press('Voltar de Detalhe de Energia');
+      assert.equal(renderer.root.findAllByProps({accessibilityLabel: 'Detalhe de Energia'}).length, 0);
+      assert.equal(buttons('Abrir Energia').length, 1);
+      assert.equal(renderer.root.findAllByType('Modal').length, 0);
+    } finally {
+      presentation.setPresentationClock(null);
+    }
   });
 
   await check('order', async () => {
@@ -905,55 +910,60 @@ async function renderRedesign() {
   });
 
   await check('obrigacao-pontual', async () => {
-    const item = {commitment_id: 'ipva', name: 'IPVA', revision: 1, kind: 'obrigacao', obligation_plan: 'parcelado', installment_count: 3, next_installment_number: 1, purchase_date: '2026-10-11', next_due_date: '2026-11-10', cash_due_date: '2026-11-20', amount: 100, frequency: 'mensal', payment_method: 'pix', renewal_status: 'nao_aplicavel', status: 'ativo', schedule: [], linked_transactions: []};
-    const writes = [];
-    const api = async (requestPath, init = {}) => {
-      if (init.method === 'POST') {writes.push(JSON.parse(init.body)); return {commitment_id: 'novo', revision: 1};}
-      if (requestPath === '/v1/commitments') return {items: [item]};
-      return {items: []};
-    };
-    await act(async () => {renderer = create(screen(api));});
-    await settle();
-    assert.match(text(), /Dívidas/);
-    assert.match(text(), /33\.33/);
-    assert.doesNotMatch(text(), /Pago \(assumido\)/);
-    await press('Abrir IPVA');
-    assert.match(text(), /Obrigação pontual/);
-    assert.match(text(), /Hipotético · 3 parcelas/);
-    assert.match(text(), /Parcelamento hipotético/);
-    assert.match(text(), /33\.34/);
-    assert.match(text(), /Próxima cobrança: 10\/11\/2026/);
-    await press('Mais ações de IPVA');
-    assert.equal(buttons('Terminar IPVA em').length, 1);
-    await press('Voltar de Detalhe de IPVA');
-    await press('+ Adicionar');
-    await settle();
-    await press('Obrigação pontual');
-    assert.match(text(), /Data à vista/);
-    assert.match(text(), /Valor total \(R\$\)/);
-    assert.doesNotMatch(text(), /Frequência/);
-    assert.doesNotMatch(text(), /Próximo compromisso/);
-    const fill = async (label, value) => {
-      const node = renderer.root.findAllByType('TextInput').find(entry => entry.props.accessibilityLabel === label);
-      assert.ok(node, label);
-      await act(async () => {node.props.onChangeText(value);});
-    };
-    await fill('Nome ou serviço', 'IPTU');
-    await fill('Valor total (R$)', '10000');
-    await fill('Data à vista', '20112026');
-    await press('Pix');
-    await press('Salvar e sincronizar');
-    await settle();
-    assert.equal(writes.length, 1);
-    assert.equal(writes[0].kind, 'obrigacao');
-    assert.equal(writes[0].obligation_plan, 'a_vista');
-    assert.equal(writes[0].amount, 100);
-    assert.equal(writes[0].cash_due_date, '2026-11-20');
-    assert.equal(writes[0].next_due_date, '2026-11-20');
-    assert.equal(writes[0].frequency, 'mensal');
-    assert.equal(writes[0].installment_count, null);
-    assert.equal(writes[0].renewal_status, 'nao_aplicavel');
-    await dismiss('OK');
+    presentation.setPresentationClock('2026-10-14');
+    try {
+      const item = {commitment_id: 'ipva', name: 'IPVA', revision: 1, kind: 'obrigacao', obligation_plan: 'parcelado', installment_count: 3, next_installment_number: 1, purchase_date: '2026-10-11', next_due_date: '2026-11-10', cash_due_date: '2026-11-20', amount: 100, frequency: 'mensal', payment_method: 'pix', renewal_status: 'nao_aplicavel', status: 'ativo', schedule: [], linked_transactions: []};
+      const writes = [];
+      const api = async (requestPath, init = {}) => {
+        if (init.method === 'POST') {writes.push(JSON.parse(init.body)); return {commitment_id: 'novo', revision: 1};}
+        if (requestPath === '/v1/commitments') return {items: [item]};
+        return {items: []};
+      };
+      await act(async () => {renderer = create(screen(api));});
+      await settle();
+      assert.match(text(), /Dívidas/);
+      assert.match(text(), /33\.33/);
+      assert.doesNotMatch(text(), /Pago \(assumido\)/);
+      await press('Abrir IPVA');
+      assert.match(text(), /Obrigação pontual/);
+      assert.match(text(), /Hipotético · 3 parcelas/);
+      assert.match(text(), /Parcelamento hipotético/);
+      assert.match(text(), /33\.34/);
+      assert.match(text(), /Próxima cobrança: 10\/11\/2026/);
+      await press('Mais ações de IPVA');
+      assert.equal(buttons('Terminar IPVA em').length, 1);
+      await press('Voltar de Detalhe de IPVA');
+      await press('+ Adicionar');
+      await settle();
+      await press('Obrigação pontual');
+      assert.match(text(), /Data à vista/);
+      assert.match(text(), /Valor total \(R\$\)/);
+      assert.doesNotMatch(text(), /Frequência/);
+      assert.doesNotMatch(text(), /Próximo compromisso/);
+      const fill = async (label, value) => {
+        const node = renderer.root.findAllByType('TextInput').find(entry => entry.props.accessibilityLabel === label);
+        assert.ok(node, label);
+        await act(async () => {node.props.onChangeText(value);});
+      };
+      await fill('Nome ou serviço', 'IPTU');
+      await fill('Valor total (R$)', '10000');
+      await fill('Data à vista', '20112026');
+      await press('Pix');
+      await press('Salvar e sincronizar');
+      await settle();
+      assert.equal(writes.length, 1);
+      assert.equal(writes[0].kind, 'obrigacao');
+      assert.equal(writes[0].obligation_plan, 'a_vista');
+      assert.equal(writes[0].amount, 100);
+      assert.equal(writes[0].cash_due_date, '2026-11-20');
+      assert.equal(writes[0].next_due_date, '2026-11-20');
+      assert.equal(writes[0].frequency, 'mensal');
+      assert.equal(writes[0].installment_count, null);
+      assert.equal(writes[0].renewal_status, 'nao_aplicavel');
+      await dismiss('OK');
+    } finally {
+      presentation.setPresentationClock(null);
+    }
   });
 
   await check('pending-v6', async () => {

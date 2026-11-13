@@ -49,8 +49,11 @@ class ClassificationTransitionsTests(unittest.TestCase):
         self.assertIsNone(after['metodo_pagamento'])
 
     def test_category_change_accepts_explicit_dependent_subcategory_clear(self):
-        self.update(categoria='Transporte', subcategoria='')
-        self.assertEqual(self.row['categoria'], 'Transporte')
+        with self.assertRaises(HTTPException) as level1:
+            self.update(categoria='Transporte', subcategoria='')
+        self.assertEqual(level1.exception.status_code, 422)
+        self.update(categoria='Categoria sintética', subcategoria='')
+        self.assertEqual(self.row['categoria'], 'Categoria sintética')
         self.assertFalse(self.row.get('subcategoria'))
 
     def test_omitted_optionals_preserve_their_previous_values(self):

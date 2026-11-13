@@ -20,7 +20,7 @@ function load(file){file=path.resolve(file);if(cache.has(file))return cache.get(
   const source=candidate&&fs.existsSync(candidate)?candidate:file;
   const code=ts.transpileModule(fs.readFileSync(source,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText;
   vm.runInNewContext(code,{module:m,exports:m.exports,console,Error,Date,Intl,Math,URLSearchParams,AbortController,setTimeout,clearTimeout,
-    require:name=>{if(mocks[name])return mocks[name];const target=path.resolve(path.dirname(file),name);if(name.endsWith('.json'))return JSON.parse(fs.readFileSync(target,'utf8'));return load(fs.existsSync(target+'.tsx')?target+'.tsx':target+'.ts');}},{filename:source});cache.set(file,m.exports);return m.exports;}
+    require:name=>{if(mocks[name])return mocks[name];if(!name.startsWith('.'))return {};const target=path.resolve(path.dirname(file),name);if(name.endsWith('.json'))return JSON.parse(fs.readFileSync(target,'utf8'));return load(fs.existsSync(target+'.tsx')?target+'.tsx':target+'.ts');}},{filename:source});cache.set(file,m.exports);return m.exports;}
 const Pdf=load('components/PdfPasswordSettings.tsx').default,Update=load('components/AppUpdate.tsx').default,Card=load('components/CardManager.tsx').default,Transaction=load('components/TransactionEditor.tsx').default,Delete=load('components/DeleteMovement.tsx').default,Future=load('components/FutureCommitmentEditor.tsx').default,Security=load('components/AccountSecurity.tsx').default;
 const queue=load('utils/syncQueue.ts');
 const ChoiceProvider=load('components/ChoiceOverlay.tsx').ChoiceOverlayProvider;

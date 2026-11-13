@@ -8,7 +8,7 @@ Antes de consultar `/health`, o App importa os eventos locais para SQLite e conf
 
 Notificações separam aprovação/recusa/estorno do contexto da compra, comerciante e rodapés. Compra aprovada com limite disponível é capturada; mensagem financeira ambígua segue como evidência para revisão. Correspondência automática exige referência bancária igual, provedor e conta duráveis iguais e as validações financeiras; similaridade sugere revisão. Valores/data/comerciante semelhantes não identificam uma compra. [Auditoria atual](AUDITORIA-ADVERSARIAL.md).
 
-O backend permanece neste PC, conforme a escolha do usuário. PC, sessão Windows e Tailscale precisam estar ativos; suspensão ou desligamento interrompem o acesso. Não foram alteradas as preferências de bateria/suspensão, nem foi contratado um serviço externo.
+Em produção atual (a partir de 29/10/2026), o backend roda na VPS Linux (`100.101.23.111` / `https://ubuntu-s-1vcpu-1gb-nyc1.tail1093e7.ts.net:8443`), enquanto o PC mantém apenas o relay `scripts/proxy_to_vps.py` para o atalho Desktop sem dupla escrita; veja [Nota Técnica de Implantação em Produção (VPS)](NOTA-TECNICA-DEPLOY-VPS.md). O registro histórico da seção **Servidor** abaixo refere-se à operação local anterior.
 
 ## Painel e revisão — 1.20.78
 

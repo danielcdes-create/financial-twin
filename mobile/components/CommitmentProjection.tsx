@@ -1,4 +1,4 @@
-import React, {useCallback, useEffect, useLayoutEffect, useRef, useState} from 'react';
+import React, {useEffect, useLayoutEffect, useRef, useState} from 'react';
 import {Platform, ScrollView, StyleSheet, Text, useWindowDimensions, View} from 'react-native';
 import {Pressable, TextInput} from './InteractionControls';
 import {alignProjectionSeries, projectionFigures, readableShares} from '../utils/commitmentPresentation';
@@ -9,6 +9,13 @@ import MonthDetailScreen from './MonthDetailScreen';
 type Month = {month: string; total: string; installments: string; subscriptions: string; accounts?: string; other: string; estimated: string; bill_balance: string; items: ChargeEntry[]};
 type Projection = {items: Month[]; months: number; start_month: string; end_month: string; last_installment_month: string | null; warnings: string[]; total: string; as_of: string; automatic_horizon_capped: boolean; summary?: {this_month: string; next_12: string | null; overdue?: string; upcoming?: string; installments: string; subscriptions: string; other: string; bill_balance: string; window_months: number} | null};
 type Frame = {summary: React.ReactNode; chart: React.ReactNode; monthOpen: boolean; bindCharge: (opener: (entry: ChargeEntry) => void) => void};
+
+let listScrollerNode: ScrollView | null = null;
+let chargeOpener: (entry: ChargeEntry) => void = () => {};
+const bindListScroller = (node: ScrollView | null) => {listScrollerNode = node;};
+const scrollListTo = (y: number) => {listScrollerNode?.scrollTo?.({y, animated: false});};
+const bindCharge = (opener: (entry: ChargeEntry) => void) => {chargeOpener = opener;};
+const triggerCharge = (entry: ChargeEntry) => {chargeOpener(entry);};
 
 export default function CommitmentProjection({api, money, refreshKey = 0, renderFrame, initialMonth = null, initialMonths, urlDriven = false, onSettled}: {
   api: (path: string) => Promise<any>;
@@ -34,10 +41,9 @@ export default function CommitmentProjection({api, money, refreshKey = 0, render
   const [helpOpen, setHelpOpen] = useState(false);
   const narrow = useWindowDimensions().width < 960;
   const generation = useRef(0);
-  const openCharge = useRef<(entry: ChargeEntry) => void>(() => {});
-  const listRef = useRef<ScrollView>(null);
+  const onSettledRef = useRef(onSettled);
+  useLayoutEffect(() => {onSettledRef.current = onSettled;});
   const restorePending = useRef(false);
-  const bindCharge = useCallback((opener: (entry: ChargeEntry) => void) => {openCharge.current = opener;}, []);
   const queryKey = `${months ?? 'auto'}:${refreshKey}:${retry}`;
   const loading = settledKey !== queryKey;
   const visibleError = loading ? '' : error;
@@ -65,7 +71,7 @@ export default function CommitmentProjection({api, money, refreshKey = 0, render
       setData(response);
       setSelected(old => old && response.items.some((row: Month) => row.month === old) ? old : urlDriven ? old : null);
     }).catch(failure => {if (current === generation.current) setError(failure.message || 'Não foi possível carregar a projeção.');})
-      .finally(() => {if (current === generation.current) {setSettledKey(queryKey); onSettled?.();}});
+      .finally(() => {if (current === generation.current) {setSettledKey(queryKey); onSettledRef.current?.();}});
   }, [api, months, refreshKey, retry, queryKey, urlDriven]);
   useLayoutEffect(() => {
     if (!selected || !narrow) return;
@@ -74,13 +80,14 @@ export default function CommitmentProjection({api, money, refreshKey = 0, render
   useLayoutEffect(() => {
     if (selected || !restorePending.current) return;
     restorePending.current = false;
-    listRef.current?.scrollTo?.({y: listOffset, animated: false});
+    scrollListTo(listOffset);
     restoreChartOffset();
   }, [selected, listOffset]);
   const choose = (value: number | null) => {setValidation(''); setDraft(value === null ? '' : String(value)); setMonths(value);};
   const apply = () => {if (!/^\d+$/.test(draft) || Number(draft) < 1 || Number(draft) > 120) {setValidation('Escolha de 1 a 120 meses.'); return;} choose(Number(draft));};
   const publish = (month: string | null, mode: 'push' | 'replace' | 'close') => {
     if (urlDriven) {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const {router} = require('expo-router') as {router: {push: (href: string) => void; replace: (href: string) => void; back: () => void; canGoBack: () => boolean}};
       if (mode === 'close') {if (router.canGoBack()) router.back(); else router.replace('/'); return;}
       const href = monthHref(month || '', periodoFromMonths(months));
@@ -115,12 +122,12 @@ export default function CommitmentProjection({api, money, refreshKey = 0, render
   };
   const activeIndex = data?.items.findIndex(row => row.month === selected) ?? -1;
   const active = activeIndex >= 0 && data ? data.items[activeIndex] : undefined;
-  const detail = active && data ? <MonthDetailScreen row={active} series={chartSeries} money={money} asOf={data.as_of} current={active.month === data.items[0]?.month} periodo={periodo} canPrev={activeIndex > 0} canNext={activeIndex < data.items.length - 1} onClose={closeMonth} onPrev={() => activeIndex > 0 && shiftMonth(data.items[activeIndex - 1].month)} onNext={() => activeIndex >= 0 && activeIndex < data.items.length - 1 && shiftMonth(data.items[activeIndex + 1].month)} onOpenCharge={entry => openCharge.current(entry)} scroll={urlDriven || !narrow} /> : null;
+  const detail = active && data ? <MonthDetailScreen row={active} series={chartSeries} money={money} asOf={data.as_of} current={active.month === data.items[0]?.month} periodo={periodo} canPrev={activeIndex > 0} canNext={activeIndex < data.items.length - 1} onClose={closeMonth} onPrev={() => activeIndex > 0 && shiftMonth(data.items[activeIndex - 1].month)} onNext={() => activeIndex >= 0 && activeIndex < data.items.length - 1 && shiftMonth(data.items[activeIndex + 1].month)} onOpenCharge={triggerCharge} scroll={urlDriven || !narrow} /> : null;
   const figures = data ? projectionFigures(data) : null;
   const overdueAmount = Number(figures?.this_month_overdue || 0), upcomingAmount = Number(figures?.this_month_upcoming || 0);
   const split = figures && (overdueAmount > 0 || upcomingAmount > 0) ? <Text style={s.split}>{overdueAmount > 0 ? <Text style={s.amber}>{`Vencidas ${money(overdueAmount)}`}</Text> : null}{overdueAmount > 0 && upcomingAmount > 0 ? ' · ' : ''}{upcomingAmount > 0 ? `A vencer ${money(upcomingAmount)}` : ''}</Text> : null;
   const summaryNode = figures ? <View style={s.summary}><View style={s.summaryCard}><Text style={s.summaryLabel}>Falta pagar este mês</Text><Text style={s.summaryValue}>{money(Number(figures.this_month))}</Text>{split}</View><View style={s.summaryCard}><Text style={s.summaryLabel}>Próximos 12 meses</Text><Text style={s.summaryValue}>{figures.next_12 == null ? 'Toque em 12 meses para ver este horizonte.' : money(Number(figures.next_12))}</Text></View></View> : null;
-  const monthList = data ? <ScrollView ref={listRef} accessibilityLabel="Lista de meses" onScroll={event => recordChartOffset(event.nativeEvent.contentOffset.y)} scrollEventThrottle={16} contentOffset={{x: 0, y: listOffset}} style={narrow ? undefined : s.chartColumn}>
+  const monthList = data ? <ScrollView ref={bindListScroller} accessibilityLabel="Lista de meses" onScroll={event => recordChartOffset(event.nativeEvent.contentOffset.y)} scrollEventThrottle={16} contentOffset={{x: 0, y: listOffset}} style={narrow ? undefined : s.chartColumn}>
     {data.items.map((row, index) => {
       const shares = readableShares(chartSeries.map(group => ({key: group.key, amount: Number(row[group.key] || 0)})));
       const pending = index === 0;

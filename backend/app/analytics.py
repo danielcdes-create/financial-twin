@@ -4,7 +4,7 @@ from decimal import Decimal
 from app.economic_policy import EXPENSE_REASONS, amount as decimal_amount, effects, duplicate_of_ledger
 from app.category_filter import display_category
 from app.economic_period import economic_month
-from app.financial_time import local_date
+from app.financial_time import local_date, today as local_today
 
 
 def calculate_financial_totals(transactions, confirmed_provisionals=()):
@@ -55,7 +55,7 @@ def build_cost_control_summary(
     financial_cost_total: Decimal = Decimal('0'),
 ) -> dict:
     """Build MTD vs. prior-month same-period pacing, weekly/monthly series, and cost control insights."""
-    ref_date = anchor_date or date.today()
+    ref_date = anchor_date or local_today()
     cur_year, cur_month = ref_date.year, ref_date.month
     cur_ym = f'{cur_year:04d}-{cur_month:02d}'
     cur_days_in_month = calendar.monthrange(cur_year, cur_month)[1]
@@ -157,7 +157,7 @@ def build_cost_control_summary(
                 eff_day = (
                     ev_date.day
                     if (ev_date is not None and ev_date.strftime('%Y-%m') == cur_ym)
-                    else min(ev_date.day, cur_days_in_month) if ev_date is not None else 1
+                    else 1
                 )
                 cur_full_expenses += exp
                 if eff_day <= mtd_day:
@@ -173,7 +173,7 @@ def build_cost_control_summary(
                 eff_day = (
                     ev_date.day
                     if (ev_date is not None and ev_date.strftime('%Y-%m') == prev_ym)
-                    else min(ev_date.day, prev_days_in_month) if ev_date is not None else 1
+                    else 1
                 )
                 prev_full_expenses += exp
                 b_idx = _bucket_index(eff_day)
@@ -331,6 +331,7 @@ def build_cost_control_summary(
     active_prev_exp = prev_mtd_expenses if period == 'month' else (previous_period_expenses or Decimal('0'))
     active_delta = active_cur_exp - active_prev_exp
     active_pct = _pct_change(active_cur_exp, active_prev_exp)
+    comparison_ref_label = mtd_summary['previous_period_label'] if period == 'month' else 'período equivalente anterior'
 
     if active_prev_exp <= 0 and active_cur_exp <= 0:
         status = 'no_baseline'
@@ -342,13 +343,15 @@ def build_cost_control_summary(
         headline = (
             f'Acumulado de R$ {cur_mtd_expenses:.2f} até {mtd_summary["current_period_label"]} '
             f'(ritmo de R$ {daily_burn_cur:.2f}/dia). Sem base no período anterior para comparação direta.'
+            if period == 'month'
+            else f'Acumulado de R$ {active_cur_exp:.2f} no período selecionado. Sem base no período anterior para comparação direta.'
         )
     elif active_pct is not None and active_pct <= -3.0:
         status = 'controlling'
         status_label = 'Custos sob controle'
         headline = (
             f'Você reduziu os gastos em {abs(active_pct):.1f}% (-R$ {abs(active_delta):.2f}) '
-            f'em relação ao mesmo período anterior ({mtd_summary["previous_period_label"]}).'
+            f'em relação ao mesmo período anterior ({comparison_ref_label}).'
         )
     elif active_pct is not None and active_pct <= 5.0:
         status = 'attention' if (biggest_increase and biggest_increase['delta_amount'] > 50) else 'stable'
@@ -356,14 +359,14 @@ def build_cost_control_summary(
         sign_str = '+' if active_delta >= 0 else '-'
         headline = (
             f'Gastos próximos ao período anterior ({sign_str}{abs(active_pct):.1f}% · '
-            f'{sign_str}R$ {abs(active_delta):.2f} vs. {mtd_summary["previous_period_label"]}).'
+            f'{sign_str}R$ {abs(active_delta):.2f} vs. {comparison_ref_label}).'
         )
     else:
         status = 'over_pace'
         status_label = 'Acima do ritmo anterior'
         headline = (
             f'Atenção: os gastos acumulados estão +{active_pct:.1f}% (+R$ {active_delta:.2f}) '
-            f'acima do mesmo período do mês anterior ({mtd_summary["previous_period_label"]}).'
+            f'acima do {"mesmo período do mês anterior" if period == "month" else "período anterior"} ({comparison_ref_label}).'
         )
 
     insights = []

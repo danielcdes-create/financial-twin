@@ -214,23 +214,26 @@ https://ubuntu-s-1vcpu-1gb-nyc1.tail1093e7.ts.net:8443 (tailnet only)
    ```json
    {
      "available": true,
-     "version_name": "1.20.82",
-     "version_code": 128,
-     "size_bytes": 48149476,
-     "sha256": "9ED5C38BFC0DD086D51ED1FE919F15B684787A6DE49A29216D083F30EB117E7B",
+     "version_name": "1.20.83",
+     "version_code": 129,
+     "size_bytes": 48149496,
+     "sha256": "3CD60ECC979965E71EAD00357C35007628992FBADCD1432F066DB486F119E17C",
      "download_url": "/v1/app-update/apk"
    }
    ```
-3. **Verificação de Entrega do Binário APK via HTTPS (`HEAD /apk`):**
+3. **Verificação de Entrega do Binário APK via HTTPS (`HEAD /v1/app-update/apk` e `HEAD /apk`):**
    * `HTTP/2 200`
    * `content-type: application/vnd.android.package-archive`
-   * `content-disposition: attachment; filename="financial-twin-1.20.82.apk"`
+   * `content-disposition: attachment; filename="financial-twin-1.20.83.apk"`
 4. **Reconciliação de Mídias no Container (`reconcile_media(db)`):**
    * `{'checked': 23, 'missing': 0, 'orphaned': 2, 'limited': False}`
 
 ---
 
 ## 7. Procedimento Operacional Padrão (Runbooks de Atualização)
+
+> [!NOTE]
+> Os scripts antigos em `deploy/oracle/` (`deploy_from_windows.ps1`, `publish_apk.ps1`) referem-se à topologia histórica anterior e foram substituídos pelo fluxo unificado abaixo (`scripts/Build-OraclePackage.py` + `mobile/scripts/build-android.ps1`).
 
 ### 7.1. Atualização do Financial Digital Twin (`financial-twin-server` + APK OTA)
 ```powershell

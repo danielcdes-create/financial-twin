@@ -1,6 +1,6 @@
 {
   "name": "financial-twin",
-  "version": "1.0.0",
+  "version": "1.20.83",
   "main": "expo-router/entry",
   "dependencies": {
     "expo": "~57.0.27",
@@ -41,6 +41,20 @@
     "ios": "expo run:ios",
     "web": "expo start --web",
     "lint": "expo lint"
+  },
+  "expo": {
+    "install": {
+      "exclude": [
+        "expo",
+        "expo-constants",
+        "expo-image-picker",
+        "expo-linking",
+        "expo-modules-core",
+        "expo-router",
+        "expo-sharing",
+        "expo-sqlite"
+      ]
+    }
   },
   "private": true
 }

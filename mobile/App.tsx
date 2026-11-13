@@ -633,7 +633,7 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
         }
       });
     },
-    [lastLoaded, requests, sync],
+    [lastLoaded, requests, sync, tab],
   );
   const cancelAbandonedTabRequests = useCallback((activeTab: Tab) => {
     if (manualLoads.current > 0) return;
@@ -1649,13 +1649,17 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
                 {dashboard?.legacy_data_updated_until
                   ? new Date(
                       dashboard.legacy_data_updated_until,
-                    ).toLocaleDateString("pt-BR")
+                    ).toLocaleDateString("pt-BR", {
+                      timeZone: "America/Sao_Paulo",
+                    })
                   : "—"}{" "}
                 · capturas até{" "}
                 {dashboard?.confirmed_capture_updated_until
                   ? new Date(
                       dashboard.confirmed_capture_updated_until,
-                    ).toLocaleDateString("pt-BR")
+                    ).toLocaleDateString("pt-BR", {
+                      timeZone: "America/Sao_Paulo",
+                    })
                   : "—"}
               </Text>
               {dashboard?.legacy_data_is_stale && (
@@ -2293,10 +2297,16 @@ function CostControlCard({
     mtd.previous_full_expenses,
     mtd.projected_month_expenses,
   );
-  const curPaceWidth =
-    `${Math.max(3, Math.min(100, (mtd.current_expenses / paceMax) * 100))}%` as `${number}%`;
-  const prevMtdPaceWidth =
-    `${Math.max(3, Math.min(100, (mtd.previous_mtd_expenses / paceMax) * 100))}%` as `${number}%`;
+  const curPaceWidth = (
+    mtd.current_expenses > 0
+      ? `${Math.max(3, Math.min(100, (mtd.current_expenses / paceMax) * 100))}%`
+      : "0%"
+  ) as `${number}%`;
+  const prevMtdPaceWidth = (
+    mtd.previous_mtd_expenses > 0
+      ? `${Math.max(3, Math.min(100, (mtd.previous_mtd_expenses / paceMax) * 100))}%`
+      : "0%"
+  ) as `${number}%`;
   const mtdBarMax = Math.max(
     1,
     ...mtd.buckets.flatMap((b) => [
@@ -2533,10 +2543,16 @@ function CostControlCard({
               .map((bucket) => {
                 const curCum = Number(bucket.current_cumulative || 0);
                 const prevCum = bucket.previous_mtd_cumulative;
-                const curW =
-                  `${Math.max(3, Math.min(100, (curCum / mtdCumMax) * 100))}%` as `${number}%`;
-                const prevW =
-                  `${Math.max(3, Math.min(100, (prevCum / mtdCumMax) * 100))}%` as `${number}%`;
+                const curW = (
+                  curCum > 0
+                    ? `${Math.max(3, Math.min(100, (curCum / mtdCumMax) * 100))}%`
+                    : "0%"
+                ) as `${number}%`;
+                const prevW = (
+                  prevCum > 0
+                    ? `${Math.max(3, Math.min(100, (prevCum / mtdCumMax) * 100))}%`
+                    : "0%"
+                ) as `${number}%`;
                 const controlled = curCum <= prevCum;
                 return (
                   <View key={`cum-${bucket.key}`} style={s.cumulativeRow}>

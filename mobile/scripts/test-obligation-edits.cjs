@@ -67,6 +67,8 @@ assert.equal(presentation.previousDue('2026-12-10', 'mensal'), '2026-11-10');
 const dialogs = load('utils/appAlert.ts');
 const Manager = load('components/CommitmentManager.tsx').default;
 const ScheduleHost = load('components/ScheduleOverlay.tsx').ScheduleOverlayProvider;
+const ChoiceHost = load('components/ChoiceOverlay.tsx').ChoiceOverlayProvider;
+presentation.setPresentationClock('2026-10-15');
 
 let renderer = null;
 const settle = (ms = 30) => act(async () => {await new Promise(resolve => setTimeout(resolve, ms));});
@@ -88,7 +90,7 @@ const dismiss = async label => {
   await settle();
 };
 function screen(api) {
-  return React.createElement(ScheduleHost, null, React.createElement(Manager, {api, upload: async () => ({}), accounts: [], cards: [], money: String, onUpdated() {}}));
+  return React.createElement(ChoiceHost, null, React.createElement(ScheduleHost, null, React.createElement(Manager, {api, upload: async () => ({}), accounts: [], cards: [], money: String, onUpdated() {}})));
 }
 function mount(api) {
   return act(async () => {renderer = create(screen(api), {createNodeMock: () => ({scrollTo() {}})});});
