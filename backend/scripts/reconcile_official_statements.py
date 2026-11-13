@@ -81,14 +81,20 @@ def _discover_pdfs(pdf_args: list[str] | None, pdf_dir: str | None) -> list[Path
         d = Path(pdf_dir).expanduser()
         if not d.is_dir():
             raise NotADirectoryError(f"Diretório de PDFs não encontrado: {d}")
-        for candidate in sorted(d.glob("*.pdf")):
-            _add(candidate)
+        for pattern in AUTO_DISCOVERY_PATTERNS:
+            for candidate in sorted(d.glob(pattern)):
+                _add(candidate)
+        if not found:
+            for candidate in sorted(d.glob("*.pdf")):
+                _add(candidate)
 
     if found:
         return found
 
     home = Path.home()
     search_dirs = [
+        Path("G:/Meu Drive"),
+        Path("G:/My Drive"),
         REPO_ROOT / "data" / "comprovantes",
         REPO_ROOT / "data",
         home / "Downloads",
@@ -99,8 +105,6 @@ def _discover_pdfs(pdf_args: list[str] | None, pdf_dir: str | None) -> list[Path
         home / "Documents",
         home / "OneDrive" / "Documents",
         home / "OneDrive" / "Documentos",
-        Path("G:/Meu Drive"),
-        Path("G:/My Drive"),
     ]
     for directory in search_dirs:
         if not directory.is_dir():
