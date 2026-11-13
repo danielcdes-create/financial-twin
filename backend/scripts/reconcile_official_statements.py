@@ -87,7 +87,21 @@ def _discover_pdfs(pdf_args: list[str] | None, pdf_dir: str | None) -> list[Path
     if found:
         return found
 
-    search_dirs = [REPO_ROOT / "data" / "comprovantes", Path.home() / "Downloads"]
+    home = Path.home()
+    search_dirs = [
+        REPO_ROOT / "data" / "comprovantes",
+        REPO_ROOT / "data",
+        home / "Downloads",
+        home / "OneDrive" / "Downloads",
+        home / "Desktop",
+        home / "OneDrive" / "Desktop",
+        home / "OneDrive" / "Área de Trabalho",
+        home / "Documents",
+        home / "OneDrive" / "Documents",
+        home / "OneDrive" / "Documentos",
+        Path("G:/Meu Drive"),
+        Path("G:/My Drive"),
+    ]
     for directory in search_dirs:
         if not directory.is_dir():
             continue
