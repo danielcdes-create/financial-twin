@@ -28,6 +28,7 @@ from app.pdf_input import PDFPasswordError
 from app.services.ai.xai.provider import XAIError, public_xai_error
 from app.upload_worker import run_upload
 from app.pagination import page
+from app.popular_merchants import brand_keys_for_text, extract_embedded_purchase_date
 from app.taxonomy import infer_classification, taxonomy_overrides
 
 router = APIRouter(prefix='/v1/capture-batches', dependencies=[Depends(require_session)])
@@ -188,6 +189,8 @@ def similar_description(left, right):
     a, b = informative_words(left), informative_words(right)
     # Bank boilerplate alone never supports a probable match.
     if not a or not b: return False
+    left_brands, right_brands = brand_keys_for_text(left), brand_keys_for_text(right)
+    if left_brands and right_brands: return bool(left_brands & right_brands)
     if a & b and SequenceMatcher(None, left, right).ratio() >= .75: return True
     return min(len(a), len(b)) >= 2 and len(a & b) / min(len(a), len(b)) >= .8
 
@@ -266,9 +269,11 @@ def analyze(db, batch, body):
     validate_rows(batch, body)
     context = account_context(db, body.account_ref)
     valid = [row for row in body.rows if not row_errors(row, body.acknowledge_brl)]
+    effective_dates = {row.row_id: extract_embedded_purchase_date(row.description, row.date) or row.date for row in valid}
     candidates = []; limited = False
     if valid:
-        window = {'$gte': day_start(min(row.date for row in valid) - timedelta(days=1)),
+        earliest_day = min(min(row.date for row in valid), min(effective_dates.values()))
+        window = {'$gte': day_start(earliest_day - timedelta(days=1)),
                   '$lt': day_start(max(row.date for row in valid) + timedelta(days=2))}
         amounts = [Decimal128(value) for value in {str(row.amount.quantize(Decimal('.01'))) for row in valid}]
         references = [row.bank_ref for row in valid if row.bank_ref]
@@ -276,6 +281,8 @@ def analyze(db, batch, body):
             ordinary={prefix+'data_evento': window, prefix+'valor': {'$in': amounts}}
             return {'$or': [ordinary, {prefix+'bank_transaction_ref': {'$in': references}}]} if references else ordinary
         # Bound every candidate scan; incomplete scans prevent insertion, never imply no duplicate.
+        staged = []
+        merchant_ids = set()
         for source, collection, query in (
             ('ledger', db.transactions, scope()),
             ('capture', db.provisional_transactions, {**scope(), 'status': {'$in': ['provisional', 'enriched', 'confirmed']}}),
@@ -288,12 +295,22 @@ def analyze(db, batch, body):
                 captured = bool(original.get('provisional_id'))
                 relation = candidate_account(original, context, captured)
                 if relation == 'different': continue
-                display_descriptions = [str(original.get(key) or '').strip() for key in ('merchant_raw', 'merchant_name', 'estabelecimento_original', 'descricao_original', 'vendedor')]
-                descriptions = {normalize(value) for value in display_descriptions}
-                candidates.append({'source': source, 'identity': str(original.get('provisional_id') or original['_id']),
-                    'date': local_date(original['data_evento']), 'amount': original['valor'].to_decimal() if hasattr(original['valor'], 'to_decimal') else Decimal(str(original['valor'])),
-                    'descriptions': descriptions - {''}, 'description': next((value for value in display_descriptions if value), 'Sem descrição'),
-                    'account': relation, 'bank_ref': original.get('bank_transaction_ref')})
+                if original.get('merchant_id'): merchant_ids.add(original['merchant_id'])
+                staged.append((source, original, relation))
+        merchants_by_id = {}
+        if merchant_ids and (not isinstance(db, dict) or 'merchants' in db):
+            for mdoc in db.merchants.find({'_id': {'$in': list(merchant_ids)}}):
+                merchants_by_id[mdoc['_id']] = mdoc
+        for source, original, relation in staged:
+            mdoc = merchants_by_id.get(original.get('merchant_id')) or {}
+            popular_name = str(mdoc.get('nome_padrao') or '').strip()
+            alias_values = [str(a.get('valor') or '').strip() for a in (mdoc.get('aliases') or []) if isinstance(a, dict) and a.get('valor')]
+            display_descriptions = [popular_name, *[str(original.get(key) or '').strip() for key in ('merchant_raw', 'merchant_name', 'estabelecimento_original', 'descricao_original', 'vendedor')], *alias_values]
+            descriptions = {normalize(value) for value in display_descriptions}
+            candidates.append({'source': source, 'identity': str(original.get('provisional_id') or original['_id']),
+                'date': local_date(original['data_evento']), 'amount': original['valor'].to_decimal() if hasattr(original['valor'], 'to_decimal') else Decimal(str(original['valor'])),
+                'descriptions': descriptions - {''}, 'description': next((value for value in display_descriptions if value), 'Sem descrição'),
+                'account': relation, 'bank_ref': original.get('bank_transaction_ref')})
     results = []; seen = {}; seen_refs = {}
     for row in sorted(body.rows, key=lambda row: row.row_id):
         errors = row_errors(row, body.acknowledge_brl); status = 'invalid' if errors else 'new'; reason = ' '.join(errors); matches = []
@@ -303,22 +320,25 @@ def analyze(db, batch, body):
         if not errors and limited: status = 'blocked'; reason = 'Há coincidências demais para conferir com segurança. Separe o período.'
         if not errors and not limited:
             desc = normalize(row.description)
+            effective_date = effective_dates.get(row.row_id, row.date)
             key = (row.date, str(row.amount.quantize(Decimal('.01'))), desc)
             for candidate in candidates:
                 if row.bank_ref and candidate['bank_ref'] and row.bank_ref != candidate['bank_ref'] and candidate['account'] == 'same':
                     continue
                 bank_same = bool(row.bank_ref and row.bank_ref == candidate['bank_ref'] and candidate['account'] == 'same')
-                if not bank_same and (candidate['amount'] != row.amount or abs((candidate['date'] - row.date).days) > 1): continue
-                same_day = candidate['date'] == row.date
+                day_gap = min(abs((candidate['date'] - row.date).days), abs((candidate['date'] - effective_date).days))
+                if not bank_same and (candidate['amount'] != row.amount or day_gap > 1): continue
+                same_day = candidate['date'] in {row.date, effective_date}
                 same_description = desc in candidate['descriptions'] and len(desc) >= 5 and bool(informative_words(desc))
-                similar = any(similar_description(desc, existing) for existing in candidate['descriptions'])
+                similar = same_description or any(similar_description(desc, existing) for existing in candidate['descriptions'])
                 if bank_same:
                     confidence = 'confirmed'
                     matching_reason = 'Mesmo identificador bancário na mesma conta.'
                     if candidate['source'] == 'deleted': matching_reason = 'Este registro já foi excluído anteriormente; a importação não o recria.'
                 elif same_day or similar:
                     confidence = 'high' if similar and candidate['account'] == 'same' else 'possible'
-                    matching_reason = ('Mesma conta e valor, com descrição semelhante' + (' na mesma data.' if same_day else ' e data com diferença de até um dia.')) if confidence == 'high' else 'Mesmo valor e data próxima; confira a descrição e a conta.'
+                    date_note = (' na mesma data.' if candidate['date'] == row.date else ' na data da compra informada no histórico.' if same_day else ' e data com diferença de até um dia.')
+                    matching_reason = ('Mesma conta e valor, com descrição semelhante' + date_note) if confidence == 'high' else 'Mesmo valor e data próxima; confira a descrição e a conta.'
                     if candidate['account'] != 'same': matching_reason += ' A conta do registro existente não está identificada.'
                 else: continue
                 if candidate['source'] == 'deleted' and not bank_same:

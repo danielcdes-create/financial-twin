@@ -467,3 +467,45 @@ class CaptureBatchTests(unittest.TestCase):
         with patch('app.statement_extraction.extract_ai') as provider:
             with self.assertRaises(ValueError): extract_statement('huge.pdf', data)
             provider.assert_not_called()
+
+    def test_popular_merchant_in_merchants_collection_matches_corporate_acquirer_descriptor(self):
+        merchant_oid = ObjectId()
+        self.db.merchants.docs.append({'_id': merchant_oid, 'nome_padrao': 'Burger King', 'aliases': []})
+        self.db.transactions.docs.append(self.candidate(
+            merchant_id=merchant_oid,
+            estabelecimento_original='',
+            descricao_original='',
+            valor=Decimal128('-53.29'),
+        ))
+        lines = [{**self.line, 'amount': '-53.29', 'description': 'IFD         *ZAMP SABEL'}]
+        self.batch['rows'] = lines
+        report, _ = analyze(self.db, self.batch, self.review(lines))
+        row = report['rows'][0]
+        self.assertEqual(row['status'], 'possible_duplicate')
+        self.assertEqual(row['confidence'], 'high')
+        self.assertEqual(row['matches'][0]['description'], 'Burger King')
+        self.assertTrue(similar_description('CAPPTA LANCHONETE LANB', 'LANCHE BEM'))
+        self.assertTrue(similar_description('PAYPAL GOOGLE CHATGP', 'CHATGPT'))
+        self.assertFalse(similar_description('PAYPAL GOOGLE CHATGP', 'PAYPAL GOOGLE YAHOO'))
+
+    def test_weekend_settlement_embedded_purchase_date_matches_saturday_capture(self):
+        merchant_oid = ObjectId()
+        self.db.merchants.docs.append({'_id': merchant_oid, 'nome_padrao': 'market4u', 'aliases': []})
+        self.db.provisional_transactions.docs.append({
+            '_id': ObjectId(),
+            'provisional_id': 'prov-sat-market4u',
+            'status': 'confirmed',
+            'account_profile_id': 'itau',
+            'merchant_id': merchant_oid,
+            'merchant_raw': 'mercadinho market 4u',
+            'data_evento': datetime(2026, 11, 7, 15, tzinfo=timezone.utc),
+            'valor': Decimal128('-21.48'),
+        })
+        lines = [{**self.line, 'date': date(2026, 11, 9), 'amount': '-21.48', 'description': 'PIX QRS MARKET4U GE07/11'}]
+        self.batch['rows'] = lines
+        report, _ = analyze(self.db, self.batch, self.review(lines))
+        row = report['rows'][0]
+        self.assertEqual(row['status'], 'possible_duplicate')
+        self.assertEqual(row['confidence'], 'high')
+        self.assertEqual(row['matches'][0]['identity'], 'prov-sat-market4u')
+        self.assertIn('data da compra informada no histórico', row['reason'])

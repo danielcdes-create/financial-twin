@@ -14,7 +14,7 @@
 Esta Nota Técnica documenta a arquitetura de compilação, empacotamento em containers isolados e implantação em nuvem dos backends **SpamShield BR (`spamshield-server`)** e **Financial Digital Twin (`financial-twin-server`)** coexistindo na mesma instância VPS Linux de recursos restritos (**1 vCPU / 1 GB RAM**).
 
 1. **SpamShield BR (`spamshield-server`):** Compilação cruzada estática no host Windows (`x86_64-pc-windows-msvc` ➔ `x86_64-unknown-linux-musl`) utilizando **Zig (`0.13.0`)** e **Rustls**, empacotado em imagem `alpine:3.20` (`34,5 MB`).
-2. **Financial Digital Twin (`financial-twin-server`):** Empacotamento determinístico da árvore de fontes FastAPI/Uvicorn/PyMongo via `Build-OraclePackage.py` (`76 arquivos`), execução em container `python:3.12-slim` com `uvloop`/`httptools`, migração integral de comprovantes (`data/media`) e relocação auditada/reversível de caminhos absolutos Windows ➔ Linux (`/app/data/media/<sha256>`) no MongoDB Atlas (`financas`).
+2. **Financial Digital Twin (`financial-twin-server`):** Empacotamento determinístico da árvore de fontes FastAPI/Uvicorn/PyMongo via `Build-OraclePackage.py` (`79 arquivos`), execução em container `python:3.12-slim` com `uvloop`/`httptools`, migração integral de comprovantes (`data/media`) e relocação auditada/reversível de caminhos absolutos Windows ➔ Linux (`/app/data/media/<sha256>`) no MongoDB Atlas (`financas`).
 
 > [!IMPORTANT]
 > **Resultado Operacional Consolidado em Produção:** Ambos os servidores operam simultaneamente na VPS utilizando no total apenas **311 MiB de RAM usada no host (644 MiB disponíveis de 956 MiB)**:
@@ -134,11 +134,11 @@ flowchart LR
 ├── .env                  # Segredos de produção, JWT_SECRET, XAI_API_KEY e URI MongoDB (financas)
 ├── Dockerfile            # Imagem python:3.12-slim + dependências travadas (requirements.lock.txt)
 ├── docker-compose.yml    # Container financial-twin-server (8000:8000)
-├── backend/              # Código-fonte FastAPI/PyMongo (76 arquivos verificados)
+├── backend/              # Código-fonte FastAPI/PyMongo (79 arquivos verificados)
 ├── data/
 │   └── media/            # 24 arquivos de comprovantes/extratos endereçados por SHA-256
 └── apk/
-    ├── financial-twin-arm64.apk           # Pacote Android v1.20.82 (Build 128)
+    ├── financial-twin-arm64.apk           # Pacote Android v1.20.83 (Build 129)
     ├── financial-twin-arm64.manifest.json # Manifesto verificado (SHA-256 + tamanho)
     └── apk-info.json                      # Metadados OTA
 ```

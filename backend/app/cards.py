@@ -173,16 +173,21 @@ def create_card(body: CardCreate, db=Depends(database)):
         writing = session_database(db, session)
         lock_movement_insert(writing)
         now = datetime.now(timezone.utc)
+        card_oid = ObjectId()
         card_doc = {
-            "_id": ObjectId(),
+            "_id": card_oid,
+            "external_key": f"card-manual-{card_oid}",
+            "schema_version": 2,
             "tipo": "cartao_credito",
             "instituicao": body.instituicao,
-            "cartao_final": body.cartao_final,
-            "status": "ativa",
-            "source": "mobile_manual",
+            "titular": "Titular",
+            "moeda": "BRL",
+            "status": "ativo",
             "created_at": now,
             "updated_at": now,
         }
+        if len(body.cartao_final) == 4:
+            card_doc["cartao_final"] = body.cartao_final
         writing.accounts.insert_one(card_doc)
         values = body.model_dump(exclude={"request_id"}, exclude_unset=True)
         store(writing, "card", card_doc["_id"], None, values=values, deleted=False)
