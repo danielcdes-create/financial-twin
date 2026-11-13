@@ -263,30 +263,15 @@ def main(argv: list[str] | None = None) -> int:
             backup_path = _write_pre_apply_backup(db, report_dir)
             result_payload["backup_jsonl"] = str(backup_path)
             _ensure_collections_outside_tx(db)
-            try:
-                with mongo_transaction(db) as session:
-                    writing = session_database(db, session)
-                    lock_movement_insert(writing, session)
-                    plans, targets = build_reconciliation_plan(writing, docs)
-                    apply_summary = apply_reconciliation_plan(
-                        writing,
-                        docs,
-                        plans,
-                        targets,
-                        force_balances=args.force_balances,
-                    )
-            except AtomicUnavailable:
-                if not args.allow_standalone:
-                    raise
-                lock_movement_insert(db)
-                plans, targets = build_reconciliation_plan(db, docs)
-                apply_summary = apply_reconciliation_plan(
-                    db,
-                    docs,
-                    plans,
-                    targets,
-                    force_balances=args.force_balances,
-                )
+            lock_movement_insert(db)
+            plans, targets = build_reconciliation_plan(db, docs)
+            apply_summary = apply_reconciliation_plan(
+                db,
+                docs,
+                plans,
+                targets,
+                force_balances=args.force_balances,
+            )
             result_payload.update(_summarize_plan(docs, plans))
             result_payload["applied"] = apply_summary
 

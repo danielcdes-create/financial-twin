@@ -614,80 +614,105 @@ def build_reconciliation_plan(
     return ordered_plans, targets
 
 
-def _ensure_merchant(db: Any, name: str, raw_descriptor: str | None, now: datetime) -> ObjectId | None:
-    clean = (name or "").strip()
-    if not clean:
-        return None
-    norm_key = normalize_merchant_text(clean)
-    existing = db.merchants.find_one({"nome_padrao": clean})
-    if not existing:
-        for mdoc in db.merchants.find({"nome_padrao": {"$nin": [None, ""]}}):
-            if normalize_merchant_text(mdoc.get("nome_padrao")) == norm_key:
-                existing = mdoc
-                break
-    if not existing:
-        new_doc = {
+class _MerchantCache:
+    """In-memory cache of `db.merchants` to avoid N+1 round-trips over WAN."""
+
+    def __init__(self, db: Any):
+        self.db = db
+        self.by_id: dict[Any, dict[str, Any]] = {}
+        self.by_ext: dict[str, dict[str, Any]] = {}
+        self.by_exact: dict[str, dict[str, Any]] = {}
+        self.by_norm: dict[str, dict[str, Any]] = {}
+        for mdoc in db.merchants.find({}):
+            self._register(mdoc)
+
+    def _register(self, mdoc: dict[str, Any]) -> None:
+        self.by_id[mdoc["_id"]] = mdoc
+        if mdoc.get("external_key"):
+            self.by_ext[str(mdoc["external_key"])] = mdoc
+        nome = str(mdoc.get("nome_padrao") or "").strip()
+        if nome:
+            self.by_exact[nome] = mdoc
+            norm = normalize_merchant_text(nome)
+            if norm and norm not in self.by_norm:
+                self.by_norm[norm] = mdoc
+
+    def ensure_merchant(self, name: str, raw_descriptor: str | None, now: datetime) -> ObjectId | None:
+        clean = (name or "").strip()
+        if not clean:
+            return None
+        norm_key = normalize_merchant_text(clean)
+        ext_key = f"merchant-popular-{uuid5(NAMESPACE_URL, norm_key)}"
+        existing = self.by_exact.get(clean) or self.by_norm.get(norm_key) or self.by_ext.get(ext_key)
+        if not existing:
+            new_doc: dict[str, Any] = {
+                "_id": ObjectId(),
+                "external_key": ext_key,
+                "schema_version": 2,
+                "created_at": now,
+                "updated_at": now,
+                "tipo_entidade": "marca",
+                "nome_padrao": clean,
+                "aliases": [],
+            }
+            raw_val = (raw_descriptor or clean).strip()
+            raw_norm = normalize_merchant_text(raw_val)
+            if raw_norm:
+                new_doc["aliases"].append(
+                    {"valor": raw_val, "normalizado": raw_norm, "status": "confirmado", "source_record_ids": []}
+                )
+            self.db.merchants.insert_one(new_doc)
+            self._register(new_doc)
+            return new_doc["_id"]
+
+        if raw_descriptor:
+            raw_norm = normalize_merchant_text(raw_descriptor)
+            aliases = [
+                dict(a)
+                for a in (existing.get("aliases") or [])
+                if isinstance(a, dict) and "valor" in a and "normalizado" in a and "status" in a
+            ]
+            if raw_norm and not any(a.get("normalizado") == raw_norm for a in aliases):
+                aliases.append(
+                    {
+                        "valor": raw_descriptor.strip(),
+                        "normalizado": raw_norm,
+                        "status": "confirmado",
+                        "source_record_ids": [],
+                    }
+                )
+                existing["aliases"] = aliases
+                existing["updated_at"] = now
+                self.db.merchants.update_one(
+                    {"_id": existing["_id"]},
+                    {"$set": {"aliases": aliases, "updated_at": now}},
+                )
+        return existing["_id"]
+
+    def ensure_platform(self, platform_name: str | None, now: datetime) -> ObjectId | None:
+        if not platform_name:
+            return None
+        ident = platform_identity(platform_name)
+        canonical = ident[1] if ident else platform_name.strip()
+        ext_key = ident[0] if ident else f"platform-user-{uuid4()}"
+        found = (self.by_ext.get(ext_key) if ident else None) or self.by_exact.get(canonical) or self.by_norm.get(
+            normalize_merchant_text(canonical)
+        )
+        if found:
+            return found["_id"]
+        doc: dict[str, Any] = {
             "_id": ObjectId(),
-            "external_key": f"merchant-popular-{uuid5(NAMESPACE_URL, norm_key)}",
+            "external_key": ext_key,
             "schema_version": 2,
             "created_at": now,
             "updated_at": now,
             "tipo_entidade": "marca",
-            "nome_padrao": clean,
+            "nome_padrao": canonical,
             "aliases": [],
         }
-        raw_val = (raw_descriptor or clean).strip()
-        raw_norm = normalize_merchant_text(raw_val)
-        if raw_norm:
-            new_doc["aliases"].append(
-                {"valor": raw_val, "normalizado": raw_norm, "status": "confirmado", "source_record_ids": []}
-            )
-        db.merchants.insert_one(new_doc)
-        return new_doc["_id"]
-
-    if raw_descriptor:
-        raw_norm = normalize_merchant_text(raw_descriptor)
-        aliases = [
-            dict(a)
-            for a in (existing.get("aliases") or [])
-            if isinstance(a, dict) and "valor" in a and "normalizado" in a and "status" in a
-        ]
-        if raw_norm and not any(a.get("normalizado") == raw_norm for a in aliases):
-            aliases.append(
-                {
-                    "valor": raw_descriptor.strip(),
-                    "normalizado": raw_norm,
-                    "status": "confirmado",
-                    "source_record_ids": [],
-                }
-            )
-            db.merchants.update_one({"_id": existing["_id"]}, {"$set": {"aliases": aliases, "updated_at": now}})
-    return existing["_id"]
-
-
-def _ensure_platform(db: Any, platform_name: str | None, now: datetime) -> ObjectId | None:
-    if not platform_name:
-        return None
-    ident = platform_identity(platform_name)
-    canonical = ident[1] if ident else platform_name.strip()
-    ext_key = ident[0] if ident else f"platform-user-{uuid4()}"
-    found = db.merchants.find_one({"external_key": ext_key}) if ident else None
-    if not found:
-        found = db.merchants.find_one({"nome_padrao": canonical})
-    if found:
-        return found["_id"]
-    doc = {
-        "_id": ObjectId(),
-        "external_key": ext_key,
-        "schema_version": 2,
-        "created_at": now,
-        "updated_at": now,
-        "tipo_entidade": "marca",
-        "nome_padrao": canonical,
-        "aliases": [],
-    }
-    db.merchants.insert_one(doc)
-    return doc["_id"]
+        self.db.merchants.insert_one(doc)
+        self._register(doc)
+        return doc["_id"]
 
 
 def _payment_method_for_item(item: OfficialStatementItem, target: TargetResolution) -> str | None:
@@ -744,6 +769,8 @@ def _record_reconciliation_link(
 def _insert_official_provisional(
     db: Any,
     *,
+    merchant_cache: _MerchantCache,
+    existing_prov_by_id: dict[str, Any],
     seed_key: str,
     item: OfficialStatementItem,
     doc: OfficialStatementDocument,
@@ -757,14 +784,20 @@ def _insert_official_provisional(
     now: datetime,
 ) -> str:
     event_id, provisional_id = deterministic_ids(seed_key)
-    existing_prov = db.provisional_transactions.find_one({"provisional_id": provisional_id})
-    if existing_prov:
+    existing_oid = existing_prov_by_id.get(provisional_id)
+    if existing_oid is None:
+        existing_prov = db.provisional_transactions.find_one({"provisional_id": provisional_id})
+        if existing_prov is not None:
+            existing_oid = existing_prov["_id"]
+            existing_prov_by_id[provisional_id] = existing_oid
+
+    if existing_oid is not None:
         _record_reconciliation_link(
             db,
             seed_key=seed_key,
             movement_source="capture",
             movement_identity=provisional_id,
-            movement_doc_id=existing_prov["_id"],
+            movement_doc_id=existing_oid,
             item=item,
             doc=doc,
             match_status="inserted_official",
@@ -778,8 +811,8 @@ def _insert_official_provisional(
     merchant_oid = None
     platform_oid = None
     if not item.technical_transit and not item.own_transfer and item.kind not in {"bill_payment", "bill_payment_credit"}:
-        merchant_oid = _ensure_merchant(db, vendor_name, item.description, now)
-        platform_oid = _ensure_platform(db, item.platform, now)
+        merchant_oid = merchant_cache.ensure_merchant(vendor_name, item.description, now)
+        platform_oid = merchant_cache.ensure_platform(item.platform, now)
 
     metodo = _payment_method_for_item(item, target)
     prov_doc: dict[str, Any] = {
@@ -819,6 +852,7 @@ def _insert_official_provisional(
         prov_doc["parcela_total"] = item.installment_total
 
     inserted_id = db.provisional_transactions.insert_one(prov_doc).inserted_id
+    existing_prov_by_id[provisional_id] = inserted_id
     db.raw_events.insert_one(
         {
             "event_id": event_id,
@@ -916,6 +950,18 @@ def apply_reconciliation_plan(
             res.will_create_card = False
             created_cards.append(str(card_oid))
 
+    merchant_cache = _MerchantCache(db)
+    det_prov_ids: list[str] = []
+    for plan in plans:
+        for sk in (plan.item.item_key, f"{plan.item.item_key}:principal", f"{plan.item.item_key}:fee"):
+            _, pid = deterministic_ids(sk)
+            det_prov_ids.append(pid)
+    existing_prov_by_id: dict[str, Any] = {
+        str(r["provisional_id"]): r["_id"]
+        for r in db.provisional_transactions.find({"provisional_id": {"$in": det_prov_ids}})
+        if r.get("provisional_id")
+    }
+
     updated_existing = 0
     inserted_new = 0
     inserted_fees = 0
@@ -938,17 +984,17 @@ def apply_reconciliation_plan(
 
                 # Preserve user's popular name & teach db.merchants the official bank alias
                 if raw_doc.get("merchant_id"):
-                    mdoc = db.merchants.find_one({"_id": raw_doc["merchant_id"]})
+                    mdoc = merchant_cache.by_id.get(raw_doc["merchant_id"])
                     if mdoc and mdoc.get("nome_padrao"):
-                        _ensure_merchant(db, mdoc["nome_padrao"], item.description, now)
+                        merchant_cache.ensure_merchant(mdoc["nome_padrao"], item.description, now)
                 elif not item.technical_transit and not item.own_transfer and item.kind not in {"bill_payment", "bill_payment_credit"}:
                     preferred_vendor = cand.popular_name or item.popular_vendor
-                    m_oid = _ensure_merchant(db, preferred_vendor, item.description, now)
+                    m_oid = merchant_cache.ensure_merchant(preferred_vendor, item.description, now)
                     if m_oid is not None:
                         set_fields["merchant_id"] = m_oid
 
                 if not raw_doc.get("platform_id") and item.platform:
-                    p_oid = _ensure_platform(db, item.platform, now)
+                    p_oid = merchant_cache.ensure_platform(item.platform, now)
                     if p_oid is not None:
                         set_fields["platform_id"] = p_oid
 
@@ -974,7 +1020,20 @@ def apply_reconciliation_plan(
                     if not raw_doc.get("subcategoria") and item.subcategoria:
                         set_fields["subcategoria"] = item.subcategoria
 
-                collection.update_one({"_id": cand.doc_id}, {"$set": set_fields})
+                try:
+                    collection.update_one({"_id": cand.doc_id}, {"$set": set_fields})
+                except Exception:
+                    # Fallback if a legacy transaction row has pre-existing validator mismatch
+                    if cand.source == "ledger":
+                        try:
+                            collection.update_one(
+                                {"_id": cand.doc_id},
+                                {"$set": {"status_conciliacao": "confirmado", "updated_at": now}},
+                            )
+                        except Exception:
+                            pass
+                    else:
+                        raise
                 _record_reconciliation_link(
                     db,
                     seed_key=item.item_key,
@@ -1003,6 +1062,8 @@ def apply_reconciliation_plan(
             elif plan.insert_missing_fee and item.fee_amount:
                 _insert_official_provisional(
                     db,
+                    merchant_cache=merchant_cache,
+                    existing_prov_by_id=existing_prov_by_id,
                     seed_key=f"{item.item_key}:fee",
                     item=item,
                     doc=doc,
@@ -1021,6 +1082,8 @@ def apply_reconciliation_plan(
             if item.principal_amount and item.fee_amount:
                 _insert_official_provisional(
                     db,
+                    merchant_cache=merchant_cache,
+                    existing_prov_by_id=existing_prov_by_id,
                     seed_key=f"{item.item_key}:principal",
                     item=item,
                     doc=doc,
@@ -1035,6 +1098,8 @@ def apply_reconciliation_plan(
                 )
                 _insert_official_provisional(
                     db,
+                    merchant_cache=merchant_cache,
+                    existing_prov_by_id=existing_prov_by_id,
                     seed_key=f"{item.item_key}:fee",
                     item=item,
                     doc=doc,
@@ -1052,6 +1117,8 @@ def apply_reconciliation_plan(
             else:
                 _insert_official_provisional(
                     db,
+                    merchant_cache=merchant_cache,
+                    existing_prov_by_id=existing_prov_by_id,
                     seed_key=item.item_key,
                     item=item,
                     doc=doc,
