@@ -33,6 +33,59 @@ from test_subcategories import CatalogCollection, CatalogDB
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 TX_SCHEMA = json.loads((FIXTURES_DIR / "transactions-validator.json").read_text(encoding="utf-8"))["validator"]["$jsonSchema"]
 ACC_SCHEMA = json.loads((FIXTURES_DIR / "accounts-validator.json").read_text(encoding="utf-8"))["validator"]["$jsonSchema"]
+BILL_SCHEMA = {
+    "bsonType": "object",
+    "additionalProperties": False,
+    "required": [
+        "_id", "external_key", "schema_version", "card_account_id", "competencia",
+        "data_vencimento", "saldo_anterior", "novos_lancamentos", "encargos",
+        "pagamentos", "valor_total", "status", "items", "created_at", "updated_at",
+    ],
+    "properties": {
+        "_id": {"bsonType": "objectId"},
+        "external_key": {"bsonType": "string"},
+        "schema_version": {"bsonType": "int"},
+        "card_account_id": {"bsonType": "objectId"},
+        "competencia": {"bsonType": "string"},
+        "data_vencimento": {"bsonType": "date"},
+        "saldo_anterior": {"bsonType": "decimal"},
+        "novos_lancamentos": {"bsonType": "decimal"},
+        "encargos": {"bsonType": "decimal"},
+        "pagamentos": {"bsonType": "decimal"},
+        "valor_pago": {"bsonType": "decimal"},
+        "saldo_aberto": {"bsonType": "decimal"},
+        "valor_total": {"bsonType": "decimal"},
+        "status": {"enum": ["aberta", "paga", "parcialmente_paga", "vencida"]},
+        "items": {"bsonType": "array"},
+        "created_at": {"bsonType": "date"},
+        "updated_at": {"bsonType": "date"},
+    },
+}
+OBL_SCHEMA = {
+    "bsonType": "object",
+    "additionalProperties": False,
+    "required": [
+        "_id", "external_key", "schema_version", "tipo", "origem_id",
+        "data_vencimento", "valor_original", "valor_pago", "saldo_aberto",
+        "principal", "status", "created_at", "updated_at",
+    ],
+    "properties": {
+        "_id": {"bsonType": "objectId"},
+        "external_key": {"bsonType": "string"},
+        "schema_version": {"bsonType": "int"},
+        "tipo": {"enum": ["fatura_cartao", "financiamento", "emprestimo", "imposto", "outro"]},
+        "origem_id": {"bsonType": "objectId"},
+        "competencia": {"bsonType": "string"},
+        "data_vencimento": {"bsonType": "date"},
+        "valor_original": {"bsonType": "decimal"},
+        "valor_pago": {"bsonType": "decimal"},
+        "saldo_aberto": {"bsonType": "decimal"},
+        "principal": {"bsonType": "decimal"},
+        "status": {"enum": ["futura", "paga", "parcialmente_paga", "vencida", "cancelada"]},
+        "created_at": {"bsonType": "date"},
+        "updated_at": {"bsonType": "date"},
+    },
+}
 
 
 def _assert_matches_bson_schema(doc: dict, schema: dict, label: str) -> None:
@@ -104,7 +157,12 @@ class ReconcilerCollection(CatalogCollection):
 
 
 class ReconcilerDB(CatalogDB):
-    _SCHEMAS = {"transactions": TX_SCHEMA, "accounts": ACC_SCHEMA}
+    _SCHEMAS = {
+        "transactions": TX_SCHEMA,
+        "accounts": ACC_SCHEMA,
+        "credit_card_bills": BILL_SCHEMA,
+        "obligations": OBL_SCHEMA,
+    }
 
     def __missing__(self, key):
         self[key] = ReconcilerCollection(name=key, validator_schema=self._SCHEMAS.get(key))

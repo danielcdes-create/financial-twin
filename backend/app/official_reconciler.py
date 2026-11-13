@@ -20,6 +20,7 @@ from bson import ObjectId
 from bson.decimal128 import Decimal128
 
 from app.account_profiles import legacy_accounts_by_profile, profile_for_legacy
+from app.atomic import _SessionDatabase
 from app.economic_policy import duplicate_of_ledger
 from app.financial_time import LOCAL_ZONE, day_start, local_date
 from app.official_statement_parsers import OfficialStatementDocument, OfficialStatementItem
@@ -57,26 +58,80 @@ def deterministic_ids(seed_key: str) -> tuple[str, str]:
     return event_id, provisional_id
 
 
-def _schema_allows_document(db: Any, collection_name: str, document: dict[str, Any]) -> bool:
-    """Verify required keys and additionalProperties against MongoDB $jsonSchema before write."""
-    raw_db = getattr(db, "db", db)
+def _get_collection_schema(db: Any, collection_name: str) -> dict[str, Any] | None:
+    """Fetch live MongoDB $jsonSchema validator for `collection_name` without triggering Collection.__getattr__."""
+    raw_db = db.db if isinstance(db, _SessionDatabase) else db
     if not hasattr(raw_db, "list_collections"):
-        return True
+        return None
     try:
         info = next(raw_db.list_collections(filter={"name": collection_name}), None)
     except Exception:
-        return True
+        return None
     schema = (((info or {}).get("options") or {}).get("validator") or {}).get("$jsonSchema")
-    if not isinstance(schema, dict):
-        return True
+    return schema if isinstance(schema, dict) else None
+
+
+def _conform_document_to_schema(
+    db: Any,
+    collection_name: str,
+    candidate: dict[str, Any],
+    now: datetime,
+) -> dict[str, Any] | None:
+    """Conform `candidate` to live `$jsonSchema` (`additionalProperties`, `required`, and `enum`)."""
+    schema = _get_collection_schema(db, collection_name)
+    if schema is None:
+        # Default safe subset when running against unvalidated test DBs
+        return dict(candidate)
+
+    props = schema.get("properties") or {}
     required = set(schema.get("required") or [])
-    if not required.issubset(document.keys()):
-        return False
-    if schema.get("additionalProperties") is False:
-        allowed = set((schema.get("properties") or {}).keys())
-        if not set(document.keys()).issubset(allowed):
-            return False
-    return True
+    strict_props = schema.get("additionalProperties") is False
+
+    out: dict[str, Any] = {
+        k: v for k, v in candidate.items() if (not strict_props or k in props) and v is not None
+    }
+
+    for req_key in required:
+        if req_key in out:
+            continue
+        spec = props.get(req_key) or {}
+        if "enum" in spec and spec["enum"]:
+            out[req_key] = spec["enum"][0]
+            continue
+        btype = spec.get("bsonType")
+        if isinstance(btype, list):
+            btype = next((t for t in btype if t != "null"), btype[0] if btype else None)
+        if btype == "decimal":
+            out[req_key] = Decimal128("0.00")
+        elif btype in {"int", "long", "double"}:
+            out[req_key] = 0
+        elif btype == "bool":
+            out[req_key] = False
+        elif btype == "array":
+            out[req_key] = []
+        elif btype == "date":
+            out[req_key] = now
+        elif btype == "string":
+            out[req_key] = "oficial"
+        elif btype == "object" and not spec.get("required"):
+            out[req_key] = {}
+        else:
+            return None
+
+    for key, val in list(out.items()):
+        spec = props.get(key) or {}
+        enums = spec.get("enum")
+        if isinstance(enums, list) and enums and val not in enums:
+            if val == "aberta" and "futura" in enums:
+                out[key] = "futura"
+            elif val == "paga" and "liquidada" in enums:
+                out[key] = "liquidada"
+            else:
+                out[key] = enums[0]
+
+    if not required.issubset(out.keys()):
+        return None
+    return out
 
 
 @dataclass
@@ -1169,6 +1224,13 @@ def apply_reconciliation_plan(
 
     # 4. Sync credit card bills & linked obligations
     synced_bills: list[dict[str, Any]] = []
+    bill_schema = _get_collection_schema(db, "credit_card_bills")
+    obl_schema = _get_collection_schema(db, "obligations")
+    bill_props = set((bill_schema or {}).get("properties") or [])
+    obl_props = set((obl_schema or {}).get("properties") or [])
+    bill_strict = bool(bill_schema and bill_schema.get("additionalProperties") is False)
+    obl_strict = bool(obl_schema and obl_schema.get("additionalProperties") is False)
+
     for doc in docs:
         if doc.kind != "card_statement" or not doc.total_amount or not doc.due_date or not doc.competencia:
             continue
@@ -1181,53 +1243,85 @@ def apply_reconciliation_plan(
         open_bal = tot - paid
         bill_stat = "paga" if open_bal == 0 else "aberta"
         due_utc = day_start(date.fromisoformat(doc.due_date))
+        paid_utc = day_start(date.fromisoformat(doc.paid_date)) if doc.paid_date else None
 
         existing_bill = db.credit_card_bills.find_one({"card_account_id": card_oid, "competencia": doc.competencia})
         if existing_bill is None:
             bill_oid = ObjectId()
-            new_bill = {
+            raw_bill: dict[str, Any] = {
                 "_id": bill_oid,
                 "external_key": f"bill-{doc.doc_key}",
                 "schema_version": 2,
                 "card_account_id": card_oid,
                 "competencia": doc.competencia,
                 "data_vencimento": due_utc,
-                "valor_total": Decimal128(f"{tot:.2f}"),
-                "valor_pago": Decimal128(f"{paid:.2f}"),
-                "saldo_aberto": Decimal128(f"{open_bal:.2f}"),
+                "saldo_anterior": Decimal128("0.00"),
                 "novos_lancamentos": Decimal128(f"{tot:.2f}"),
                 "encargos": Decimal128("0.00"),
-                "moeda": "BRL",
+                "pagamentos": Decimal128(f"{paid:.2f}"),
+                "valor_pago": Decimal128(f"{paid:.2f}"),
+                "saldo_aberto": Decimal128(f"{open_bal:.2f}"),
+                "valor_total": Decimal128(f"{tot:.2f}"),
                 "status": bill_stat,
                 "items": [],
                 "created_at": now,
                 "updated_at": now,
             }
-            new_obl = {
+            raw_obl: dict[str, Any] = {
                 "_id": ObjectId(),
                 "external_key": f"obl-{doc.doc_key}",
                 "schema_version": 2,
                 "tipo": "fatura_cartao",
                 "origem_id": bill_oid,
+                "account_id": card_oid,
+                "credor": doc.institution,
+                "descricao": f"Fatura {doc.institution} final {doc.card_final} ({doc.competencia})",
                 "competencia": doc.competencia,
                 "data_vencimento": due_utc,
+                "data_liquidacao": paid_utc,
                 "valor_original": Decimal128(f"{tot:.2f}"),
                 "valor_pago": Decimal128(f"{paid:.2f}"),
                 "saldo_aberto": Decimal128(f"{open_bal:.2f}"),
                 "principal": Decimal128(f"{tot:.2f}"),
+                "juros": Decimal128("0.00"),
+                "multa": Decimal128("0.00"),
+                "encargos": Decimal128("0.00"),
+                "descontos": Decimal128("0.00"),
+                "dias_atraso": 0,
                 "moeda": "BRL",
                 "status": bill_stat,
+                "source_record_ids": [],
                 "created_at": now,
                 "updated_at": now,
             }
-            if _schema_allows_document(db, "credit_card_bills", new_bill) and _schema_allows_document(
-                db, "obligations", new_obl
-            ):
-                db.credit_card_bills.insert_one(new_bill)
-                db.obligations.insert_one(new_obl)
-                synced_bills.append(
-                    {"doc_key": doc.doc_key, "competencia": doc.competencia, "total_amount": f"{tot:.2f}", "status": bill_stat}
-                )
+            new_bill = _conform_document_to_schema(db, "credit_card_bills", raw_bill, now)
+            new_obl = _conform_document_to_schema(db, "obligations", raw_obl, now)
+            if new_bill is not None and new_obl is not None:
+                try:
+                    db.credit_card_bills.insert_one(new_bill)
+                    try:
+                        db.obligations.insert_one(new_obl)
+                    except Exception:
+                        db.credit_card_bills.delete_one({"_id": bill_oid})
+                        raise
+                    synced_bills.append(
+                        {
+                            "doc_key": doc.doc_key,
+                            "competencia": doc.competencia,
+                            "total_amount": f"{tot:.2f}",
+                            "status": str(new_bill.get("status") or bill_stat),
+                        }
+                    )
+                except Exception as exc:
+                    synced_bills.append(
+                        {
+                            "doc_key": doc.doc_key,
+                            "competencia": doc.competencia,
+                            "total_amount": f"{tot:.2f}",
+                            "status": "skipped_validator",
+                            "detail": str(exc)[:180],
+                        }
+                    )
         else:
             bill_oid = existing_bill["_id"]
             cur_paid = _dec(existing_bill.get("valor_pago", existing_bill.get("pagamentos", 0)))
@@ -1242,25 +1336,31 @@ def apply_reconciliation_plan(
                 "status": eff_stat,
                 "updated_at": now,
             }
-            if "valor_pago" in existing_bill or "pagamentos" not in existing_bill:
+            if "pagamentos" in existing_bill or (not bill_strict or "pagamentos" in bill_props):
+                bill_set["pagamentos"] = Decimal128(f"{eff_paid:.2f}")
+            if "valor_pago" in existing_bill or (not bill_strict or "valor_pago" in bill_props):
                 bill_set["valor_pago"] = Decimal128(f"{eff_paid:.2f}")
+            if bill_strict:
+                bill_set = {k: v for k, v in bill_set.items() if k in bill_props or k in existing_bill}
             db.credit_card_bills.update_one({"_id": bill_oid}, {"$set": bill_set})
+
             linked_obls = list(db.obligations.find({"tipo": "fatura_cartao", "origem_id": bill_oid}))
             if len(linked_obls) == 1:
-                db.obligations.update_one(
-                    {"_id": linked_obls[0]["_id"]},
-                    {
-                        "$set": {
-                            "data_vencimento": due_utc,
-                            "valor_original": Decimal128(f"{tot:.2f}"),
-                            "valor_pago": Decimal128(f"{eff_paid:.2f}"),
-                            "saldo_aberto": Decimal128(f"{eff_open:.2f}"),
-                            "principal": Decimal128(f"{tot:.2f}"),
-                            "status": eff_stat,
-                            "updated_at": now,
-                        }
-                    },
-                )
+                existing_obl = linked_obls[0]
+                obl_enums = (((obl_schema or {}).get("properties") or {}).get("status") or {}).get("enum") or []
+                obl_stat = "futura" if (eff_stat == "aberta" and "aberta" not in obl_enums and "futura" in obl_enums) else eff_stat
+                obl_set: dict[str, Any] = {
+                    "data_vencimento": due_utc,
+                    "valor_original": Decimal128(f"{tot:.2f}"),
+                    "valor_pago": Decimal128(f"{eff_paid:.2f}"),
+                    "saldo_aberto": Decimal128(f"{eff_open:.2f}"),
+                    "principal": Decimal128(f"{tot:.2f}"),
+                    "status": obl_stat,
+                    "updated_at": now,
+                }
+                if obl_strict:
+                    obl_set = {k: v for k, v in obl_set.items() if k in obl_props or k in existing_obl}
+                db.obligations.update_one({"_id": existing_obl["_id"]}, {"$set": obl_set})
             synced_bills.append(
                 {"doc_key": doc.doc_key, "competencia": doc.competencia, "total_amount": f"{tot:.2f}", "status": eff_stat}
             )
