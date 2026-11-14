@@ -3,9 +3,11 @@ import {ScrollView, StyleSheet, Text, View} from 'react-native';
 import {Pressable, TextInput} from './InteractionControls';
 import {financialDateLabel} from '../utils/classification';
 import {maskCivilDate, parseCivilDate} from '../utils/formMask';
+import {useLocalBack} from '../utils/localBack';
 import {parseMoneyInput} from '../utils/moneyInput';
 import {amountWords, suggestionWindow} from '../utils/commitmentPresentation';
 import {Alert} from '../utils/appAlert';
+import {useAsyncScope} from '../utils/useAsyncScope';
 
 type Api = (path: string, init?: RequestInit) => Promise<any>;
 type Commitment = {commitment_id: string; name?: string; amount?: number | string; revision?: number};
@@ -29,7 +31,7 @@ export default function PaymentLinkScreen({api, commitment, due, amount, stateLa
   /** Imported charge: search the statement without a managed commitment id. */
   lookup?: boolean;
   canConfirm?: boolean;
-  onConfirm: (transaction: any) => void;
+  onConfirm: (transaction: any) => Promise<void> | void;
 }) {
   const window = suggestionWindow(due);
   const [text, setText] = useState('');
@@ -49,6 +51,14 @@ export default function PaymentLinkScreen({api, commitment, due, amount, stateLa
   const [revision, setRevision] = useState<number | null>(null);
   const [occurrences, setOccurrences] = useState<Record<string, string>>({});
   const generation = useRef(0);
+  const captureScope = useAsyncScope(commitment.commitment_id);
+  useLocalBack(() => {
+    if (sheet) {
+      setSheet(null);
+      return;
+    }
+    setHelp(false);
+  }, Boolean(sheet || help), 45);
   const typedAmount = (value: string) => parseMoneyInput(value, {allowZero: false, max: 100_000_000});
   const queryFor = (nextText: string, period: boolean, band: boolean, start: string, end: string, marginText: string) => {
     const params = new URLSearchParams();
@@ -73,11 +83,13 @@ export default function PaymentLinkScreen({api, commitment, due, amount, stateLa
     return `${path}?${params.toString()}`;
   };
   const run = async (nextText: string, period = usePeriod, band = useBand, start = from, end = to, marginText = margin) => {
+    const valid = captureScope();
+    if (!valid()) return;
     const current = ++generation.current;
     setLoading(true);
     try {
       const result = await api(queryFor(nextText, period, band, start, end, marginText));
-      if (current !== generation.current) return;
+      if (!valid() || current !== generation.current) return;
       const found = result.items || [];
       setItems(found);
       if (result.commitment_revision) setRevision(Number(result.commitment_revision));
@@ -87,11 +99,11 @@ export default function PaymentLinkScreen({api, commitment, due, amount, stateLa
         return preferred ? String(preferred.id || preferred.provisional_id) : null;
       });
     } catch (error: any) {
-      if (current !== generation.current) return;
+      if (!valid() || current !== generation.current) return;
       setItems([]);
       Alert.alert('Não foi possível consultar o extrato', error.message);
     } finally {
-      if (current === generation.current) setLoading(false);
+      if (valid() && current === generation.current) setLoading(false);
     }
   };
   const runRef = useRef(run);
@@ -130,13 +142,13 @@ export default function PaymentLinkScreen({api, commitment, due, amount, stateLa
         <TextInput accessibilityLabel="Início do período" value={draftFrom} onChangeText={value => setDraftFrom(maskCivilDate(value))} placeholder="dd/mm/aaaa" placeholderTextColor="#92A4A2" keyboardType="number-pad" style={s.search}/>
         <TextInput accessibilityLabel="Fim do período" value={draftTo} onChangeText={value => setDraftTo(maskCivilDate(value))} placeholder="dd/mm/aaaa" placeholderTextColor="#92A4A2" keyboardType="number-pad" style={s.search}/>
         <View style={s.sheetActions}>
-          <Pressable accessibilityRole="button" accessibilityLabel="Limpar período" onPress={() => {setUsePeriod(false); setSheet(null); void run(text, false, useBand, from, to, margin);}} style={s.secondary}><Text style={s.secondaryText}>Limpar</Text></Pressable>
+          <Pressable accessibilityRole="button" accessibilityLabel="Limpar período" onPress={() => {setUsePeriod(false); setSheet(null); return run(text, false, useBand, from, to, margin);}} style={s.secondary}><Text style={s.secondaryText}>Limpar</Text></Pressable>
           <Pressable accessibilityRole="button" accessibilityLabel="Aplicar período" onPress={() => {
             const start = parseCivilDate(draftFrom);
             const end = parseCivilDate(draftTo);
             if (!start || !end || start > end) {Alert.alert('Confira o período', 'Informe o início e o fim como dd/mm/aaaa.'); return;}
             setFrom(start); setTo(end); setUsePeriod(true); setSheet(null);
-            void run(text, true, useBand, start, end, margin);
+            return run(text, true, useBand, start, end, margin);
           }} style={s.apply}><Text style={s.applyText}>Aplicar</Text></Pressable>
         </View>
       </View>}
@@ -144,13 +156,13 @@ export default function PaymentLinkScreen({api, commitment, due, amount, stateLa
         <Text style={s.help}>Margem em torno do valor previsto.</Text>
         <TextInput accessibilityLabel="Margem do valor" value={draftMargin} onChangeText={setDraftMargin} placeholder="0,00" placeholderTextColor="#92A4A2" keyboardType="decimal-pad" style={s.search}/>
         <View style={s.sheetActions}>
-          <Pressable accessibilityRole="button" accessibilityLabel="Limpar valor" onPress={() => {setUseBand(false); setSheet(null); void run(text, usePeriod, false, from, to, margin);}} style={s.secondary}><Text style={s.secondaryText}>Limpar</Text></Pressable>
+          <Pressable accessibilityRole="button" accessibilityLabel="Limpar valor" onPress={() => {setUseBand(false); setSheet(null); return run(text, usePeriod, false, from, to, margin);}} style={s.secondary}><Text style={s.secondaryText}>Limpar</Text></Pressable>
           <Pressable accessibilityRole="button" accessibilityLabel="Aplicar valor" onPress={() => {
             const parsed = typedAmount(draftMargin.includes(',') ? draftMargin : draftMargin.replace('.', ','));
             const width = parsed || (Number(draftMargin) > 0 ? Number(draftMargin).toFixed(2) : '');
             if (!width) {Alert.alert('Confira a margem', 'Informe a margem como 40,00.'); return;}
             setMargin(width); setUseBand(true); setSheet(null);
-            void run(text, usePeriod, true, from, to, width);
+            return run(text, usePeriod, true, from, to, width);
           }} style={s.apply}><Text style={s.applyText}>Aplicar</Text></Pressable>
         </View>
       </View>}

@@ -12,7 +12,7 @@ import {submitQueuedCapture} from "./utils/captureSubmission";
 import {enqueueVoiceEvidence} from './utils/voiceEvidence';
 import {deleteVoiceDraft, type VoiceEvidenceCommand} from "./utils/voiceDraft";
 import type { PurchaseImage } from "./utils/purchaseImage";
-import { persistQueuedFile } from "./utils/durableFiles";
+import { persistQueuedFile, removeQueuedFile } from "./utils/durableFiles";
 import * as DocumentPicker from "expo-document-picker";
 import * as ImagePicker from "expo-image-picker";
 import {reviewHasDifferences,reviewDecisionBody} from "./utils/reviewDecision";
@@ -847,6 +847,18 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
       NotificationCapture.markSynced(row.event_id);
     }
     await finalizeQueueRow(db, row, () => {});
+    if (row.local_uri && typeof removeQueuedFile === 'function') {
+      const [remainingRows, receipts] = await Promise.all([
+        db.getAllAsync<QueueRow>('SELECT * FROM event_queue'),
+        db.getAllAsync<{identity: string}>('SELECT * FROM queue_acknowledgements'),
+      ]);
+      const stillReferenced =
+        remainingRows.some(item => item.local_uri === row.local_uri) ||
+        receipts.some(item => String(item.identity || '').includes(String(row.local_uri)));
+      if (!stillReferenced) {
+        await removeQueuedFile(row.local_uri).catch(() => {});
+      }
+    }
   };
   const refreshLocalQueue = async (valid: () => boolean) => {
     const [remaining, active] = await Promise.all([quarantinedQueue(), queue()]);
@@ -1970,7 +1982,7 @@ export default function App({initialPurchaseImage,initialPurchaseError,navigatio
               account={captureAccount} onAccount={value => manual.change('account',value)}
               payment={capturePayment} onPayment={value => manual.change('payment',value)}
               installments={manual.draft.installments} onInstallments={value => manual.change('installments', value)}
-              queueCount={queueCount} rejectedCount={deadLetters.length} syncError={[syncError,nativeInboxError].filter(Boolean).join(' ')} onSync={() => sync()} onReview={() => setTab('Revisão')} onQueueSettings={() => setTab('Ajustes')} onClearRejected={() => discardLocalItems(deadLetters)}
+              queueCount={queueCount} rejectedCount={deadLetters.length} syncError={[syncError,nativeInboxError].filter(Boolean).join(' ')} onSync={() => sync()} onReview={() => setTab('Revisão')} onQueueSettings={() => setTab('Ajustes')} onClearRejected={() => discardLocalItems(deadLetters)} onRetryRejected={() => runCaptureTask(async () => {for (const row of deadLetters) await retryLocalItem(row, false);})}
               transcript={voiceTranscript} onMovementVoice={applyMovementVoice} onEvidenceVoice={saveVoiceEvidence}
               onSave={saveCapture} onPhoto={() => runCaptureTask(capturePhoto, "camera_photo")}
               onDiscard={async () => {

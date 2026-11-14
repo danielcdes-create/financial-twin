@@ -8,14 +8,34 @@ import MonthDetailScreen from './MonthDetailScreen';
 
 type Month = {month: string; total: string; installments: string; subscriptions: string; accounts?: string; other: string; estimated: string; bill_balance: string; items: ChargeEntry[]};
 type Projection = {items: Month[]; months: number; start_month: string; end_month: string; last_installment_month: string | null; warnings: string[]; total: string; as_of: string; automatic_horizon_capped: boolean; summary?: {this_month: string; next_12: string | null; overdue?: string; upcoming?: string; installments: string; subscriptions: string; other: string; bill_balance: string; window_months: number} | null};
-type Frame = {summary: React.ReactNode; chart: React.ReactNode; monthOpen: boolean; bindCharge: (opener: (entry: ChargeEntry) => void) => void};
+type ChargeOpener = (entry: ChargeEntry) => boolean | void;
+type Frame = {summary: React.ReactNode; chart: React.ReactNode; monthOpen: boolean; bindCharge: (opener: ChargeOpener | null) => void};
 
 let listScrollerNode: ScrollView | null = null;
-let chargeOpener: (entry: ChargeEntry) => void = () => {};
+let chargeOpener: ChargeOpener | null = null;
+let pendingChargeEntry: ChargeEntry | null = null;
 const bindListScroller = (node: ScrollView | null) => {listScrollerNode = node;};
 const scrollListTo = (y: number) => {listScrollerNode?.scrollTo?.({y, animated: false});};
-const bindCharge = (opener: (entry: ChargeEntry) => void) => {chargeOpener = opener;};
-const triggerCharge = (entry: ChargeEntry) => {chargeOpener(entry);};
+const bindCharge = (opener: ChargeOpener | null) => {
+  chargeOpener = opener;
+  if (opener && pendingChargeEntry && opener(pendingChargeEntry) !== false) {
+    pendingChargeEntry = null;
+  }
+};
+const triggerCharge = (entry: ChargeEntry) => {
+  if (chargeOpener) {
+    chargeOpener(entry);
+    return;
+  }
+  pendingChargeEntry = entry;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const {router} = require('expo-router') as {router?: {replace?: (href: string) => void}};
+    router?.replace?.('/');
+  } catch {
+    pendingChargeEntry = null;
+  }
+};
 
 export default function CommitmentProjection({api, money, refreshKey = 0, renderFrame, initialMonth = null, initialMonths, urlDriven = false, onSettled}: {
   api: (path: string) => Promise<any>;

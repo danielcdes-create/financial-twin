@@ -39,12 +39,19 @@ class XAIVoiceProvider:
         settings = get_settings()
         if not settings.xai_api_key: raise XAIError('xAI is not configured', 'not_configured')
         boundary = 'voice-' + uuid4().hex
-        parts = []
+        prefix_chunks = []
         for key, value in [('model', settings.xai_transcription_model), ('language', 'pt'), ('format', 'true')]:
-            parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n'.encode())
+            prefix_chunks.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n'.encode())
         # xAI requires the file to be the last field.
-        parts.extend([f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="capture.{extension}"\r\nContent-Type: {mime}\r\n\r\n'.encode(), data, f'\r\n--{boundary}--\r\n'.encode()])
-        req = urllib.request.Request(settings.xai_base_url.rstrip('/') + '/stt', data=b''.join(parts),
+        prefix_chunks.append(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="capture.{extension}"\r\nContent-Type: {mime}\r\n\r\n'.encode())
+        prefix = b''.join(prefix_chunks)
+        suffix = f'\r\n--{boundary}--\r\n'.encode()
+        body_buf = bytearray(len(prefix) + len(data) + len(suffix))
+        body_buf[:len(prefix)] = prefix
+        body_buf[len(prefix):len(prefix) + len(data)] = data
+        body_buf[len(prefix) + len(data):] = suffix
+        del data
+        req = urllib.request.Request(settings.xai_base_url.rstrip('/') + '/stt', data=body_buf,
             headers={'Authorization': f'Bearer {settings.xai_api_key}', 'Content-Type': f'multipart/form-data; boundary={boundary}'}, method='POST')
         try:
             with urllib.request.urlopen(req, timeout=90) as response: payload = json.loads(response.read())
@@ -118,12 +125,32 @@ def interpret(body):
 
 @router.post('/transcribe')
 async def transcribe_audio(request:Request,file: UploadFile = File(...)):
+    import anyio
+    from app.upload_worker import _shared_memory_limiter
+    mem_limiter = _shared_memory_limiter(request.app.state)
     try:
-        data = await file.read(MAX_AUDIO_BYTES + 1)
-    finally:
+        mem_limiter.acquire_nowait()
+    except anyio.WouldBlock:
         await file.close()
-    if not data: raise HTTPException(422, 'O áudio está vazio. Grave novamente.')
-    if len(data) > MAX_AUDIO_BYTES: raise HTTPException(413, 'Áudio excede 20 MiB. Escolha uma gravação menor.')
+        raise HTTPException(429, 'Há análises pesadas em andamento. Seus dados continuam na tela; tente novamente em instantes.', headers={'Retry-After': '5'})
+    try:
+        chunks = bytearray()
+        try:
+            while True:
+                piece = await file.read(65536)
+                if not piece:
+                    break
+                chunks.extend(piece)
+                if len(chunks) > MAX_AUDIO_BYTES:
+                    raise HTTPException(413, 'Áudio excede 20 MiB. Escolha uma gravação menor.')
+        finally:
+            await file.close()
+        if not chunks:
+            raise HTTPException(422, 'O áudio está vazio. Grave novamente.')
+        data = bytes(chunks)
+        del chunks
+    finally:
+        mem_limiter.release()
     mime, extension = audio_mime(data)
     try: return await run_ai(request,XAIVoiceProvider().transcribe, data, mime, extension)
     except XAIError as exc: raise HTTPException(503, public_xai_error(exc)) from exc

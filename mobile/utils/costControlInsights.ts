@@ -155,7 +155,10 @@ export function resolveCostControlView(
   yearDashboard?: any,
   moneyFormatter: (v: number) => string = (v) => `R$ ${(v || 0).toFixed(2)}`,
 ): CostControlViewModel {
-  const source = dashboard?.cost_control || monthDashboard?.cost_control;
+  const source =
+    (dashboard?.period && dashboard.period !== "month" ? monthDashboard?.cost_control : null) ||
+    dashboard?.cost_control ||
+    monthDashboard?.cost_control;
   if (source && source.mtd && Array.isArray(source.mtd.buckets)) {
     return {
       status: (source.status as CostControlStatus) || "no_baseline",
@@ -268,12 +271,17 @@ export function resolveCostControlView(
   const comp = activeDash.comparison || dashboard?.comparison || null;
   const prevExp = Number(comp?.expenses ?? 0);
   const prevInc = Number(comp?.income ?? 0);
-  const defaultToday = new Intl.DateTimeFormat("en-CA", {
+  const todayParts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/Sao_Paulo",
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
-  }).format(new Date());
+  }).formatToParts(new Date());
+  const partMap: Record<string, string> = {};
+  for (const part of todayParts) {
+    if (part.type !== "literal") partMap[part.type] = part.value;
+  }
+  const defaultToday = `${partMap.year || "2026"}-${partMap.month || "01"}-${partMap.day || "01"}`;
   const periodEndStr = String(activeDash.period_end || dashboard?.period_end || defaultToday);
   const dayOfMonth = Math.max(1, Number(periodEndStr.slice(8, 10)) || 1);
   const curMonthNum = Number(periodEndStr.slice(5, 7)) || 1;
@@ -283,11 +291,15 @@ export function resolveCostControlView(
   const prevYearNum = curMonthNum === 1 ? curYearNum - 1 : curYearNum;
   const prevDaysInMonth = new Date(Date.UTC(prevYearNum, prevMonthNum, 0)).getUTCDate() || 30;
   const prevDaysCompared = Math.min(dayOfMonth, prevDaysInMonth);
+  const prevMtdEst =
+    prevDaysInMonth > 0
+      ? Math.round(prevExp * (prevDaysCompared / prevDaysInMonth) * 100) / 100
+      : prevExp;
 
-  const deltaAmount = curExp - prevExp;
-  const deltaPct = pctChange(curExp, prevExp);
+  const deltaAmount = curExp - prevMtdEst;
+  const deltaPct = pctChange(curExp, prevMtdEst);
   const dailyCur = curExp / Math.max(1, dayOfMonth);
-  const dailyPrev = prevExp / Math.max(1, dayOfMonth);
+  const dailyPrev = prevExp / Math.max(1, prevDaysInMonth);
   const projectedExp = Math.max(curExp, dailyCur * daysInMonth);
   const projectedVsPrevPct = pctChange(projectedExp, prevExp);
 
@@ -414,7 +426,7 @@ export function resolveCostControlView(
       current_period_label: `01/${String(curMonthNum).padStart(2, "0")} a ${String(dayOfMonth).padStart(2, "0")}/${String(curMonthNum).padStart(2, "0")}`,
       previous_period_label: `01/${String(prevMonthNum).padStart(2, "0")} a ${String(prevDaysCompared).padStart(2, "0")}/${String(prevMonthNum).padStart(2, "0")}`,
       current_expenses: curExp,
-      previous_mtd_expenses: prevExp,
+      previous_mtd_expenses: prevMtdEst,
       previous_full_expenses: prevExp,
       current_income: curInc,
       previous_mtd_income: prevInc,

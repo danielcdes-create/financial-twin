@@ -94,6 +94,24 @@ def read_batch_upload(file):
     return data
 
 
+def stream_batch_sha256(file) -> str:
+    """Compute SHA-256 in 64 KiB chunks so /file-status never buffers 10 MiB per thread."""
+    limit = 10 * 1024 * 1024
+    total = 0
+    digest = hashlib.sha256()
+    while True:
+        chunk = file.file.read(65536)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise HTTPException(413, 'Escolha um arquivo de até 10 MiB.')
+        digest.update(chunk)
+    if total == 0:
+        raise HTTPException(413, 'Escolha um arquivo de até 10 MiB.')
+    return digest.hexdigest()
+
+
 def scan_sync(file, batch_id, request, pdf_cpf=None):
     db = request.app.state.db
     data = read_batch_upload(file)
@@ -141,7 +159,7 @@ def file_status(file: UploadFile = File(...), event_id: UUID = Form(...), db=Dep
     A draft or discarded batch is not an import acknowledgement. The echoed local
     event id lets the client retire only the queue item whose upload it checked.
     """
-    digest = hashlib.sha256(read_batch_upload(file)).hexdigest()
+    digest = stream_batch_sha256(file)
     acknowledgement = {'event_id': str(event_id), 'sha256': digest, 'imported': False}
     batches = db.capture_batches.find({'sha256': digest, 'status': 'committed', 'result.persisted': True},
         {'batch_id': 1, 'result.persisted': 1, 'result.batch_id': 1})

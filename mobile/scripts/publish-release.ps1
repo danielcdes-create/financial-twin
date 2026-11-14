@@ -1,8 +1,9 @@
-param(
+﻿param(
     [Parameter(Mandatory=$true)][string]$ApkPath,
     [Parameter(Mandatory=$true)][string]$BuildDirectory,
     [string]$DestinationPath=(Join-Path (Split-Path $PSScriptRoot -Parent) 'artifacts\financial-twin-arm64.apk'),
     [string]$ExpectedSignerSha256,
+    [switch]$AllowSignerRotation,
     [string]$BuildTools='36.0.0'
 )
 $ErrorActionPreference='Stop'
@@ -27,9 +28,13 @@ if(!$env:JAVA_HOME){$env:JAVA_HOME=Join-Path $env:ProgramFiles 'Android\Android 
 if(!(Test-Path -LiteralPath (Join-Path $env:JAVA_HOME 'bin\java.exe'))){throw 'Java não encontrado para verificar a assinatura.'}
 
 function Get-VerifiedSigner([string]$Path){
+    $prevEap=$ErrorActionPreference
+    $ErrorActionPreference='Continue'
     $verification=& $apksigner verify --verbose --print-certs $Path 2>&1
-    if($LASTEXITCODE -ne 0){throw 'A assinatura Android não é válida; nenhuma promoção foi realizada.'}
-    $certificates=@($verification | Select-String '^Signer #\d+ certificate SHA-256 digest: ([0-9a-fA-F]{64})$')
+    $verifyExit=$LASTEXITCODE
+    $ErrorActionPreference=$prevEap
+    if($verifyExit -ne 0){throw 'A assinatura Android não é válida; nenhuma promoção foi realizada.'}
+    $certificates=@($verification | ForEach-Object { "$_" } | Select-String '^Signer #\d+ certificate SHA-256 digest: ([0-9a-fA-F]{64})$')
     if($certificates.Count -ne 1){throw 'A publicação exige um certificado de assinatura inequívoco.'}
     return $certificates[0].Matches[0].Groups[1].Value.ToUpperInvariant()
 }
@@ -60,7 +65,11 @@ if($ExpectedSignerSha256){
     if($signer -ne $ExpectedSignerSha256){throw 'O certificado do candidato diverge da referência esperada.'}
 }
 if($previousAliasHash){
-    if($signer -ne (Get-VerifiedSigner $destination)){throw 'O certificado do candidato não permite atualizar o APK publicado.'}
+    if($signer -ne (Get-VerifiedSigner $destination)){
+        if(!$AllowSignerRotation -or !$ExpectedSignerSha256){
+            throw 'O certificado do candidato não permite atualizar o APK publicado. Para rotacionar deliberadamente a chave, informe -AllowSignerRotation e -ExpectedSignerSha256.'
+        }
+    }
 }elseif(!$ExpectedSignerSha256){throw 'Sem APK anterior, informe ExpectedSignerSha256 para autorizar o certificado de distribuição.'}
 $badging=& $aapt dump badging $resolvedApk
 if($LASTEXITCODE -ne 0){throw 'Falha ao ler o manifesto Android.'}

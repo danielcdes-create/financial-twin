@@ -1,6 +1,8 @@
 import {Alert} from '../utils/appAlert';
 import {creationId} from '../utils/commitmentCreate';
 import {financialDateLabel} from '../utils/classification';
+import {useLocalBack} from '../utils/localBack';
+import {useAsyncScope} from '../utils/useAsyncScope';
 import StatementSearch, {paymentDifference} from './StatementSearch';
 import React, {useState} from 'react';
 import {StyleSheet, Text, View} from 'react-native';
@@ -20,6 +22,14 @@ export default function StatementCommitmentLink({item, api, money, onLinked, onU
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [swapCommitment, setSwapCommitment] = useState<any>(null);
+  const captureScope = useAsyncScope(String(item?.id || item?.provisional_id || ''));
+  useLocalBack(() => {
+    if (swapCommitment) {
+      setSwapCommitment(null);
+      return;
+    }
+    setOpen(false);
+  }, Boolean(open || swapCommitment), 25);
   const loadCommitment = async () => {
     const result = await api('/v1/commitments');
     const found = (result.items || []).find((row: any) => row.commitment_id === item.commitment?.id);
@@ -29,48 +39,69 @@ export default function StatementCommitmentLink({item, api, money, onLinked, onU
   const sourceOf = () => item.movement_source === 'capture' || (!item.id && item.provisional_id) ? {provisional_id: item.provisional_id} : {transaction_id: item.id};
   const unlink = async () => {
     if (saving) return;
+    const valid = captureScope();
+    if (!valid()) return;
     setSaving(true);
     try {
       const commitment = await loadCommitment();
+      if (!valid()) return;
       const result = await api(`/v1/commitments/${commitment.commitment_id}/payment-unlink`, {method: 'POST', body: JSON.stringify({request_id: creationId(), expected_revision: commitment.revision || 1, ...sourceOf()})});
+      if (!valid()) return;
       onUnlinked?.();
       Alert.alert(result?.warning ? 'Agenda mantida' : 'Vínculo removido', result?.warning || 'A agenda voltou ao estado anterior a este vínculo. O lançamento continua no extrato.');
     } catch (error: any) {
-      Alert.alert('Não foi possível desvincular', error.message);
-    } finally {setSaving(false);}
+      if (valid()) Alert.alert('Não foi possível desvincular', error.message);
+    } finally {if (valid()) setSaving(false);}
   };
   const swap = async (transaction: any) => {
     if (saving || !swapCommitment || !transaction.source_token) return;
+    const valid = captureScope();
+    if (!valid()) return;
     setSaving(true);
     try {
       await api(`/v1/commitments/${swapCommitment.commitment_id}/payment-swap`, {method: 'POST', body: JSON.stringify({
         request_id: creationId(), expected_revision: swapCommitment.revision || 1, expected_source_token: transaction.source_token, ...sourceOf(),
         ...(transaction.source_kind === 'confirmed_capture' ? {replacement_provisional_id: transaction.provisional_id} : {replacement_transaction_id: transaction.id}),
       })});
+      if (!valid()) return;
       setSwapCommitment(null);
       onUnlinked?.();
       Alert.alert('Lançamento trocado', 'A agenda não mudou. O vínculo ficou no lançamento escolhido.');
     } catch (error: any) {
-      Alert.alert('Não foi possível trocar', error.message);
-    } finally {setSaving(false);}
+      if (valid()) Alert.alert('Não foi possível trocar', error.message);
+    } finally {if (valid()) setSaving(false);}
+  };
+  const startSwap = async () => {
+    if (saving) return;
+    const valid = captureScope();
+    if (!valid()) return;
+    try {
+      const found = await loadCommitment();
+      if (valid()) setSwapCommitment(found);
+    } catch (error: any) {
+      if (valid()) Alert.alert('Não foi possível carregar o compromisso', error.message);
+    }
   };
   if (!item?.commitment && amountOf(item) >= 0) return null;
   if (item?.commitment) return <View>
     <Text style={s.help}>Vinculado a {item.commitment.name}</Text>
     {swapCommitment && <StatementSearch api={api} commitment={swapCommitment} suggestionIds={[String(item.id || item.provisional_id || '')]} money={money} disabled={saving} onSelect={swap}/>}
-    {!swapCommitment && <Pressable accessibilityRole="button" accessibilityLabel="Trocar lançamento" disabled={saving} onPress={() => {void loadCommitment().then(setSwapCommitment).catch((error: any) => Alert.alert('Não foi possível carregar o compromisso', error.message));}} style={s.action}><Text style={s.actionText}>Trocar lançamento</Text></Pressable>}
-    {!swapCommitment && <Pressable accessibilityRole="button" accessibilityLabel="Desvincular pagamento" disabled={saving} onPress={() => Alert.alert('Desvincular pagamento', 'O lançamento continua no extrato. A agenda só volta se este for o vínculo mais recente que a moveu.', [{text: 'Cancelar', style: 'cancel'}, {text: 'Desvincular', onPress: () => {void unlink();}}])} style={s.row}><Text style={s.name}>Desvincular</Text></Pressable>}
+    {!swapCommitment && <Pressable accessibilityRole="button" accessibilityLabel="Trocar lançamento" disabled={saving} onPress={startSwap} style={s.action}><Text style={s.actionText}>Trocar lançamento</Text></Pressable>}
+    {!swapCommitment && <Pressable accessibilityRole="button" accessibilityLabel="Desvincular pagamento" disabled={saving} onPress={() => Alert.alert('Desvincular pagamento', 'O lançamento continua no extrato. A agenda só volta se este for o vínculo mais recente que a moveu.', [{text: 'Cancelar', style: 'cancel'}, {text: 'Desvincular', onPress: () => unlink()}])} style={s.row}><Text style={s.name}>Desvincular</Text></Pressable>}
   </View>;
   const load = async () => {
+    const valid = captureScope();
+    if (!valid()) return;
     setOpen(true);
     setLoading(true);
     try {
       const result = await api('/v1/commitments');
+      if (!valid()) return;
       setCommitments((result.items || []).filter((row: any) => row.status === 'ativo' || row.status === 'pausado'));
     } catch (error: any) {
-      Alert.alert('Não foi possível carregar compromissos', error.message);
+      if (valid()) Alert.alert('Não foi possível carregar compromissos', error.message);
     } finally {
-      setLoading(false);
+      if (valid()) setLoading(false);
     }
   };
   const link = (commitment: any) => {
@@ -78,6 +109,7 @@ export default function StatementCommitmentLink({item, api, money, onLinked, onU
       if (!item.source_token) Alert.alert('Recarregue a movimentação', 'Abra o lançamento de novo antes de vincular.');
       return;
     }
+    const dialogValid = captureScope();
     const captured = item.movement_source === 'capture' || (!item.id && item.provisional_id);
     const values = {
       ...(captured ? {provisional_id: item.provisional_id} : {transaction_id: item.id}),
@@ -88,25 +120,28 @@ export default function StatementCommitmentLink({item, api, money, onLinked, onU
     const difference = paymentDifference(Number(commitment.amount), amountOf(item), money);
     Alert.alert('Vincular a compromisso', `${commitment.name} · ${money(Number(commitment.amount || 0))} por cobrança\n${titleOf(item)} · ${money(Math.abs(amountOf(item)))} em ${financialDateLabel(String(item.data_evento || ''))}\n${difference}`, [
       {text: 'Cancelar', style: 'cancel'},
-      {text: 'Vincular', onPress: () => {void (async () => {
+      {text: 'Vincular', onPress: async () => {
+        if (!dialogValid() || saving) return;
+        const valid = captureScope();
         setSaving(true);
         try {
           await api(`/v1/commitments/${commitment.commitment_id}/payment`, {method: 'POST', body: JSON.stringify(values)});
+          if (!valid()) return;
           onLinked({id: commitment.commitment_id, name: commitment.name, kind: commitment.kind});
           setOpen(false);
           Alert.alert('Pagamento vinculado', 'O vínculo foi registrado. O lançamento continua no extrato.');
         } catch (error: any) {
-          Alert.alert('Não foi possível vincular', error.message);
+          if (valid()) Alert.alert('Não foi possível vincular', error.message);
         } finally {
-          setSaving(false);
+          if (valid()) setSaving(false);
         }
-      })();}},
+      }},
     ]);
   };
   const needle = query.trim().toLocaleLowerCase('pt-BR');
   const visible = commitments.filter(row => !needle || String(row.name || '').toLocaleLowerCase('pt-BR').includes(needle));
   return <View>
-    {!open && <Pressable accessibilityRole="button" accessibilityLabel="Vincular a compromisso" disabled={saving} onPress={() => {void load();}} style={s.action}><Text style={s.actionText}>Vincular a compromisso</Text></Pressable>}
+    {!open && <Pressable accessibilityRole="button" accessibilityLabel="Vincular a compromisso" disabled={saving} onPress={load} style={s.action}><Text style={s.actionText}>Vincular a compromisso</Text></Pressable>}
     {open && <View>
       <Text style={s.help}>{loading ? 'Carregando compromissos...' : 'Escolha o compromisso. A confirmação mostra a diferença de valor. O lançamento não sai do extrato.'}</Text>
       <TextInput accessibilityLabel="Nome do compromisso" value={query} onChangeText={setQuery} placeholder="Nome do compromisso" placeholderTextColor="#92A4A2" style={s.input}/>

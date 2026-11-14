@@ -1,9 +1,30 @@
-import React from 'react';
+import React, {useContext} from 'react';
 import {ScrollView, StyleSheet, Text, View} from 'react-native';
 import {Pressable} from './InteractionControls';
 import {countPhrase, readableShares} from '../utils/commitmentPresentation';
 import {CHART_TRACK, chargeMetaLine, chargeOverdue, monthHref, monthLabel, sortCharges, type ChargeEntry} from '../utils/monthDetail';
 import {useLocalBack} from '../utils/localBack';
+
+const useSafeTopInset: () => number = (() => {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const sac = require('react-native-safe-area-context') as {
+      SafeAreaInsetsContext?: React.Context<{top?: number} | null>;
+      useSafeAreaInsets?: () => {top?: number};
+    };
+    if (sac?.SafeAreaInsetsContext) {
+      const InsetsCtx = sac.SafeAreaInsetsContext;
+      return () => Math.max(0, Number(useContext(InsetsCtx)?.top || 0));
+    }
+    if (typeof sac?.useSafeAreaInsets === 'function') {
+      const hook = sac.useSafeAreaInsets;
+      return () => Math.max(0, Number(hook()?.top || 0));
+    }
+  } catch {
+    // Fallback for isolated VM tests without safe-area mock.
+  }
+  return () => 0;
+})();
 
 export type MonthSeries = {key: 'installments' | 'subscriptions' | 'accounts' | 'other'; label: string; color: string};
 export type MonthRow = {
@@ -34,6 +55,8 @@ export default function MonthDetailScreen({row, series, money, asOf, current, pe
   scroll: boolean;
 }) {
   useLocalBack(onClose, true, 30);
+  const topInset = useSafeTopInset();
+  const screenStyle = scroll && topInset > 0 ? {...s.screen, paddingTop: topInset} : s.screen;
   const label = monthLabel(row.month);
   const items = sortCharges(row.items || []);
   const shares = readableShares(series.map(group => ({key: group.key, amount: Number(row[group.key] || 0)})));
@@ -63,7 +86,7 @@ export default function MonthDetailScreen({row, series, money, asOf, current, pe
       {chargeOverdue(entry, asOf, current) && <Text style={s.badge}>Vencido · sem vínculo</Text>}
     </Pressable>)}
   </>;
-  return <View style={s.screen} accessibilityLabel="Tela do mês" accessibilityValue={{text: monthHref(row.month, periodo)}}>
+  return <View style={screenStyle} accessibilityLabel="Tela do mês" accessibilityValue={{text: monthHref(row.month, periodo)}}>
     <View style={s.bar}>
       <Pressable accessibilityRole="button" accessibilityLabel="Voltar à lista de meses" onPress={onClose} style={s.icon}><Text style={s.back}>←</Text></Pressable>
       <Text style={s.title}>{label}</Text>

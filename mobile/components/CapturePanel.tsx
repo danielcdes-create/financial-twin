@@ -22,7 +22,7 @@ type Props = {
   account: string; onAccount: (value: string) => void;
   payment: string; onPayment: (value: string) => void;
   installments?: string; onInstallments?: (value: string) => void;
-  queueCount: number; rejectedCount: number; syncError: string; onSync: () => Promise<void>; onReview: () => void; onQueueSettings: () => void; onClearRejected: () => void;
+  queueCount: number; rejectedCount: number; syncError: string; onSync: () => Promise<void>; onReview: () => void; onQueueSettings: () => void; onClearRejected: () => void; onRetryRejected?: () => void;
   transcript: string;
   onMovementVoice: React.ComponentProps<typeof VoiceCapture>['onApply'];
   onEvidenceVoice: React.ComponentProps<typeof VoiceCapture>['onApply'];
@@ -92,7 +92,7 @@ export default function CapturePanel(p: Props) {
     {(p.queueCount > 0 || p.rejectedCount > 0 || !!p.syncError) && <View style={s.form}>
       <Text style={s.section}>Envios pendentes</Text>
       <Text style={s.note}>{p.queueCount} captura(s) aguardando envio neste aparelho.</Text>
-      {p.rejectedCount > 0 && <><Text style={s.error}>{p.rejectedCount} captura(s) precisam de atenção na fila local.</Text><Action label="Excluir itens com falha" onPress={p.onClearRejected} disabled={locked} secondary /><Action label="Conferir fila em Ajustes" onPress={p.onQueueSettings} disabled={locked} secondary /></>}
+      {p.rejectedCount > 0 && <><Text style={s.error}>{p.rejectedCount} captura(s) precisam de atenção na fila local.</Text>{p.onRetryRejected && <Action label="Tentar reenviar itens com falha" onPress={p.onRetryRejected} disabled={locked} secondary />}<Action label="Excluir itens com falha" onPress={p.onClearRejected} disabled={locked} secondary /><Action label="Conferir fila em Ajustes" onPress={p.onQueueSettings} disabled={locked} secondary /></>}
       {!!p.syncError && <Text accessibilityRole="alert" style={s.error}>{p.syncError}</Text>}
       <Action label="Tentar enviar agora" onPress={p.onSync} disabled={locked} secondary />
     </View>}

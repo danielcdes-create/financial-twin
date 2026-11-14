@@ -114,12 +114,68 @@ def create_session_token(identity: str, version: int, session_id: str, now: int 
     return f'{message}.{signature}'
 
 
-def _persist_sessions_in_background(db, query: dict, sessions_snapshot: list[dict]) -> None:
-    """Persist session activity asynchronously in a clean context so GET routes never block on account.update."""
+def create_apk_download_token(sha256_hex: str, version_code: int, now: int | None = None, ttl: int = 600) -> str:
+    settings = auth_settings()
+    now = int(time.time()) if now is None else now
+    head = _b64(b'{"alg":"HS256","typ":"APK"}')
+    payload = _b64(json.dumps({
+        'purpose': 'apk_download',
+        'sha256': str(sha256_hex or '').upper(),
+        'vc': int(version_code),
+        'iat': now,
+        'exp': now + ttl,
+    }, separators=(',', ':')).encode())
+    message = f'{head}.{payload}'
+    signature = _b64(hmac.new(settings.jwt_secret.encode(), message.encode(), hashlib.sha256).digest())
+    return f'{message}.{signature}'
+
+
+def verify_apk_download_token(token: str | None, sha256_hex: str, version_code: int) -> bool:
+    if not token or not isinstance(token, str) or len(token) > 1024:
+        return False
+    settings = get_settings()
+    if len(settings.jwt_secret) < 32:
+        return False
+    try:
+        head, payload, signature = token.split('.')
+        expected = _b64(hmac.new(settings.jwt_secret.encode(), f'{head}.{payload}'.encode(), hashlib.sha256).digest())
+        if not hmac.compare_digest(signature, expected):
+            return False
+        header = json.loads(base64.urlsafe_b64decode(head + '=' * (-len(head) % 4)))
+        claims = json.loads(base64.urlsafe_b64decode(payload + '=' * (-len(payload) % 4)))
+        now = int(time.time())
+        return (
+            header == {'alg': 'HS256', 'typ': 'APK'}
+            and isinstance(claims, dict)
+            and claims.get('purpose') == 'apk_download'
+            and claims.get('sha256') == str(sha256_hex or '').upper()
+            and claims.get('vc') == int(version_code)
+            and type(claims.get('exp')) is int
+            and claims['exp'] > now
+            and type(claims.get('iat')) is int
+            and claims['iat'] <= now + 30
+        )
+    except Exception:
+        return False
+
+
+def _persist_session_touch_in_background(
+    db,
+    auth_version: int,
+    session_id: str,
+    last_seen_at: int,
+    expires_at: int | None = None,
+) -> None:
+    """Persist single-session activity atomically so logout ($pull) or password rotation is never overwritten."""
     owner_cache.invalidate()
+    query = {'_id': OWNER_ID, 'auth_version': auth_version, 'sessions.id': session_id}
+    sets = {'sessions.$.last_seen_at': last_seen_at}
+    if expires_at is not None:
+        sets['sessions.$.expires_at'] = expires_at
+
     def _worker():
         try:
-            db.account.update_one(query, {'$set': {'sessions': sessions_snapshot}})
+            db.account.update_one(query, {'$set': sets})
         except Exception:
             pass
         finally:
@@ -151,32 +207,40 @@ def session_response(db, account, label: str, ttl: int | None = None):
             'token_type': 'bearer', 'expires_in': duration, 'account': public_account(account)}
 
 
-def renew_session_token(db, account, jti: str, ttl: int = BIOMETRIC_SESSION_SECONDS, *, persist_async: bool = False):
+def renew_session_token(db, account, jti: str, ttl: int | None = BIOMETRIC_SESSION_SECONDS, *, persist_async: bool = False):
     if not jti or len(jti) != 43:
         return None
     now = int(time.time())
     identity = session_hash(jti)
     updated = False
+    effective_ttl = ttl if ttl is not None else BIOMETRIC_SESSION_SECONDS
+    new_expires_at = now + effective_ttl
     for s_item in account.get('sessions', []):
         if s_item.get('id') == identity and int(s_item.get('expires_at') or 0) > now:
+            if ttl is None:
+                effective_ttl = SESSION_SECONDS if s_item.get('label') == 'Navegador' else BIOMETRIC_SESSION_SECONDS
             s_item['last_seen_at'] = now
-            s_item['expires_at'] = max(int(s_item.get('expires_at') or 0), now + ttl)
+            new_expires_at = max(int(s_item.get('expires_at') or 0), now + effective_ttl)
+            s_item['expires_at'] = new_expires_at
             updated = True
             break
     if not updated:
         return None
-    query = {'_id': OWNER_ID, 'auth_version': account['auth_version']}
+    auth_ver = account['auth_version']
     if persist_async:
-        _persist_sessions_in_background(db, query, [dict(item) for item in account.get('sessions', [])])
+        _persist_session_touch_in_background(db, auth_ver, identity, now, new_expires_at)
     else:
         try:
-            db.account.update_one(query, {'$set': {'sessions': account['sessions']}})
+            db.account.update_one(
+                {'_id': OWNER_ID, 'auth_version': auth_ver, 'sessions.id': identity},
+                {'$set': {'sessions.$.last_seen_at': now, 'sessions.$.expires_at': new_expires_at}},
+            )
         except Exception:
             pass
         finally:
             owner_cache.invalidate()
-    return {'access_token': create_session_token(OWNER_ID, account['auth_version'], jti, now, ttl),
-            'token_type': 'bearer', 'expires_in': ttl, 'account': public_account(account)}
+    return {'access_token': create_session_token(OWNER_ID, auth_ver, jti, now, effective_ttl),
+            'token_type': 'bearer', 'expires_in': effective_ttl, 'account': public_account(account)}
 
 
 def public_account(account):
@@ -209,6 +273,11 @@ def require_session(request: Request, authorization: str | None = Header(default
     if (not account or account.get('auth_version') != claims['ver']
             or not any(item['id'] == identity and item['expires_at'] > now for item in account.get('sessions', []))):
         raise HTTPException(401, 'Sessão encerrada. Entre novamente.')
+    if hasattr(request, 'state'):
+        try:
+            request.state.authenticated = True
+        except Exception:
+            pass
     method = str(getattr(request, 'method', 'GET') or 'GET').upper()
     is_read = method in {'GET', 'HEAD', 'OPTIONS'}
     for s_item in account.get('sessions', []):
@@ -216,6 +285,6 @@ def require_session(request: Request, authorization: str | None = Header(default
             if now - int(s_item.get('last_seen_at') or 0) >= 60:
                 s_item['last_seen_at'] = now
                 if not is_read:
-                    _persist_sessions_in_background(db, {'_id': OWNER_ID}, [dict(item) for item in account.get('sessions', [])])
+                    _persist_session_touch_in_background(db, account['auth_version'], identity, now)
             break
     return {'account': account, 'session_id': identity, 'jti': claims['jti']}

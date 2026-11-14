@@ -3,6 +3,27 @@ import {FlatList, ScrollView, StyleSheet, Text, View} from 'react-native';
 import {Pressable} from './InteractionControls';
 import {useLocalBack} from '../utils/localBack';
 
+const useSafeTopInset: () => number = (() => {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const sac = require('react-native-safe-area-context') as {
+      SafeAreaInsetsContext?: React.Context<{top?: number} | null>;
+      useSafeAreaInsets?: () => {top?: number};
+    };
+    if (sac?.SafeAreaInsetsContext) {
+      const InsetsCtx = sac.SafeAreaInsetsContext;
+      return () => Math.max(0, Number(useContext(InsetsCtx)?.top || 0));
+    }
+    if (typeof sac?.useSafeAreaInsets === 'function') {
+      const hook = sac.useSafeAreaInsets;
+      return () => Math.max(0, Number(hook()?.top || 0));
+    }
+  } catch {
+    // Fallback for isolated VM tests without safe-area mock.
+  }
+  return () => 0;
+})();
+
 export type ScheduleRow = {
   kind: 'year' | 'row';
   key: string;
@@ -24,7 +45,7 @@ export type ScheduleRequest = {
   onToggleYear: (year: string) => void;
   onLink: (due: string) => void;
 };
-export type ActivityMenuItem = {label: string; accessibilityLabel: string; onPress: () => void};
+export type ActivityMenuItem = {label: string; accessibilityLabel: string; onPress: () => unknown};
 export type ActivityPanel = {
   title: string; onClose: () => void; body: React.ReactNode;
   onEdit?: () => void; menuLabel?: string; menu?: ActivityMenuItem[];
@@ -40,6 +61,9 @@ export function ScheduleOverlayProvider({children}: {children: React.ReactNode})
   const [panel, setPanel] = useState<ActivityPanel | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const scroller = useRef<ScrollView>(null);
+  const topInset = useSafeTopInset();
+  const overlayStyle = topInset > 0 ? {...s.overlay, paddingTop: topInset} : s.overlay;
+  const popupStyle = topInset > 0 ? {...s.popup, top: 56 + topInset} : s.popup;
   const host = useMemo<Host>(() => ({
     show: request => {setPanel(null); setSchedule(request);},
     clear: () => {setSchedule(null); setPanel(null);},
@@ -62,19 +86,19 @@ export function ScheduleOverlayProvider({children}: {children: React.ReactNode})
   useLocalBack(goBack, Boolean(panel || schedule), 40);
   return <Context.Provider value={host}><View style={s.root}>
     {children}
-    {panel && <View style={s.overlay} accessibilityLabel={panel.title}>
+    {panel && <View style={overlayStyle} accessibilityLabel={panel.title}>
       <View style={s.bar}>
         <Pressable accessibilityRole="button" accessibilityLabel={`Voltar de ${panel.title}`} onPress={goBack} style={s.close}><Text style={s.closeText}>←</Text></Pressable>
         <Text style={s.barTitle} numberOfLines={1}>{panel.title.replace(/^Detalhe de |^Cronograma de /, '')}</Text>
         {!!panel.onEdit && <Pressable accessibilityRole="button" accessibilityLabel={`Editar compromisso ${panel.title.replace(/^Detalhe de /, '')}`} onPress={panel.onEdit} style={s.barAction}><Text style={s.barActionText}>Editar</Text></Pressable>}
         {!!panel.menu?.length && <Pressable accessibilityRole="button" accessibilityLabel={panel.menuLabel || 'Mais ações'} accessibilityState={{expanded: menuOpen}} onPress={() => setMenuOpen(value => !value)} style={s.close}><Text style={s.menuMark}>⋯</Text></Pressable>}
       </View>
-      {menuOpen && !!panel.menu?.length && <View style={s.popup} accessibilityLabel="Menu do compromisso">{panel.menu.map(action => <Pressable accessibilityRole="button" accessibilityLabel={action.accessibilityLabel} key={action.accessibilityLabel} onPress={() => {setMenuOpen(false); action.onPress();}} style={s.popupItem}><Text style={s.popupText}>{action.label}</Text></Pressable>)}</View>}
+      {menuOpen && !!panel.menu?.length && <View style={popupStyle} accessibilityLabel="Menu do compromisso">{panel.menu.map(action => <Pressable accessibilityRole="button" accessibilityLabel={action.accessibilityLabel} key={action.accessibilityLabel} onPress={() => {setMenuOpen(false); return action.onPress();}} style={s.popupItem}><Text style={s.popupText}>{action.label}</Text></Pressable>)}</View>}
       {panel.scroll === false
         ? <View style={s.body}>{panel.body}</View>
         : <ScrollView ref={scroller} style={s.body} contentContainerStyle={s.bodyContent} keyboardShouldPersistTaps="handled">{panel.body}</ScrollView>}
     </View>}
-    {!panel && schedule && <View style={s.overlay} accessibilityLabel={`Cronograma de ${schedule.title}`}>
+    {!panel && schedule && <View style={overlayStyle} accessibilityLabel={`Cronograma de ${schedule.title}`}>
       <Pressable accessibilityRole="button" accessibilityLabel={`Fechar cronograma de ${schedule.title}`} onPress={schedule.onClose} style={s.close}><Text style={s.closeText}>Fechar</Text></Pressable>
       {!!schedule.summary && <Text style={s.meta} accessibilityLabel="Resumo do cronograma">{schedule.summary}</Text>}
       {!!schedule.onSegment && <View style={s.segment} accessibilityLabel="A pagar ou pagas">

@@ -23,10 +23,10 @@ from contextlib import asynccontextmanager
 from app.config import get_settings
 from app.schemas import EventAck, RawEventIn
 from app.transaction_service import EventBusy, EventConflict, TransactionService, enrich_notification_event, stored_instant
-from app.services.ai.xai.provider import XAITextProvider, XAIVisionProvider, XAIError
+from app.services.ai.xai.provider import XAITextProvider, XAIVisionProvider, XAIError, public_xai_error
 from app.schemas_document import DocumentExtraction
 from app.parsers import parse_brl, parse_datetime
-from app.auth import require_session
+from app.auth import require_session, create_apk_download_token, verify_apk_download_token
 from app.economic_policy import eligible_payment, effects, captures_not_in_ledger
 from app.economic_period import economic_month, economic_instant, economic_in_period
 from app.financial_time import LOCAL_ZONE, day_start, local_date, today as local_today, utc_instant
@@ -35,7 +35,7 @@ from app.category_filter import ACTIVE_CAPTURES, catalog_category_names, categor
 from app.movement_filters import period_query, intersect, search_query, filter_key as movement_filter_key
 from app.document_validation import validate_document_extraction
 from app.pdf_input import PDFPasswordError, read_pdf
-from app.reference_cache import ReferenceCache, classification_cache, dashboard_forecast_cache, dashboard_snapshot_cache, movement_count_cache, unwrap_database
+from app.reference_cache import ReferenceCache, classification_cache, dashboard_forecast_cache, dashboard_snapshot_cache, movement_count_cache, subcategory_catalog_cache, unwrap_database
 from contextlib import nullcontext
 try:
     from app.telemetry import install_telemetry, SpanTimer
@@ -168,8 +168,12 @@ async def lifespan(app: FastAPI):
             cycles=0
             while True:
                 try:
-                    await asyncio.to_thread(app.state.service.recover_pending)
-                    await asyncio.to_thread(recover_classification_commands,app.state.db)
+                    recovered_pending = await asyncio.to_thread(app.state.service.recover_pending)
+                    recovered_cmds = await asyncio.to_thread(recover_classification_commands,app.state.db)
+                    if recovered_pending or recovered_cmds:
+                        dashboard_snapshot_cache.invalidate()
+                    if recovered_cmds:
+                        classification_cache.invalidate()
                     if cycles%10==0: await asyncio.to_thread(reconcile_media,app.state.db)
                 except Exception as exc:
                     logging.error("Pending event recovery failed (%s)", safe_error(exc))
@@ -184,7 +188,15 @@ async def lifespan(app: FastAPI):
     if app.state.mongo_client:
         app.state.mongo_client.close()
 
-app = FastAPI(title="Financial Digital Twin API", version="0.4.0", lifespan=lifespan)
+_is_prod_env = get_settings().environment.lower() == "production"
+app = FastAPI(
+    title="Financial Digital Twin API",
+    version="0.4.0",
+    lifespan=lifespan,
+    docs_url=None if _is_prod_env else "/docs",
+    redoc_url=None,
+    openapi_url=None if _is_prod_env else "/openapi.json",
+)
 install_telemetry(app)
 from app.account_auth import router as account_auth_router
 app.include_router(account_auth_router)
@@ -193,8 +205,15 @@ async def private_validation_error(request: Request, exc):
     if request.url.path.startswith('/v1/auth/'):
         # FastAPI's default validation response echoes input, including passwords.
         return JSONResponse(status_code=422, content={'detail': 'Confira os campos. O usuário deve ter 3 a 64 caracteres; a nova senha, pelo menos 12.'})
-    from fastapi.exception_handlers import request_validation_exception_handler
-    return await request_validation_exception_handler(request, exc)
+    safe_errors = [
+        {
+            'type': str(err.get('type') or 'validation_error'),
+            'loc': [x if isinstance(x, (str, int)) else str(x) for x in (err.get('loc') or ())],
+            'msg': str(err.get('msg') or 'Invalid input'),
+        }
+        for err in exc.errors()
+    ]
+    return JSONResponse(status_code=422, content={'detail': safe_errors})
 from app.insights import router as insights_router
 app.include_router(insights_router)
 from app.voice_capture import router as voice_capture_router
@@ -220,8 +239,8 @@ def atomic_unavailable(_request, exc):
     return JSONResponse(status_code=503,content={"detail":str(exc)})
 @app.exception_handler(OperationFailure)
 def mongo_write_conflict(_request, exc):
-    if exc.code in {24,112,244,251} or exc.has_error_label('TransientTransactionError'):
-        return JSONResponse(status_code=409,content={"detail":"Conflito concorrente. Recarregue e repita com o mesmo identificador."})
+    if exc.code in {24,112,244,251} or exc.has_error_label('TransientTransactionError') or exc.has_error_label('UnknownTransactionCommitResult'):
+        return JSONResponse(status_code=409,content={"detail":"Conflito concorrente. Recarregue e repita com o mesmo identificador."},headers={"X-Operation-Pending":"1"})
     logging.error("Mongo operation failed, code=%s",exc.code)
     message = str((exc.details or {}).get('errmsg', exc)).lower()
     if exc.code == 8000 and any(reason in message for reason in ('too many collections', 'maximum number of collections', 'collection limit')):
@@ -257,11 +276,16 @@ async def invalidate_reference_data(request: Request, call_next):
         "/v1/import", "/v1/documents", "/v1/events",
         "/v1/commitments", "/v1/future-commitments", "/v1/transfers",
         "/v1/batch-commands", "/v1/account-positions", "/v1/account-profiles",
+        "/v1/card-bills", "/v1/card-catalog", "/v1/cards", "/v1/month-close",
     ))
     mutates_classification = is_write and path.startswith((
         "/v1/commitment-profile", "/v1/capture-batches", "/v1/movements",
         "/v1/transactions", "/v1/categories", "/v1/subcategories",
         "/v1/merchants", "/v1/import", "/v1/documents",
+        "/v1/card-bills", "/v1/card-catalog", "/v1/cards",
+    ))
+    mutates_subcategories_only = is_write and path.startswith((
+        "/v1/provisional", "/v1/reviews",
     ))
     try:
         return await call_next(request)
@@ -270,6 +294,8 @@ async def invalidate_reference_data(request: Request, call_next):
             dashboard_snapshot_cache.invalidate()
         if mutates_classification:
             classification_cache.invalidate()
+        elif mutates_subcategories_only:
+            subcategory_catalog_cache.invalidate()
 from app.release_manifest import verified_release
 # Compatibility symbols: the API uses the verified APK manifest, never these values.
 ANDROID_VERSION_NAME=None
@@ -613,38 +639,61 @@ def health(request: Request):
     except Exception: raise HTTPException(status_code=503, detail={"status":"degraded", "mongodb":"unavailable"})
     return {"status":"ok", "mongodb":"connected", "auth_required":True}
 
-@app.get("/v1/app-update")
+def _require_apk_download_access(request: Request, release: dict[str, Any], token: str | None = None):
+    if token and release.get("available") and verify_apk_download_token(
+        token, str(release.get("sha256") or ""), int(release.get("version_code") or 0)
+    ):
+        request.state.authenticated = True
+        return
+    require_session(request, request.headers.get("Authorization"))
+
+@app.get("/v1/app-update", dependencies=[Depends(require_session)])
 def app_update():
-    return verified_release(android_apk_path())
+    release = dict(verified_release(android_apk_path()))
+    if release.get("available") and release.get("sha256") and release.get("version_code") is not None:
+        try:
+            tok = create_apk_download_token(release["sha256"], int(release["version_code"]))
+            release["download_url"] = f"/v1/app-update/apk?token={tok}"
+        except HTTPException:
+            pass
+    return release
 
 @app.get("/v1/app-update/apk")
 @app.head("/v1/app-update/apk")
-def download_app_update():
+def download_app_update(request: Request, token: str | None = Query(default=None)):
     apk=android_apk_path()
     release=verified_release(apk)
+    _require_apk_download_access(request, release, token)
     if not release["available"]: raise HTTPException(status_code=404,detail="Android update is not verified")
     return FileResponse(apk,media_type="application/vnd.android.package-archive",filename=f"financial-twin-{release['version_name']}.apk")
 
-@app.get("/api/v1/apk/info")
+@app.get("/api/v1/apk/info", dependencies=[Depends(require_session)])
 def get_apk_info():
     apk=android_apk_path()
     release=verified_release(apk)
     if not release.get("available"): raise HTTPException(status_code=404,detail="APK not found or not available")
+    download_path = "/apk"
+    try:
+        tok = create_apk_download_token(release["sha256"], int(release["version_code"]))
+        download_path = f"/apk?token={tok}"
+    except HTTPException:
+        pass
     return {
         "version_code": release["version_code"],
         "version_name": release["version_name"],
         "size_bytes": release["size_bytes"],
         "sha256": release.get("sha256"),
-        "download_path": "/apk"
+        "download_path": download_path
     }
 
 @app.get("/apk")
 @app.head("/apk")
 @app.get("/financial-twin.apk")
 @app.head("/financial-twin.apk")
-def download_apk_direct():
+def download_apk_direct(request: Request, token: str | None = Query(default=None)):
     apk=android_apk_path()
     release=verified_release(apk)
+    _require_apk_download_access(request, release, token)
     if not release.get("available") or not apk.exists(): raise HTTPException(status_code=404,detail="APK not found")
     return FileResponse(apk,media_type="application/vnd.android.package-archive",filename=f"financial-twin-{release['version_name']}.apk")
 
@@ -698,7 +747,7 @@ def _dashboard_forecast(db, snapshot=None):
     pending=db.review_queue.count_documents({"status":"pending"})
     provisional=db.provisional_transactions.count_documents({"status":{"$in":["provisional","enriched"]}})
     ingested=db.source_records.find_one({}, {"ingested_at":1}, sort=[("ingested_at",-1)])
-    open_debt=sum((decimal_amount(x.get("saldo_aberto")) or Decimal("0") for x in with_batch_size(db.obligations.find({"status":{"$in":["vencida","parcialmente_paga"]}},{"saldo_aberto":1}), 2000)),Decimal("0"))
+    open_debt=sum((decimal_amount(x.get("saldo_aberto")) or Decimal("0") for x in with_batch_size(db.obligations.find({"status":{"$in":["vencida","atrasada","parcialmente_paga"]}},{"saldo_aberto":1}), 2000)),Decimal("0"))
     future_financing=sum((decimal_amount(x.get("principal")) or Decimal("0") for x in effective_documents(db, 'obligation', with_batch_size(db.obligations.find({"status":"futura","tipo":"financiamento"}), 2000)) if x.get('status') == 'futura'),Decimal("0"))
     projected_installments=Decimal("0");projected_count=0
     for plan in effective_documents(db, 'installment', with_batch_size(db.installment_plans.find({"status":"ativo"}), 2000)):
@@ -744,9 +793,16 @@ def _dashboard_impl(period, date_from, date_to, db, snapshot=None, forecast=None
     all_dates=[*dates,*confirmed_dates]
     data_anchor=max((normalized_datetime(value) for value in all_dates),default=None)
     if snapshot is not None and len(snapshot)>2 and snapshot[2].get("anchor"):
-        anchor=snapshot[2]["anchor"]
+        anchor=snapshot[2].get("unbounded_anchor",snapshot[2]["anchor"]) if period=="all" else snapshot[2]["anchor"]
     else:
-        economic_dates=[inst for row in [*txs,*confirmed_all] if (inst:=economic_instant(row))]
+        cur_civil_ym=local_today().strftime("%Y-%m")
+        max_real_ym=max([cur_civil_ym,*(local_date(normalized_datetime(v)).strftime("%Y-%m") for v in all_dates)])
+        economic_dates=[]
+        for row in [*txs,*confirmed_all]:
+            inst=economic_instant(row)
+            if not inst: continue
+            if period=="all" or str(row.get("competencia") or "")[:7]<=max_real_ym:
+                economic_dates.append(inst)
         if snapshot is not None and len(snapshot)>2 and snapshot[2].get("economic_anchor"):economic_dates.append(snapshot[2]["economic_anchor"])
         anchor=max((normalized_datetime(value) for value in [*all_dates,*economic_dates]),default=datetime.now(timezone.utc))
     range_start=period_start(anchor,period,date_from)
@@ -756,7 +812,7 @@ def _dashboard_impl(period, date_from, date_to, db, snapshot=None, forecast=None
         if row.get("competencia"):return economic_in_period(row,date.min if start.year==1 else local_date(start),local_date(end))
         return bool(row.get("data_evento") and start<=normalized_datetime(row["data_evento"])<=end)
     filtered_txs=[tx for tx in txs if economic_selected(tx,range_start,range_end)]
-    confirmed=captures_not_in_ledger(filtered_txs,[item for item in confirmed_all if economic_selected(item,range_start,range_end)])
+    confirmed=captures_not_in_ledger(txs,[item for item in confirmed_all if economic_selected(item,range_start,range_end)])
     totals=calculate_financial_totals(filtered_txs,confirmed)
     income,expenses,categories=totals["income"],totals["expenses"],totals["categories"]
     nature_totals={nature:Decimal("0") for nature in NATURES}
@@ -781,7 +837,7 @@ def _dashboard_impl(period, date_from, date_to, db, snapshot=None, forecast=None
             shift=-12 if period=="year" else -{"month":1,"3m":3,"6m":6,"12m":12}.get(period,1)
             previous_start=shift_months(range_start,shift);previous_end=shift_months(range_end,shift)
         previous_txs=[tx for tx in txs if economic_selected(tx,previous_start,previous_end)]
-        previous_confirmed=captures_not_in_ledger(previous_txs,[item for item in confirmed_all if economic_selected(item,previous_start,previous_end)])
+        previous_confirmed=captures_not_in_ledger(txs,[item for item in confirmed_all if economic_selected(item,previous_start,previous_end)])
         previous_totals=calculate_financial_totals(previous_txs,previous_confirmed)
     forecast=forecast or dashboard_forecast(db, snapshot=snapshot)
     pending=forecast["pending"]
@@ -800,16 +856,26 @@ def _dashboard_impl(period, date_from, date_to, db, snapshot=None, forecast=None
     month_keys=sorted(set(txs_by_month)|set(prov_by_month))
     latest_month=month_keys[-1] if month_keys else None
     recurring_total=Decimal("0");recurring_count=0;recurring_categories={}
+    period_recurring_total=Decimal("0")
     non_expense_recurring_categories={"pagamento de fatura","pagamento de fatura cartao","investimentos","movimentacao de credito do cartao","transferencia pix","transferencia ted doc"}
-    for tx in (txs_by_month.get(latest_month,[]) if latest_month else ()):
-        recurrence=tx.get("recorrencia") or {};event_date=tx.get("data_evento");amount=decimal_amount(tx.get("valor"))
-        if not event_date or not amount: continue
-        if recurrence.get("tipo") not in {"recorrente_fixa","recorrente_variavel"} or recurrence.get("periodicidade")!="mensal": continue
-        if not eligible_payment(tx): continue
-        category=tx.get("categoria") or "Sem categoria"
-        if canonical_key(category) in non_expense_recurring_categories: continue
-        value=abs(amount);recurring_total+=value;recurring_count+=1
-        recurring_categories[category]=recurring_categories.get(category,Decimal("0"))+value
+    def _accumulate_recurring(rows, is_capture:bool, into_monthly:bool):
+        nonlocal recurring_total, recurring_count, period_recurring_total
+        for row in rows:
+            recurrence=row.get("recorrencia") or {};event_date=row.get("data_evento");amount=decimal_amount(row.get("valor"))
+            if not event_date or not amount: continue
+            if recurrence.get("tipo") not in {"recorrente_fixa","recorrente_variavel"} or recurrence.get("periodicidade")!="mensal": continue
+            if not eligible_payment(row, is_capture): continue
+            category=(row.get("categoria_sugerida") if is_capture else row.get("categoria")) or "Sem categoria"
+            if canonical_key(category) in non_expense_recurring_categories: continue
+            value=abs(amount)
+            period_recurring_total+=value
+            if into_monthly:
+                recurring_total+=value;recurring_count+=1
+                recurring_categories[category]=recurring_categories.get(category,Decimal("0"))+value
+    for m_key in month_keys:
+        is_latest=(m_key==latest_month)
+        _accumulate_recurring(txs_by_month.get(m_key,()), False, is_latest)
+        _accumulate_recurring(prov_by_month.get(m_key,()), True, is_latest)
     ingested=forecast["ingested"]
     open_debt=forecast["open_debt"]
     future_financing=forecast["future_financing"]
@@ -838,7 +904,7 @@ def _dashboard_impl(period, date_from, date_to, db, snapshot=None, forecast=None
         period_income=income,
         period_expenses=expenses,
         previous_period_expenses=previous_totals["expenses"] if previous_totals is not None else None,
-        recurring_total=recurring_total,
+        recurring_total=recurring_total if period=="month" else period_recurring_total,
         tax_total=nature_totals["IMPOSTO_TRIBUTO"],
         financial_cost_total=nature_totals["TARIFA_ENCARGO"],
     )
@@ -889,7 +955,7 @@ def decode_movement_cursor(value, filter_key=None):
     try:
         payload=json.loads(base64.urlsafe_b64decode(value+"="*(-len(value)%4)))
         if len(payload) not in (3,4): raise ValueError()
-        if len(payload)==4 and filter_key is not None and payload[3]!=filter_key: raise ValueError()
+        if filter_key is not None and (len(payload)!=4 or payload[3]!=filter_key): raise ValueError()
         when,source,object_id=payload[:3]
         if source not in {"ledger","capture"} or not ObjectId.is_valid(object_id): raise ValueError()
         return datetime.fromisoformat(when),source,ObjectId(object_id)
@@ -2296,15 +2362,24 @@ def _finish_legacy_receipt(db,event_id,result,extraction,validation):
             return {"persisted":True,"extraction":extraction,"validation":validation,"processing":ack}
         review=db.review_queue.find_one({"event_id":event_id,"status":"pending"})
         review_id=str(uuid5(NAMESPACE_URL, f"receipt-review:{event_id}"))
+        def _safe_val_dec(v, fallback=Decimal("0.00")) -> Decimal:
+            try:
+                d = Decimal(str(v))
+                return d.quantize(Decimal("0.01")) if d.is_finite() else fallback
+            except (InvalidOperation, ValueError, TypeError):
+                return fallback
+        exp_val = _safe_val_dec((validation or {}).get("total"), decimal_amount(captured.get("valor")) or Decimal("0.00"))
+        itm_val = _safe_val_dec((validation or {}).get("items_total"), exp_val)
+        diff_val = (itm_val - exp_val).quantize(Decimal("0.01"))
         if not review:
             db.review_queue.insert_one({'_id':review_id,'review_id':review_id,'event_id':event_id,'status':'pending','reason':'item_total_mismatch',
-                'expected_total':validation['total'],'items_total':validation['items_total'],'difference':validation['items_total']-validation['total'],
+                'expected_total':float(exp_val),'items_total':float(itm_val),'difference':float(diff_val),
                 'provisional_id':captured['provisional_id'],'created_at':now})
         else:
             db.review_queue.update_one({'_id':review['_id'],'status':'pending'},{'$set':{
                 'additional_reasons':list(dict.fromkeys([*(review.get('additional_reasons') or []),'item_total_mismatch'])),
-                'expected_total':validation['total'],'items_total':validation['items_total'],
-                'difference':validation['items_total']-validation['total']}})
+                'expected_total':float(exp_val),'items_total':float(itm_val),
+                'difference':float(diff_val)}})
         db.raw_events.update_one({"event_id":event_id},{"$set":{"processing_status":"review_required","processing_error":"item_total_mismatch"}})
         result={**result,"review_reason":"item_total_mismatch"}
         ack=persisted_event(db,event_id,result)
@@ -2379,15 +2454,15 @@ def extract_document_data(data,mime,digest,filename,source_provider,db,request,p
                 text=data.decode("utf-8",errors="replace")
                 extraction=XAITextProvider().extract_text(text)
     except PDFPasswordError as exc: raise HTTPException(status_code=428,detail=str(exc)) from exc
-    except XAIError as exc: raise HTTPException(status_code=503,detail=str(exc))
+    except XAIError as exc: raise HTTPException(status_code=503,detail=public_xai_error(exc))
     except ValueError as exc: raise HTTPException(status_code=422,detail=str(exc)) from exc
     except Exception as exc: raise HTTPException(status_code=422,detail="Could not read document") from exc
     try: validation=validate_document_extraction(extraction)
     except ValueError as exc: raise HTTPException(status_code=422,detail=str(exc))
-    sum_items=validation["items_total"];total_decimal=validation["total"];discrepancy=validation["review_required"]
+    sum_items=validation["items_total"].quantize(Decimal("0.01"));total_decimal=validation["total"].quantize(Decimal("0.01"));discrepancy=validation["review_required"]
     captured=capture_instant or datetime.now(timezone.utc)
     extraction_payload=extraction.model_dump(mode="json")
-    validation_payload={"items_total":float(sum_items),"total":float(total_decimal),"review_required":discrepancy}
+    validation_payload={"items_total":float(sum_items),"total":float(total_decimal),"difference":float((sum_items-total_decimal).quantize(Decimal("0.01"))),"review_required":discrepancy}
     parsed={"amount":float(total_decimal),"currency":extraction.currency,"merchant_raw":extraction.merchant or "","event_timestamp":extraction.datetime.isoformat() if extraction.datetime else captured.isoformat(),"event_type":"receipt","direction":"expense","items":[x.model_dump(mode="json") for x in extraction.items]}
     event={"event_id":event_id,"source_type":"receipt","source_provider":source_provider,"captured_at":captured,"raw_payload":{"filename":filename,"mime_type":mime,"sha256":digest,"storage_key":str(stored),"extraction":extraction_payload,"validation":validation_payload},"parsed_payload":parsed,"parser_version":"xai-document-v1","ai_model":get_settings().xai_vision_model if mime.startswith("image/") else get_settings().xai_text_model,"media_status":"media_ready","media_storage_key":str(stored)}
     if capture_event_id: event['raw_payload']['voice_command_version']=1
@@ -2528,8 +2603,20 @@ class BalanceReferenceIn(BaseModel):
 
 @app.put("/v1/account-positions/{account_key}/balance-reference", dependencies=[Depends(require_session)])
 def set_balance_reference(account_key:str, body:BalanceReferenceIn, db=Depends(database)):
-    with mongo_transaction(db) as session:
-        return _atomic_set_balance_reference(account_key, body, db=session_database(db,session))
+    try:
+        with mongo_transaction(db) as session:
+            return _atomic_set_balance_reference(account_key, body, db=session_database(db,session))
+    except (DuplicateKeyError, OperationFailure) as exc:
+        if isinstance(exc, OperationFailure) and not (exc.code in {11000, 24, 112, 244, 251} or exc.has_error_label('TransientTransactionError') or exc.has_error_label('UnknownTransactionCommitResult')):
+            raise
+        if body.request_id is not None:
+            command = db.batch_commands.find_one({'_id': 'balance-reference:' + str(body.request_id)})
+            if command:
+                digest = source_token({'account_key': account_key, **body.model_dump(mode='json')})
+                if command.get('digest') != digest:
+                    raise HTTPException(409, 'Esta tentativa já foi usada com outros dados.') from exc
+                return command['result']
+        raise HTTPException(409, 'A operação está concorrendo com outra gravação. Reenvie esta mesma tentativa antes de iniciar outra.', headers={'X-Operation-Pending': '1'}) from exc
 
 def _atomic_set_balance_reference(account_key:str, body:BalanceReferenceIn, db=Depends(database)):
     lock_movement_insert(db)
@@ -2581,15 +2668,35 @@ def cards(db=Depends(database)):
 @app.get("/v1/obligations", dependencies=[Depends(require_session)])
 def obligations(limit:int=Query(200,ge=1,le=500),offset:int=Query(0,ge=0),status_filter:str|None=None,date_from:date|None=None,date_to:date|None=None,db=Depends(database)):
     with mongo_snapshot(db) as (reading, consistency):
-        query={}
-        if status_filter:query['status']=status_filter
-        if date_from or date_to:
-            query['data_vencimento']={}
-            if date_from:query['data_vencimento']['$gte']=day_start(date_from)
-            if date_to:query['data_vencimento']['$lt']=day_start(date_to+timedelta(days=1))
-        rows=list(with_batch_size(reading.obligations.find(query), 2000).sort([('data_vencimento',1),('_id',1)]).skip(offset).limit(limit))
-        total=reading.obligations.count_documents(query);following=offset+len(rows)
-        return {"items":[json_safe(x) for x in effective_documents(reading, 'obligation', rows)], 'read_consistency': consistency,
+        has_filters = bool(status_filter or date_from or date_to)
+        if not has_filters:
+            rows=list(with_batch_size(reading.obligations.find({}), 2000).sort([('data_vencimento',1),('_id',1)]).skip(offset).limit(limit))
+            total=reading.obligations.count_documents({});following=offset+len(rows)
+            return {"items":[json_safe(x) for x in effective_documents(reading, 'obligation', rows)], 'read_consistency': consistency,
+                    'total':total,'offset':offset,'limit':limit,'has_more':following<total,'next_offset':following if following<total else None}
+        all_rows = list(with_batch_size(reading.obligations.find({}), 2000).sort([('data_vencimento',1),('_id',1)]))
+        effective_all = effective_documents(reading, 'obligation', all_rows)
+        gte_dt = day_start(date_from) if date_from else None
+        lt_dt = day_start(date_to+timedelta(days=1)) if date_to else None
+        filtered = []
+        for row in effective_all:
+            if status_filter and row.get('status') != status_filter:
+                continue
+            if gte_dt or lt_dt:
+                due_val = row.get('data_vencimento')
+                if not isinstance(due_val, datetime):
+                    continue
+                due_norm = normalized_datetime(due_val)
+                if gte_dt and due_norm < gte_dt:
+                    continue
+                if lt_dt and due_norm >= lt_dt:
+                    continue
+            filtered.append(row)
+        filtered.sort(key=lambda r: (normalized_datetime(r['data_vencimento']).isoformat() if isinstance(r.get('data_vencimento'), datetime) else '', str(r.get('_id') or '')))
+        total = len(filtered)
+        page_rows = filtered[offset:offset+limit]
+        following = offset + len(page_rows)
+        return {"items":[json_safe(x) for x in page_rows], 'read_consistency': consistency,
                 'total':total,'offset':offset,'limit':limit,'has_more':following<total,'next_offset':following if following<total else None}
 
 @app.get("/v1/installments", dependencies=[Depends(require_session)])
@@ -2628,7 +2735,7 @@ def commitment_output(item, db=None, *, precomputed_snapshot=None, precomputed_c
             elif db is not None:
                 result["card_label"] = card_labels(db, [item.get("card_id")]).get(str(item.get("card_id")))
     result["schedule"]=schedule(item)
-    result["amount"]=float(item["amount"])
+    result["amount"]=float(decimal_amount(item["amount"]))
     for field in ("purchase_date","next_due_date","end_date","cash_due_date"):
         result[field]=as_date(item[field]).isoformat() if item.get(field) else None
     pending=future_pending_total(item)
@@ -3002,9 +3109,17 @@ def _statement_page(item, q, date_from, date_to, amount, amount_min, amount_max,
         raise HTTPException(422, "A data inicial deve ser anterior à data final.")
     if not text and amount is None and amount_min is None and amount_max is None and not date_from and not date_to:
         raise HTTPException(422, "Informe um nome, um valor ou um período para consultar o extrato.")
+    if text and money is None and len(canonical_key(text)) < 2 and amount is None and amount_min is None and amount_max is None and not date_from and not date_to and due is None and expected is None:
+        raise HTTPException(422, "Digite pelo menos 2 caracteres ou informe um valor ou período para consultar o extrato.")
     window = period_query(date_from, date_to)
-    transactions = list(db.transactions.find(dict(window)))
-    captures = [doc for doc in db.provisional_transactions.find({"status": "confirmed", **window}) if not doc.get("linked_transaction_id")]
+    tx_cursor = with_batch_size(db.transactions.find(dict(window)), 2000)
+    if hasattr(tx_cursor, "sort") and hasattr(tx_cursor, "limit") and isinstance(db, (Database, _SessionDatabase)):
+        tx_cursor = tx_cursor.sort([("data_evento", -1), ("_id", -1)]).limit(5000)
+    transactions = list(tx_cursor)
+    cap_cursor = with_batch_size(db.provisional_transactions.find({"status": "confirmed", **window}), 2000)
+    if hasattr(cap_cursor, "sort") and hasattr(cap_cursor, "limit") and isinstance(db, (Database, _SessionDatabase)):
+        cap_cursor = cap_cursor.sort([("data_evento", -1), ("_id", -1)]).limit(5000)
+    captures = [doc for doc in cap_cursor if not doc.get("linked_transaction_id")]
     matched = []
     for kind, documents in (("transaction", transactions), ("confirmed_capture", captures)):
         for document in documents:
@@ -3102,12 +3217,14 @@ def commitment_statement_search(
 @app.post("/v1/commitments/{commitment_id}/payment",dependencies=[Depends(require_session)])
 @durable_mutation('commitment_payment',('commitment_id',))
 def link_commitment_payment(commitment_id:str,body:CommitmentPaymentLink,db=Depends(database)):
+    if isinstance(db, _SessionDatabase):
+        return _atomic_link_commitment_payment(commitment_id,body,db)
     try:
         with mongo_transaction(db) as session:
             return _atomic_link_commitment_payment(commitment_id,body,session_database(db,session))
     except OperationFailure as exc:
-        if exc.code==112 or exc.has_error_label("TransientTransactionError"):
-            raise HTTPException(409,"A movimentação ou o compromisso mudou. Recarregue antes de vincular.") from exc
+        if exc.code==112 or exc.has_error_label("TransientTransactionError") or exc.has_error_label("UnknownTransactionCommitResult"):
+            raise HTTPException(409,"A movimentação ou o compromisso mudou. Recarregue antes de vincular.",headers={"X-Operation-Pending":"1"}) from exc
         raise
 
 def _atomic_link_commitment_payment(commitment_id:str,body:CommitmentPaymentLink,db):
@@ -3154,7 +3271,7 @@ def _atomic_link_commitment_payment(commitment_id:str,body:CommitmentPaymentLink
     if not selected and occurrence_already_linked(item,paid_date.isoformat(),paid_date):
         raise HTTPException(409,"Há um vínculo sem ocorrência definida neste período. Confira o histórico antes de vincular.")
     settles_next=bool(not body.historical_only and selected and occurrence and selected==occurrence[0]["due_date"])
-    expected_occurrence_amount=str(occurrence[0]["amount"]) if item.get("kind")=="obrigacao" and occurrence else str(item["amount"])
+    expected_occurrence_amount=str(occurrence[0]["amount"]) if item.get("kind")=="obrigacao" and occurrence else str(decimal_amount(item["amount"]))
     link={link_key:source_id,"source_kind":source_kind,"due_date":selected,"paid_date":paid_date.isoformat(),"original_description":tx.get("descricao_original") or tx.get("merchant_raw") or "","expected_amount":expected_occurrence_amount,"actual_amount":str(abs(amount)),"linked_at":now,"settled_next":settles_next}
     if selected:
         link["occurrence_key"]="due:"+selected
@@ -3232,12 +3349,14 @@ def _schedule_restore(snapshot):
 @app.post("/v1/commitments/{commitment_id}/payment-unlink",dependencies=[Depends(require_session)])
 @durable_mutation('commitment_payment_unlink',('commitment_id',))
 def unlink_commitment_payment(commitment_id:str,body:CommitmentPaymentUnlink,db=Depends(database)):
+    if isinstance(db, _SessionDatabase):
+        return _atomic_unlink_commitment_payment(commitment_id,body,db)
     try:
         with mongo_transaction(db) as session:
             return _atomic_unlink_commitment_payment(commitment_id,body,session_database(db,session))
     except OperationFailure as exc:
-        if exc.code==112 or exc.has_error_label("TransientTransactionError"):
-            raise HTTPException(409,"O compromisso mudou. Recarregue antes de desvincular.") from exc
+        if exc.code==112 or exc.has_error_label("TransientTransactionError") or exc.has_error_label("UnknownTransactionCommitResult"):
+            raise HTTPException(409,"O compromisso mudou. Recarregue antes de desvincular.",headers={"X-Operation-Pending":"1"}) from exc
         raise
 
 
@@ -3285,12 +3404,14 @@ def _atomic_unlink_commitment_payment(commitment_id:str,body:CommitmentPaymentUn
 @app.post("/v1/commitments/{commitment_id}/payment-swap",dependencies=[Depends(require_session)])
 @durable_mutation('commitment_payment_swap',('commitment_id',))
 def swap_commitment_payment(commitment_id:str,body:CommitmentPaymentSwap,db=Depends(database)):
+    if isinstance(db, _SessionDatabase):
+        return _atomic_swap_commitment_payment(commitment_id,body,db)
     try:
         with mongo_transaction(db) as session:
             return _atomic_swap_commitment_payment(commitment_id,body,session_database(db,session))
     except OperationFailure as exc:
-        if exc.code==112 or exc.has_error_label("TransientTransactionError"):
-            raise HTTPException(409,"O compromisso mudou. Recarregue antes de trocar o lançamento.") from exc
+        if exc.code==112 or exc.has_error_label("TransientTransactionError") or exc.has_error_label("UnknownTransactionCommitResult"):
+            raise HTTPException(409,"O compromisso mudou. Recarregue antes de trocar o lançamento.",headers={"X-Operation-Pending":"1"}) from exc
         raise
 
 
@@ -3312,7 +3433,7 @@ def _atomic_swap_commitment_payment(commitment_id:str,body:CommitmentPaymentSwap
     require_source_token(replacement,body.expected_source_token,"A movimentação mudou. Confira os dados antes de trocar o vínculo.")
     if not eligible_payment(replacement,bool(body.replacement_provisional_id)):
         raise HTTPException(422,"Selecione uma despesa realizada, não um pagamento de fatura ou transferência.")
-    if db.commitments.find_one({f"linked_transactions.{replacement_key}":replacement_id}):
+    if db.commitments.find_one({f"linked_transactions.{replacement_key}":replacement_id}) or overlay_link_names(db,[replacement_id] if replacement_key=="transaction_id" else [],[replacement_id] if replacement_key=="provisional_id" else []):
         raise HTTPException(409,"Esta movimentação já foi vinculada a um compromisso.")
     amount=decimal_amount(replacement.get("valor"))
     now=datetime.now(timezone.utc)

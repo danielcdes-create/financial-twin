@@ -98,9 +98,13 @@ def build_cost_control_summary(
     prev_bucket_full = [Decimal('0') for _ in range(5)]
 
     cur_mtd_expenses = Decimal('0')
+    cur_intra_mtd_expenses = Decimal('0')
+    cur_carry_expenses = Decimal('0')
     cur_full_expenses = Decimal('0')
     cur_mtd_income = Decimal('0')
     prev_mtd_expenses = Decimal('0')
+    prev_intra_mtd_expenses = Decimal('0')
+    prev_carry_expenses = Decimal('0')
     prev_full_expenses = Decimal('0')
     prev_mtd_income = Decimal('0')
 
@@ -154,14 +158,15 @@ def build_cost_control_summary(
                     week_incomes[w_slot] += inc
 
             if m_key == cur_ym:
-                eff_day = (
-                    ev_date.day
-                    if (ev_date is not None and ev_date.strftime('%Y-%m') == cur_ym)
-                    else 1
-                )
+                is_intra_cur = bool(ev_date is not None and ev_date.strftime('%Y-%m') == cur_ym)
+                eff_day = ev_date.day if is_intra_cur else 1
                 cur_full_expenses += exp
                 if eff_day <= mtd_day:
                     cur_mtd_expenses += exp
+                    if is_intra_cur:
+                        cur_intra_mtd_expenses += exp
+                    else:
+                        cur_carry_expenses += exp
                     cur_mtd_income += inc
                     b_idx = _bucket_index(eff_day)
                     cur_bucket_mtd[b_idx] += exp
@@ -170,16 +175,17 @@ def build_cost_control_summary(
                         cur_mtd_categories[cat] = cur_mtd_categories.get(cat, Decimal('0')) + exp
 
             elif m_key == prev_ym:
-                eff_day = (
-                    ev_date.day
-                    if (ev_date is not None and ev_date.strftime('%Y-%m') == prev_ym)
-                    else 1
-                )
+                is_intra_prev = bool(ev_date is not None and ev_date.strftime('%Y-%m') == prev_ym)
+                eff_day = ev_date.day if is_intra_prev else 1
                 prev_full_expenses += exp
                 b_idx = _bucket_index(eff_day)
                 prev_bucket_full[b_idx] += exp
                 if eff_day <= prev_mtd_day:
                     prev_mtd_expenses += exp
+                    if is_intra_prev:
+                        prev_intra_mtd_expenses += exp
+                    else:
+                        prev_carry_expenses += exp
                     prev_mtd_income += inc
                     prev_bucket_mtd[b_idx] += exp
                     if is_exp_role and exp != 0:
@@ -214,11 +220,24 @@ def build_cost_control_summary(
             'reached': reached,
         })
 
+    cur_mtd_expenses = max(Decimal('0'), cur_mtd_expenses)
+    cur_full_expenses = max(Decimal('0'), cur_full_expenses)
+    prev_mtd_expenses = max(Decimal('0'), prev_mtd_expenses)
+    prev_full_expenses = max(Decimal('0'), prev_full_expenses)
+
     mtd_delta_amount = cur_mtd_expenses - prev_mtd_expenses
     mtd_delta_pct = _pct_change(cur_mtd_expenses, prev_mtd_expenses)
-    daily_burn_cur = cur_mtd_expenses / Decimal(str(max(1, mtd_day)))
-    daily_burn_prev = prev_mtd_expenses / Decimal(str(max(1, prev_mtd_day)))
-    projected_month_exp = max(cur_full_expenses, daily_burn_cur * Decimal(str(cur_days_in_month)))
+    intra_burn_cur = max(Decimal('0'), cur_intra_mtd_expenses) / Decimal(str(max(1, mtd_day)))
+    carry_burn_cur = max(Decimal('0'), cur_carry_expenses) / Decimal(str(cur_days_in_month))
+    daily_burn_cur = max(Decimal('0'), intra_burn_cur + carry_burn_cur)
+    intra_burn_prev = max(Decimal('0'), prev_intra_mtd_expenses) / Decimal(str(max(1, prev_mtd_day)))
+    carry_burn_prev = max(Decimal('0'), prev_carry_expenses) / Decimal(str(prev_days_in_month))
+    daily_burn_prev = max(Decimal('0'), intra_burn_prev + carry_burn_prev)
+    projected_month_exp = max(
+        Decimal('0'),
+        cur_full_expenses,
+        max(Decimal('0'), cur_carry_expenses) + intra_burn_cur * Decimal(str(cur_days_in_month)),
+    )
     projected_vs_prev_full_pct = _pct_change(projected_month_exp, prev_full_expenses)
 
     mtd_summary = {

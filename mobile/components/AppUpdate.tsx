@@ -1,18 +1,38 @@
 import { Alert } from "../utils/appAlert";
 import * as Application from 'expo-application';
+import * as FileSystem from 'expo-file-system';
 import * as Linking from 'expo-linking';
+import * as Sharing from 'expo-sharing';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {Platform, StyleSheet, Text, View} from 'react-native';
 import {Pressable} from './InteractionControls';
 
 import appConfig from '../app.json';
+import {requirePrivateTransport} from '../utils/authState';
+import {bytesToHex, sha256Bytes} from '../utils/biometricSession';
+import {withDevicePrompt} from '../utils/devicePrompt';
 import {useAsyncScope} from '../utils/useAsyncScope';
 
 type Props={api:(path:string,init?:RequestInit)=>Promise<any>;baseUrl:string};
 
+const urlOrigin=(value:string)=>{
+  const match=/^(https?:\/\/[^/?#]+)/i.exec(String(value||'').trim());
+  return match?match[1].toLowerCase():'';
+};
+const assertPrivateUrl=(value:string)=>{
+  if(typeof URL==='function'){
+    requirePrivateTransport(value);
+    return;
+  }
+  if(!/^https:\/\/|^http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/|$)/i.test(value)){
+    throw new Error('Para proteger sua senha e seus dados, a conexão precisa usar HTTPS.');
+  }
+};
+
 export default function AppUpdate({api,baseUrl}:Props){
   const [info,setInfo]=useState<any>(null);
   const [checking,setChecking]=useState(false);
+  const [downloading,setDownloading]=useState(false);
   const generation=useRef(0), captureScope=useAsyncScope();
   const isWeb=Platform.OS==='web';
   const currentCode=isWeb?appConfig.expo.android.versionCode:Number(Application.nativeBuildVersion||0);
@@ -20,15 +40,64 @@ export default function AppUpdate({api,baseUrl}:Props){
   const check=useCallback(async()=>{const current=++generation.current,valid=captureScope();setChecking(true);try{const result=await api('/v1/app-update');if(valid()&&current===generation.current)setInfo(result)}catch(error:any){if(valid()&&current===generation.current&&error.name!=='AbortError')Alert.alert('Não foi possível verificar atualizações',error.message)}finally{if(valid()&&current===generation.current)setChecking(false)}},[api,captureScope]);
   useEffect(()=>{const task=setTimeout(()=>check(),0);return()=>clearTimeout(task)},[check]);
   const updateAvailable=Boolean(info?.available&&Number(info.version_code)>currentCode);
-  const download=async()=>{try{const rawUrl=String(info?.download_url||'');const targetUrl=/^https?:\/\//i.test(rawUrl)?rawUrl:`${String(baseUrl||'').replace(/\/+$/,'')}/${rawUrl.replace(/^\/+/, '')}`;await Linking.openURL(targetUrl)}catch{Alert.alert('Não foi possível abrir o download','Confira se o Tailscale está conectado.')}};
+  const download=async()=>{
+    const valid=captureScope();
+    setDownloading(true);
+    try{
+      const fresh=await api('/v1/app-update');
+      if(valid())setInfo(fresh);
+      if(!fresh?.available||Number(fresh.version_code)<=currentCode){
+        throw new Error('Nenhuma atualização mais recente disponível no momento.');
+      }
+      const expectedHash=String(fresh.sha256||'').trim().toUpperCase();
+      const expectedSize=Number(fresh.size_bytes||0);
+      if(!/^[0-9A-F]{64}$/.test(expectedHash)||!Number.isFinite(expectedSize)||expectedSize<=0){
+        throw new Error('Manifesto de atualização incompleto (SHA-256/tamanho ausentes).');
+      }
+      const cleanBase=String(baseUrl||'').replace(/\/+$/,'');
+      assertPrivateUrl(cleanBase);
+      const rawUrl=String(fresh.download_url||'');
+      if(!rawUrl)throw new Error('Endereço do pacote ausente.');
+      const targetUrl=/^https?:\/\//i.test(rawUrl)?rawUrl:`${cleanBase}/${rawUrl.replace(/^\/+/, '')}`;
+      assertPrivateUrl(targetUrl);
+      if(urlOrigin(targetUrl)!==urlOrigin(cleanBase)){
+        throw new Error('Origem de download divergente bloqueada por segurança.');
+      }
+      const FileCtor=(FileSystem as any)?.File;
+      const cacheDir=(FileSystem as any)?.Paths?.cache;
+      if(!isWeb&&typeof FileCtor?.downloadFileAsync==='function'&&cacheDir){
+        const staged=new FileCtor(cacheDir,`financial-twin-${Number(fresh.version_code)}.apk`);
+        try{if(staged.exists)staged.delete();}catch{/* ignore stale cache */}
+        const downloaded=await FileCtor.downloadFileAsync(targetUrl,staged);
+        const bytes:Uint8Array=await downloaded.bytes();
+        const actualHash=bytesToHex(sha256Bytes(bytes)).toUpperCase();
+        if(bytes.byteLength!==expectedSize||actualHash!==expectedHash){
+          try{if(downloaded.exists)downloaded.delete();}catch{/* discard corrupt candidate */}
+          throw new Error('A verificação SHA-256 do APK falhou. O arquivo foi descartado.');
+        }
+        if(typeof Sharing?.isAvailableAsync==='function'&&await Sharing.isAvailableAsync()){
+          await withDevicePrompt(()=>Sharing.shareAsync(downloaded.uri,{mimeType:'application/vnd.android.package-archive',dialogTitle:'Instalar atualização verificada'}));
+          return;
+        }
+      }
+      await Linking.openURL(targetUrl);
+    }catch(error:any){
+      if(valid()&&error?.name!=='AbortError'){
+        Alert.alert('Não foi possível abrir o download',error?.message||'Confira se o Tailscale está conectado.');
+      }
+    }finally{
+      if(valid())setDownloading(false);
+    }
+  };
+  const busy=checking||downloading;
   return <View style={s.card}>
     <Text style={s.title}>Atualizações</Text>
     <Text style={s.detail}>{isWeb?'Versão web':'Versão instalada'}: {currentName} ({currentCode})</Text>
     {info&&<Text style={[s.status,updateAvailable&&s.available]}>{!info.available?'Nenhum pacote verificado disponível':updateAvailable?`Versão ${info.version_name} disponível`:'Aplicativo atualizado'}</Text>}
-    <Pressable accessibilityRole="button" onPress={updateAvailable?()=>download():()=>check()} disabled={checking} style={[s.button,checking&&s.disabled]}><Text style={s.buttonText}>{checking?'Verificando…':updateAvailable?'Baixar atualização':'Verificar novamente'}</Text></Pressable>
+    <Pressable accessibilityRole="button" onPress={updateAvailable?()=>download():()=>check()} disabled={busy} style={[s.button,busy&&s.disabled]}><Text style={s.buttonText}>{checking?'Verificando…':downloading?'Validando pacote…':updateAvailable?'Baixar atualização':'Verificar novamente'}</Text></Pressable>
     {updateAvailable&&<>
-      <Pressable accessibilityRole="button" accessibilityLabel="Verificar novamente" onPress={()=>check()} disabled={checking} style={[{minHeight:44,justifyContent:'center',alignItems:'center',marginTop:8},checking&&s.disabled]}><Text style={{color:'#4FD1B5',fontWeight:'700',fontSize:13}}>Verificar novamente</Text></Pressable>
-      <Text style={s.help}>O navegador fará o download. Depois, toque no APK baixado e confirme a atualização do Android.</Text>
+      <Pressable accessibilityRole="button" accessibilityLabel="Verificar novamente" onPress={()=>check()} disabled={busy} style={[{minHeight:44,justifyContent:'center',alignItems:'center',marginTop:8},busy&&s.disabled]}><Text style={{color:'#4FD1B5',fontWeight:'700',fontSize:13}}>Verificar novamente</Text></Pressable>
+      <Text style={s.help}>O pacote é assinado e conferido por SHA-256 antes da instalação no Android.</Text>
     </>}
   </View>;
 }

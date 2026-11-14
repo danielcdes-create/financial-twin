@@ -7,6 +7,7 @@ against each document's official totals/balances.
 """
 from __future__ import annotations
 
+import calendar
 import hashlib
 import re
 from dataclasses import asdict, dataclass, field
@@ -17,7 +18,11 @@ from typing import Iterable
 
 import pymupdf
 
-from app.popular_merchants import classify_official_descriptor, extract_embedded_purchase_date
+from app.popular_merchants import (
+    classify_official_descriptor,
+    extract_embedded_purchase_date,
+    normalize_merchant_text,
+)
 
 _PT_MONTHS = {
     "janeiro": 1,
@@ -79,13 +84,42 @@ class OfficialStatementItem:
     bank_category_hint: str = ""
     brand_aliases: list[str] = field(default_factory=list)
     context_hints: list[str] = field(default_factory=list)
+    canonical_key: str | None = None
+
+    @property
+    def legacy_item_key(self) -> str:
+        return f"{self.doc_key}:{self.row_index}"
 
     @property
     def item_key(self) -> str:
-        return f"{self.doc_key}:{self.row_index}"
+        return self.canonical_key or self.legacy_item_key
 
     def to_dict(self) -> dict:
-        return {**asdict(self), "item_key": self.item_key}
+        return {**asdict(self), "item_key": self.item_key, "legacy_item_key": self.legacy_item_key}
+
+
+def assign_canonical_item_keys(doc: "OfficialStatementDocument") -> None:
+    if doc.kind == "bank_statement":
+        scope_id = normalize_merchant_text(doc.account_profile_key or doc.institution or "account").lower().replace(" ", "_")
+        scope = f"bank:{scope_id}"
+    else:
+        inst_id = normalize_merchant_text(doc.institution or "card").lower().replace(" ", "_")
+        comp_id = (doc.competencia or "").replace("-", "")
+        scope = f"card:{inst_id}:{doc.card_final or '0000'}:{comp_id}"
+
+    day_counts: dict[tuple[str, str, str], int] = {}
+    for item in doc.items:
+        amt_norm = f"{Decimal(item.amount).quantize(Decimal('0.01')):.2f}"
+        desc_norm = normalize_merchant_text(item.description)
+        ref_norm = (item.bank_ref or "").strip()
+        sub_norm = (item.subcard_final or "").strip()
+        inst_norm = f"{item.installment_number or 0}/{item.installment_total or 0}"
+        sig_raw = f"{desc_norm}|{ref_norm}|{sub_norm}|{inst_norm}|{item.kind}"
+        sig_hash = hashlib.sha256(sig_raw.encode("utf-8")).hexdigest()[:12]
+        bucket = (item.date, amt_norm, sig_hash)
+        ordinal = day_counts.get(bucket, 0) + 1
+        day_counts[bucket] = ordinal
+        item.canonical_key = f"{scope}:{item.date}:{amt_norm}:{sig_hash}:{ordinal}"
 
 
 @dataclass
@@ -110,6 +144,10 @@ class OfficialStatementDocument:
     closing_as_of: str | None = None
     items: list[OfficialStatementItem] = field(default_factory=list)
 
+    def __post_init__(self) -> None:
+        if self.items:
+            assign_canonical_item_keys(self)
+
     def to_dict(self) -> dict:
         data = asdict(self)
         data["items"] = [it.to_dict() for it in self.items]
@@ -120,7 +158,13 @@ def _infer_statement_item_date(ddmm: str, ref_year: int, ref_month: int) -> tupl
     day_num, month_num = map(int, ddmm.split("/"))
     # Purchase months > ref_month belong to the prior calendar year (e.g. Dec purchase on Jan bill)
     year = ref_year - 1 if month_num > ref_month else ref_year
-    d_obj = date(year, month_num, day_num)
+    if month_num == 2 and day_num == 29 and not calendar.isleap(year):
+        for candidate_year in range(year - 1, year - 5, -1):
+            if calendar.isleap(candidate_year):
+                year = candidate_year
+                break
+    max_day = calendar.monthrange(year, month_num)[1]
+    d_obj = date(year, month_num, min(day_num, max_day))
     # Prior cycle installment if more than ~38 days before ref_month's 10th
     prior_cycle = (ref_year * 12 + ref_month) - (year * 12 + month_num) >= 2
     return d_obj, prior_cycle
@@ -345,7 +389,9 @@ def _parse_itau_card_invoice(path: Path, digest: str, pages: list[list[str]]) ->
                 dt_ddmm, est = m_intl.group(1), m_intl.group(2).strip()
                 brl_val = parse_brl_decimal(iblock[idx + 1])
                 last_intl_dt, _ = _infer_statement_item_date(dt_ddmm, due_dt.year, due_dt.month)
-                info = classify_official_descriptor(est)
+                signed_amt = -brl_val
+                is_refund = signed_amt > 0
+                info = classify_official_descriptor(est, signed_amount=signed_amt)
                 row_idx += 1
                 items.append(
                     OfficialStatementItem(
@@ -355,15 +401,15 @@ def _parse_itau_card_invoice(path: Path, digest: str, pages: list[list[str]]) ->
                         date=last_intl_dt.isoformat(),
                         purchase_date_hint=last_intl_dt.isoformat(),
                         statement_month=competencia,
-                        amount=f"{-brl_val:.2f}",
-                        kind="expense",
+                        amount=f"{signed_amt:.2f}",
+                        kind="refund" if is_refund else "expense",
                         description=est,
                         popular_vendor=info.popular_vendor,
                         platform=info.platform,
                         categoria=info.categoria,
                         subcategoria=info.subcategoria,
-                        natureza="COMPRA",
-                        tipo="compra",
+                        natureza="ESTORNO" if is_refund else "COMPRA",
+                        tipo="estorno" if is_refund else "compra",
                         brand_aliases=list(info.brand_aliases),
                         context_hints=list(info.context_hints),
                     )
@@ -374,7 +420,9 @@ def _parse_itau_card_invoice(path: Path, digest: str, pages: list[list[str]]) ->
                 iof_val = parse_brl_decimal(iblock[idx + 1])
                 if iof_val != 0:
                     row_idx += 1
-                    info = classify_official_descriptor("IOF Compra Internacional")
+                    signed_iof = -iof_val
+                    iof_refund = signed_iof > 0
+                    info = classify_official_descriptor("IOF Compra Internacional", signed_amount=signed_iof)
                     items.append(
                         OfficialStatementItem(
                             doc_key=doc_key,
@@ -383,15 +431,15 @@ def _parse_itau_card_invoice(path: Path, digest: str, pages: list[list[str]]) ->
                             date=last_intl_dt.isoformat(),
                             purchase_date_hint=last_intl_dt.isoformat(),
                             statement_month=competencia,
-                            amount=f"{-iof_val:.2f}",
-                            kind="expense",
+                            amount=f"{signed_iof:.2f}",
+                            kind="refund" if iof_refund else "expense",
                             description="IOF Compra Internacional",
                             popular_vendor=info.popular_vendor,
                             platform=None,
                             categoria=info.categoria,
                             subcategoria=info.subcategoria,
-                            natureza="IMPOSTO_TRIBUTO",
-                            tipo="compra",
+                            natureza="ESTORNO" if iof_refund else "IMPOSTO_TRIBUTO",
+                            tipo="estorno" if iof_refund else "compra",
                             brand_aliases=list(info.brand_aliases),
                             context_hints=list(info.context_hints),
                         )
@@ -588,11 +636,18 @@ def _parse_itau_bank_statement(path: Path, digest: str, pages: list[list[str]]) 
     items: list[OfficialStatementItem] = []
     for row_idx, (dt_obj, desc, val) in enumerate(chronological, 1):
         hint_dt = extract_embedded_purchase_date(desc, dt_obj) or dt_obj
-        info = classify_official_descriptor(desc)
+        info = classify_official_descriptor(desc, signed_amount=val)
         upper_desc = desc.upper()
         is_bill_pay = "FATURA PAGA" in upper_desc or "PAG FATURA" in upper_desc
         is_tech = (row_idx - 1) in tech_indices
-        is_own = bool(holder_first and re.match(rf"^PIX\s+TRANSF\s+{re.escape(holder_first)}\b", upper_desc))
+        is_own = bool(
+            (holder_first and re.match(rf"^PIX\s+TRANSF\s+{re.escape(holder_first)}\b", upper_desc))
+            or "MESMA TITULARIDADE" in upper_desc
+            or "ENTRE CONTAS PROPRIAS" in upper_desc
+        )
+        is_bank_refund = val > 0 and any(
+            kw in upper_desc for kw in ("ESTORNO", "DEVOLUCAO", "DEVOLUÇÃO", "CANCELAMENTO", "REEMBOLSO COMPRA")
+        )
 
         if is_bill_pay:
             kind, tipo, nat, cat, subcat, vendor = (
@@ -621,6 +676,9 @@ def _parse_itau_bank_statement(path: Path, digest: str, pages: list[list[str]]) 
                 None,
                 "Transferência Própria",
             )
+        elif is_bank_refund:
+            kind, tipo, nat = "refund", "estorno", "ESTORNO"
+            cat, subcat, vendor = info.categoria, info.subcategoria, info.popular_vendor
         elif val > 0:
             kind, tipo, nat = "income", "receita", "RENDIMENTO"
             cat, subcat, vendor = info.categoria, info.subcategoria, info.popular_vendor
@@ -691,6 +749,16 @@ def _parse_santander_bank_statement(path: Path, digest: str, pages: list[list[st
     competencia = f"{stmt_year:04d}-{stmt_month:02d}"
     doc_key = f"extrato_santander_{stmt_year:04d}{stmt_month:02d}"
 
+    holder_first = ""
+    for i, line in enumerate(lines[:40]):
+        m_holder = re.match(r"^(?:Cliente|Titular|Nome)\s*:?\s*([A-ZÀ-Ú]{2,})(?:\s+[A-ZÀ-Ú]+)+", line, re.IGNORECASE)
+        if m_holder:
+            holder_first = m_holder.group(1).upper()
+            break
+        if _CPF_CANDIDATE_RE.search(line) and i >= 1 and re.match(r"^[A-ZÀ-Ú]{2,}(?:\s+[A-ZÀ-Ú]+)+$", lines[i - 1]):
+            holder_first = lines[i - 1].split()[0].upper()
+            break
+
     # Locate Conta Corrente -> Movimentação section
     mov_idx = None
     for idx in range(len(lines) - 2):
@@ -709,6 +777,12 @@ def _parse_santander_bank_statement(path: Path, digest: str, pages: list[list[st
     opening_balance = parse_brl_decimal(lines[idx + 1])
     idx += 2
 
+    def _santander_row_date(day_val: int, month_val: int) -> date:
+        row_year = stmt_year - 1 if month_val > stmt_month else stmt_year
+        if month_val == 2 and day_val == 29 and not calendar.isleap(row_year):
+            day_val = 28
+        return date(row_year, month_val, min(day_val, calendar.monthrange(row_year, month_val)[1]))
+
     raw_rows: list[tuple[date, str, str | None, Decimal]] = []
     current_dt: date | None = None
     closing_dt: date | None = None
@@ -718,12 +792,12 @@ def _parse_santander_bank_statement(path: Path, digest: str, pages: list[list[st
         cur = lines[idx]
         m_close = re.match(r"^SALDO EM\s+(\d{2})/(\d{2})$", cur)
         if m_close and idx + 1 < len(lines) and _BRL_RE.match(lines[idx + 1]):
-            closing_dt = date(stmt_year, int(m_close.group(2)), int(m_close.group(1)))
+            closing_dt = _santander_row_date(int(m_close.group(1)), int(m_close.group(2)))
             closing_balance = parse_brl_decimal(lines[idx + 1])
             break
         if re.match(r"^\d{2}/\d{2}$", cur):
             d_n, m_n = map(int, cur.split("/"))
-            current_dt = date(stmt_year, m_n, d_n)
+            current_dt = _santander_row_date(d_n, m_n)
             idx += 1
             continue
         if current_dt is None:
@@ -764,8 +838,16 @@ def _parse_santander_bank_statement(path: Path, digest: str, pages: list[list[st
     items: list[OfficialStatementItem] = []
     for row_idx, (dt_obj, desc, doc_ref, val) in enumerate(raw_rows, 1):
         hint_dt = extract_embedded_purchase_date(desc, dt_obj) or dt_obj
-        info = classify_official_descriptor(desc)
+        info = classify_official_descriptor(desc, signed_amount=val)
         upper_desc = desc.upper()
+        is_own = bool(
+            (holder_first and re.search(rf"\b(?:PIX|TED|DOC|TRANSF)\b.*\b{re.escape(holder_first)}\b", upper_desc))
+            or "MESMA TITULARIDADE" in upper_desc
+            or "ENTRE CONTAS PROPRIAS" in upper_desc
+        )
+        is_bank_refund = val > 0 and any(
+            kw in upper_desc for kw in ("ESTORNO", "DEVOLUCAO", "DEVOLUÇÃO", "CANCELAMENTO", "REEMBOLSO COMPRA")
+        )
         if "FAT.CARTAO" in upper_desc or "FATURA CARTAO" in upper_desc:
             m_card = re.search(r"FINAL\s+(\d{4})", upper_desc)
             sub_final = m_card.group(1) if m_card else None
@@ -777,6 +859,20 @@ def _parse_santander_bank_statement(path: Path, digest: str, pages: list[list[st
                 None,
                 f"Pagamento Fatura Santander {sub_final or ''}".strip(),
             )
+        elif is_own:
+            sub_final = None
+            kind = "income" if val > 0 else "expense"
+            tipo, nat, cat, subcat, vendor = (
+                "transferencia",
+                "TRANSFERENCIA",
+                None,
+                None,
+                "Transferência Própria",
+            )
+        elif is_bank_refund:
+            sub_final = None
+            kind, tipo, nat = "refund", "estorno", "ESTORNO"
+            cat, subcat, vendor = info.categoria, info.subcategoria, info.popular_vendor
         elif val > 0:
             kind, tipo, nat = "income", "receita", "RENDIMENTO"
             sub_final = None
@@ -812,11 +908,13 @@ def _parse_santander_bank_statement(path: Path, digest: str, pages: list[list[st
                 tipo=tipo,
                 bank_ref=doc_ref,
                 subcard_final=sub_final,
+                own_transfer=is_own,
                 brand_aliases=list(info.brand_aliases),
                 context_hints=list(info.context_hints),
             )
         )
 
+    period_start_dt = min((r[0] for r in raw_rows), default=date(stmt_year, stmt_month, 1))
     return OfficialStatementDocument(
         doc_key=doc_key,
         filename=path.name,
@@ -824,7 +922,7 @@ def _parse_santander_bank_statement(path: Path, digest: str, pages: list[list[st
         kind="bank_statement",
         institution="Santander",
         account_profile_key="santander",
-        period_start=date(stmt_year, stmt_month, 1).isoformat(),
+        period_start=min(period_start_dt, date(stmt_year, stmt_month, 1)).isoformat(),
         period_end=closing_dt.isoformat(),
         opening_balance=f"{opening_balance:.2f}",
         closing_balance=f"{closing_balance:.2f}",
@@ -1002,6 +1100,31 @@ def parse_official_pdf(path: Path, passwords: Iterable[str] = ()) -> OfficialSta
     raise ValueError(f"Formato de comprovante oficial não reconhecido em '{path.name}'.")
 
 
+def deduplicate_overlapping_bank_statements(docs: list[OfficialStatementDocument]) -> None:
+    """Suppress duplicate items across overlapping bank statements of the same account in one batch."""
+    bank_docs = [d for d in docs if d.kind == "bank_statement"]
+    if len(bank_docs) < 2:
+        return
+
+    def _sort_key(d: OfficialStatementDocument) -> tuple[str, int, str]:
+        p_start = date.fromisoformat(d.period_start) if d.period_start else date.min
+        p_end = date.fromisoformat(d.period_end or d.closing_as_of) if (d.period_end or d.closing_as_of) else date.min
+        span = (p_end - p_start).days if p_start != date.min and p_end != date.min else 0
+        return (p_end.isoformat(), span, d.doc_key)
+
+    seen_keys_by_account: dict[str, set[str]] = {}
+    for doc in sorted(bank_docs, key=_sort_key, reverse=True):
+        acct = doc.account_profile_key or doc.institution.lower()
+        seen = seen_keys_by_account.setdefault(acct, set())
+        for item in doc.items:
+            if item.skip_insert:
+                continue
+            if item.item_key in seen:
+                item.skip_insert = True
+            else:
+                seen.add(item.item_key)
+
+
 def parse_official_pdf_batch(
     paths: Iterable[Path],
     *,
@@ -1019,31 +1142,50 @@ def parse_official_pdf_batch(
         docs_by_sha[parsed.sha256] = parsed
 
     docs = list(docs_by_sha.values())
+    deduplicate_overlapping_bank_statements(docs)
     correlate_parsed_statements(docs)
     return docs
 
 
 def correlate_parsed_statements(docs: list[OfficialStatementDocument]) -> None:
-    """Link bank-statement bill payments to card invoices in the same batch."""
+    """Link bank-statement bill payments 1-to-1 to card invoices in the same batch."""
     bank_payments: list[tuple[str, OfficialStatementItem]] = []
     for doc in docs:
         if doc.kind == "bank_statement":
             for item in doc.items:
-                if item.kind == "bill_payment":
+                if item.kind == "bill_payment" and not item.skip_insert:
                     bank_payments.append((doc.institution, item))
 
+    used_payment_indices: set[int] = set()
     for doc in docs:
         if doc.kind != "card_statement" or not doc.total_amount or not doc.due_date:
             continue
         expected_debit = -Decimal(doc.total_amount)
         due_dt = date.fromisoformat(doc.due_date)
-        for inst, pay_item in bank_payments:
+        wanted_finals = {f for f in (doc.card_final, *(doc.additional_finals or [])) if f}
+
+        best_idx: int | None = None
+        best_rank: tuple[int, int] | None = None
+        for idx, (inst, pay_item) in enumerate(bank_payments):
+            if idx in used_payment_indices:
+                continue
             if inst != doc.institution:
                 continue
             if Decimal(pay_item.amount) != expected_debit:
                 continue
+            if pay_item.subcard_final and wanted_finals and pay_item.subcard_final not in wanted_finals:
+                continue
             pay_dt = date.fromisoformat(pay_item.date)
-            if abs((pay_dt - due_dt).days) <= 10:
-                doc.paid_date = pay_item.date
-                doc.status = "paga"
-                break
+            gap = abs((pay_dt - due_dt).days)
+            if gap > 10:
+                continue
+            exact_final = 0 if (pay_item.subcard_final and pay_item.subcard_final in wanted_finals) else 1
+            rank = (exact_final, gap)
+            if best_rank is None or rank < best_rank:
+                best_rank = rank
+                best_idx = idx
+
+        if best_idx is not None:
+            used_payment_indices.add(best_idx)
+            doc.paid_date = bank_payments[best_idx][1].date
+            doc.status = "paga"

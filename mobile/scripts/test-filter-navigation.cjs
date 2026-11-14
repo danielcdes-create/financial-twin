@@ -24,7 +24,7 @@ configureMutationStore(){},pendingMutations:async()=>[],subscribeMutations:()=>(
 const native={Platform:{OS:'android'},StyleSheet:{create:x=>x},useWindowDimensions:()=>({width:390,height:844,fontScale:1}),
   ...Object.fromEntries(['ActivityIndicator','Pressable','ScrollView','Text','TextInput','View'].map(name=>[name,name])),
   FlatList:props=>React.createElement('ListSurface',{data:props.data},props.ListHeaderComponent,
-    props.data.map((item,index)=>React.createElement(React.Fragment,{key:item.id},props.renderItem({item,index}))),props.ListFooterComponent)};
+    props.data.map((item,index)=>React.createElement(React.Fragment,{key:props.keyExtractor?props.keyExtractor(item,index):(item.id??index)},props.renderItem({item,index}))),props.ListFooterComponent)};
 const mocks={'react':React,'react-native':{...native,BackHandler:{addEventListener:()=>({remove(){}})}},'react-native-safe-area-context':{SafeAreaView:'View',useSafeAreaInsets:()=>({top:0,bottom:0})},
   'expo-document-picker':{},'expo-image-picker':{},'expo-router':{usePathname:()=> '/',router:{push(){}}},'expo-notification-capture':{__esModule:true,default:{available:false}},
   './components/AuthProvider':{useAuth:()=>({lock(){}})},'./utils/queueDb':{useSQLiteContext:()=>sqliteDb},

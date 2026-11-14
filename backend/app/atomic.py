@@ -77,6 +77,8 @@ def mongo_transaction(db):
             if exc.code == 20:
                 raise AtomicUnavailable("MongoDB precisa operar como replica set para decisões atômicas.") from exc
             raise
+        finally:
+            setattr(session, "_movement_insert_locked", False)
 
 
 def session_args(session):
@@ -85,7 +87,11 @@ def session_args(session):
 
 @contextmanager
 def mongo_snapshot(db):
-    """Read-only context without opening a transaction (avoids commitTransaction RTT on GET routes)."""
+    """Read-only replica-set context without explicit multi-document transaction RTT.
+
+    NOTE: Returns 'snapshot' to preserve the client wire contract while reading
+    against MongoDB replica-set collections without opening/committing a session.
+    """
     if not isinstance(db, Database):
         yield db, "best_effort"
         return

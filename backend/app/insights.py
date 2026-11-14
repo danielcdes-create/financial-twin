@@ -25,10 +25,10 @@ from app.purchase_horizon import purchase_horizon
 from app.services.ai.xai.provider import XAIVisionProvider, XAIError, public_xai_error
 from app.pagination import page
 from app.account_positions import account_positions, account_key_for_legacy
-from app.commitments import commitment_cutoff, linked_due_dates, schedule_from, as_date, historical_occurrence_conflicts
+from app.commitments import COMMITMENT_CUTOFF, commitment_cutoff, linked_due_dates, schedule_from, as_date, historical_occurrence_conflicts
 from pymongo.database import Database
 from app.dashboard_window import _load_raw_ledger_snapshot
-from app.future_commitments import effective_documents
+from app.future_commitments import effective_documents, obligation_links, unpaid
 from app.economic_period import economic_rows, economic_basis, economic_in_period
 from app.obligation_policy import OPEN_OBLIGATION_STATUSES
 from contextlib import nullcontext
@@ -63,12 +63,16 @@ def rows_for(db,start,end):
     if snap is not None:
         all_txs,all_captures=snap[0],snap[1]
         ledger=[row for row in all_txs if economic_in_period(row,start,end)]
-        linked={str(row['_id']) for row in ledger}
+        linked={str(row['_id']) for row in all_txs if row.get('_id') is not None}
         captures=[row for row in all_captures if economic_in_period(row,start,end) and str(row.get('linked_transaction_id') or '') not in linked]
         return [(False,row) for row in ledger]+[(True,row) for row in captures]
     ledger=list(economic_rows(db.transactions,start,end))
     linked={str(row['_id']) for row in ledger}
-    captures=[row for row in economic_rows(db.provisional_transactions,start,end,{'status':'confirmed'}) if str(row.get('linked_transaction_id') or '') not in linked]
+    raw_captures=list(economic_rows(db.provisional_transactions,start,end,{'status':'confirmed'}))
+    cross_ids=[ObjectId(lid) for row in raw_captures if ObjectId.is_valid(lid:=str(row.get('linked_transaction_id') or '')) and lid not in linked]
+    if cross_ids:
+        linked.update(str(row['_id']) for row in db.transactions.find({'_id':{'$in':cross_ids}},{'_id':1}) if row.get('_id') is not None)
+    captures=[row for row in raw_captures if str(row.get('linked_transaction_id') or '') not in linked]
     return [(False,row) for row in ledger]+[(True,row) for row in captures]
 def source_id(captured,row):return ('capture:'+row['provisional_id']) if captured else ('ledger:'+str(row['_id']))
 def source(db,reference):
@@ -218,7 +222,7 @@ def _obligation_display_label(obligation: dict, due: date) -> str:
 
 def _planning_context(start:date,end:date,db,purchase:bool=False):
     flows=[];excluded=[];suggestions=[]
-    cutoff = commitment_cutoff(start)
+    cutoff = COMMITMENT_CUTOFF
     seek = min(start, cutoff) if (purchase and start >= cutoff) else start
     with SpanTimer("insights.planning_context", purchase=purchase), mongo_snapshot(db) as (reading,consistency):
         raw_db=unwrap_database(reading)
@@ -313,12 +317,16 @@ def _planning_context(start:date,end:date,db,purchase:bool=False):
                         flows.append({'id':identity,'source_ref':identity,'date':effective_due.isoformat(),**({'original_due_date':due.isoformat(),'overdue':True} if due<start else {}),'amount':money(-value),'label':name,'account_key':key,'certainty':'assumed'})
         # Imported obligations are offered once and require explicit overlap/account review.
         # Due dates in the legacy schema are civil dates stored at UTC midnight.
-        for obligation in effective_documents(reading, 'obligation', with_batch_size(reading.obligations.find({'status':{'$in':list(OPEN_OBLIGATION_STATUSES)}}), 2000)):
+        raw_obligations=list(with_batch_size(reading.obligations.find({'status':{'$in':list(OPEN_OBLIGATION_STATUSES)}}), 2000))
+        ob_links=obligation_links(reading,raw_obligations) if raw_obligations and getattr(reading,'reconciliations',None) is not None else set()
+        for raw_ob,obligation in zip(raw_obligations,effective_documents(reading, 'obligation', raw_obligations)):
             if obligation.get('future_excluded') or obligation.get('payment_link'): continue
+            if raw_ob.get('_id') in ob_links: continue
             if str(obligation.get('origem_id')) in plan_ids and str(obligation.get('tipo') or '').lower() not in {'fatura_cartao', 'fatura'}: continue
             if purchase and str(obligation.get('tipo') or '').lower() in {'fatura_cartao', 'fatura'}: continue
             if obligation.get('data_vencimento'):
                 due=as_date(obligation['data_vencimento'])
+                if due<seek:continue
             else:
                 comp=str(obligation.get('competencia') or '').strip()
                 if len(comp)==7 and comp[4]=='-' and comp[:4].isdigit() and comp[5:].isdigit() and 1<=int(comp[5:])<=12:

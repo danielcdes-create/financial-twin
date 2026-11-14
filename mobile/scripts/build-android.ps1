@@ -1,8 +1,11 @@
-param(
+﻿param(
     [string]$ProjectDirectory = (Split-Path $PSScriptRoot -Parent),
     [string]$OutputDirectory = (Join-Path (Split-Path $PSScriptRoot -Parent) 'artifacts\candidate'),
     [switch]$SkipPublish,
     [switch]$StrictPublish,
+    [switch]$PublishExistingCandidate,
+    [switch]$AllowSignerRotation,
+    [string]$ExpectedSignerSha256,
     [switch]$NoPush
 )
 $ErrorActionPreference = 'Stop'
@@ -66,6 +69,23 @@ if (Test-Path -LiteralPath $appConfigPath) {
     }
 }
 
+$releaseKeyConfig = if ($env:FT_RELEASE_CONFIG_FILE) {
+    $env:FT_RELEASE_CONFIG_FILE
+} else {
+    Join-Path (Split-Path $repoRoot -Parent) '.release-keys\financial-twin-release.json'
+}
+$gradleReleaseArg = ''
+if (Test-Path -LiteralPath $releaseKeyConfig -PathType Leaf) {
+    $resolvedReleaseConfig = (Resolve-Path -LiteralPath $releaseKeyConfig).Path
+    $env:FT_RELEASE_CONFIG_FILE = $resolvedReleaseConfig
+    $gradleReleaseArg = " -PFT_RELEASE_CONFIG_FILE=`"$resolvedReleaseConfig`""
+    if (!$ExpectedSignerSha256) {
+        $cfgObj = Get-Content -LiteralPath $resolvedReleaseConfig -Raw | ConvertFrom-Json
+        if ($cfgObj.signer_sha256) { $ExpectedSignerSha256 = [string]$cfgObj.signer_sha256 }
+    }
+    Write-Host "Assinatura privada de release habilitada via configuração local protegida." -ForegroundColor Cyan
+}
+
 if ($driveLetter -and [System.Environment]::OSVersion.Platform -eq 'Win32NT') {
     Write-Host "Mapeando unidade virtual $driveLetter -> $repoRoot para contornar limite de 260 caracteres do Ninja..." -ForegroundColor Cyan
     subst $driveLetter $repoRoot
@@ -73,18 +93,28 @@ if ($driveLetter -and [System.Environment]::OSVersion.Platform -eq 'Win32NT') {
     $activeProject = Join-Path $driveLetter 'mobile'
 }
 
-Remove-Item -Path (Join-Path $activeProject 'android\app\.cxx') -Recurse -Force -ErrorAction SilentlyContinue
+$cxxDir = Join-Path $activeProject 'android\app\.cxx'
+if (Test-Path -LiteralPath $cxxDir) {
+    $staleNinja = Get-ChildItem -Path $cxxDir -Filter 'build.ninja' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (!$staleNinja -or ($driveLetter -and (Get-Content -LiteralPath $staleNinja.FullName -TotalCount 40 | Out-String) -notmatch [regex]::Escape($driveLetter))) {
+        Remove-Item -Path $cxxDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
 Push-Location (Join-Path $activeProject 'android')
 try {
-    Remove-Item -Path (Join-Path $activeProject 'android\app\build\generated\assets\react\release') -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item -Path (Join-Path $activeProject 'android\app\build\generated\sourcemaps\react\release') -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item -Path (Join-Path $activeProject 'android\app\build\intermediates\assets\release') -Recurse -Force -ErrorAction SilentlyContinue
-    $logPath = Join-Path $outputPath 'android-build.log'
-    cmd.exe /c ".\gradlew.bat app:assembleRelease -x lintVitalRelease -x lintVitalAnalyzeRelease -PreactNativeArchitectures=arm64-v8a --max-workers=2 --console=plain --no-build-cache > `"$logPath`" 2>&1"
-    if ($LASTEXITCODE -ne 0) { throw "Gradle falhou: $LASTEXITCODE. Consulte android-build.log." }
-    $apk = Join-Path $activeProject 'android\app\build\outputs\apk\release\app-release.apk'
-    if (!(Test-Path -LiteralPath $apk)) { throw 'O Gradle não produziu o APK esperado.' }
-    Copy-Item -LiteralPath $apk -Destination $destination -Force
+    if (!$PublishExistingCandidate) {
+        Remove-Item -Path (Join-Path $activeProject 'android\app\build\generated\assets\react\release') -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path (Join-Path $activeProject 'android\app\build\generated\sourcemaps\react\release') -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path (Join-Path $activeProject 'android\app\build\intermediates\assets\release') -Recurse -Force -ErrorAction SilentlyContinue
+        $logPath = Join-Path $outputPath 'android-build.log'
+        cmd.exe /c ".\gradlew.bat app:assembleRelease -x lintVitalRelease -x lintVitalAnalyzeRelease -PreactNativeArchitectures=arm64-v8a$gradleReleaseArg --max-workers=2 --console=plain --no-build-cache > `"$logPath`" 2>&1"
+        if ($LASTEXITCODE -ne 0) { throw "Gradle falhou: $LASTEXITCODE. Consulte android-build.log." }
+        $apk = Join-Path $activeProject 'android\app\build\outputs\apk\release\app-release.apk'
+        if (!(Test-Path -LiteralPath $apk)) { throw 'O Gradle não produziu o APK esperado.' }
+        Copy-Item -LiteralPath $apk -Destination $destination -Force
+    } elseif (!(Test-Path -LiteralPath $destination)) {
+        throw "Candidato APK não encontrado em $destination."
+    }
 
     # Valida badging do APK gerado contra app.json
     $aapt = Join-Path $sdkPath 'build-tools\36.0.0\aapt.exe'
@@ -103,11 +133,11 @@ try {
 
     if (!$SkipPublish) {
         if ($StrictPublish) {
-            & (Join-Path $PSScriptRoot "publish-release.ps1") -ApkPath $destination -BuildDirectory $projectPath
+            $pubArgs = @{ ApkPath = $destination; BuildDirectory = $projectPath }
+            if ($AllowSignerRotation) { $pubArgs['AllowSignerRotation'] = $true }
+            if ($ExpectedSignerSha256) { $pubArgs['ExpectedSignerSha256'] = $ExpectedSignerSha256 }
+            & (Join-Path $PSScriptRoot "publish-release.ps1") @pubArgs
         } else {
-            # Publicação direta no estilo SpamShield (sem bloqueios do git ou gates de proveniência complexos)
-            Copy-Item -LiteralPath $destination -Destination $publishedAlias -Force
-            
             $appConfigPath = Join-Path $projectPath 'app.json'
             $versionCode = 1
             $versionName = "1.0.0"
@@ -116,14 +146,63 @@ try {
                 if ($config.version) { $versionName = [string]$config.version }
                 if ($config.android.versionCode) { $versionCode = [int]$config.android.versionCode }
             }
-            
+
+            $pythonExe = Join-Path $repoRoot '.venv\Scripts\python.exe'
+            $apksigner = Join-Path $sdkPath 'build-tools\36.0.0\apksigner.bat'
+            $signerSha = ''
+            if (Test-Path -LiteralPath $apksigner) {
+                $prevEap = $ErrorActionPreference
+                $ErrorActionPreference = 'Continue'
+                $sigOut = & $apksigner verify --verbose --print-certs $destination 2>&1
+                $sigExit = $LASTEXITCODE
+                $ErrorActionPreference = $prevEap
+                if ($sigExit -ne 0) { throw 'Assinatura Android inválida no APK compilado.' }
+                $certLine = @($sigOut | ForEach-Object { "$_" } | Select-String '^Signer #\d+ certificate SHA-256 digest: ([0-9a-fA-F]{64})$')
+                if ($certLine.Count -eq 1) {
+                    $signerSha = $certLine[0].Matches[0].Groups[1].Value.ToUpperInvariant()
+                }
+                if ($ExpectedSignerSha256) {
+                    $normExpected = ($ExpectedSignerSha256 -replace '[:\s]', '').ToUpperInvariant()
+                    if ($signerSha -ne $normExpected) {
+                        throw "O certificado do APK compilado ($signerSha) diverge do ExpectedSignerSha256 ($normExpected)."
+                    }
+                }
+                if (Test-Path -LiteralPath $publishedAlias -PathType Leaf) {
+                    $prevEap = $ErrorActionPreference
+                    $ErrorActionPreference = 'Continue'
+                    $prevSigOut = & $apksigner verify --verbose --print-certs $publishedAlias 2>&1
+                    $prevSigExit = $LASTEXITCODE
+                    $ErrorActionPreference = $prevEap
+                    if ($prevSigExit -eq 0) {
+                        $prevCertLine = @($prevSigOut | ForEach-Object { "$_" } | Select-String '^Signer #\d+ certificate SHA-256 digest: ([0-9a-fA-F]{64})$')
+                        if ($prevCertLine.Count -eq 1) {
+                            $prevSignerSha = $prevCertLine[0].Matches[0].Groups[1].Value.ToUpperInvariant()
+                            if ($prevSignerSha -ne $signerSha -and !$AllowSignerRotation) {
+                                throw "Rotação de certificado detectada ($prevSignerSha -> $signerSha). Use -AllowSignerRotation para confirmar."
+                            }
+                        }
+                    }
+                }
+            }
+            $sourceCommit = (& git -C $repoRoot rev-parse HEAD 2>$null)
+            if ($sourceCommit) { $sourceCommit = $sourceCommit.Trim() } else { $sourceCommit = '' }
+
+            # Salva versão arquivada e proveniência verificada antes de promover o alias
+            $versionedApk = Join-Path $artifactsDir ("financial-twin-$versionName.apk")
+            $provenancePath = [IO.Path]::ChangeExtension($versionedApk, '.provenance.json')
+            $sourceVerifier = Join-Path $repoRoot 'scripts\verify_apk_source.py'
+            $provenanceSha = ''
+            if ((Test-Path -LiteralPath $pythonExe) -and (Test-Path -LiteralPath $sourceVerifier)) {
+                & $pythonExe $sourceVerifier --apk $destination --build-project $activeProject --root $repoRoot --output $provenancePath --allow-dirty | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw 'Falha ao verificar a proveniência do bundle JS/nativo embutido no APK.' }
+                $provenanceSha = (Get-FileHash -LiteralPath $provenancePath -Algorithm SHA256).Hash
+            }
+
+            Copy-Item -LiteralPath $destination -Destination $publishedAlias -Force
+            Copy-Item -LiteralPath $publishedAlias -Destination $versionedApk -Force
             $fileHash = (Get-FileHash -LiteralPath $publishedAlias -Algorithm SHA256).Hash
             $fileSize = (Get-Item -LiteralPath $publishedAlias).Length
             $publishedAt = [DateTime]::UtcNow.ToString("o")
-
-            # Salva versão arquivada
-            $versionedApk = Join-Path $artifactsDir ("financial-twin-$versionName.apk")
-            Copy-Item -LiteralPath $publishedAlias -Destination $versionedApk -Force
 
             # Atualiza manifest.json e apk-info.json
             $manifestPath = [IO.Path]::ChangeExtension($publishedAlias, '.manifest.json')
@@ -135,6 +214,9 @@ try {
                 sha256 = $fileHash
                 size_bytes = $fileSize
                 published_at = $publishedAt
+                source_commit = $sourceCommit
+                signer_sha256 = $signerSha
+                provenance_sha256 = $provenanceSha
                 download_url = "/v1/app-update/apk"
             }
             
@@ -143,47 +225,23 @@ try {
             [System.IO.File]::WriteAllText($manifestPath, $jsonString, $utf8NoBom)
             [System.IO.File]::WriteAllText($apkInfoPath, $jsonString, $utf8NoBom)
             
-            Write-Host "APK publicado com sucesso (estilo SpamShield) em: $publishedAlias" -ForegroundColor Green
+            Write-Host "APK publicado com sucesso em: $publishedAlias" -ForegroundColor Green
             Write-Host "Metadados gerados: v$versionName (build $versionCode), Tamanho: $fileSize bytes, SHA256: $fileHash" -ForegroundColor Cyan
 
-            $pythonExe = Join-Path $repoRoot '.venv\Scripts\python.exe'
-
-            # 1. Sincroniza telemetria (unificado em perf_telemetry.jsonl; migra .live.jsonl se existir)
-            $telemetryLive = Join-Path $repoRoot 'logs\perf_telemetry.live.jsonl'
-            $telemetryMain = Join-Path $repoRoot 'logs\perf_telemetry.jsonl'
-            if (Test-Path -LiteralPath $telemetryLive) {
-                Write-Host "Consolidando telemetria legada em $telemetryMain..." -ForegroundColor Cyan
-                if (Test-Path -LiteralPath $pythonExe) {
-                    & $pythonExe -c "
-from pathlib import Path
-target = Path(r'$telemetryMain')
-live = Path(r'$telemetryLive')
-if live.exists():
-    existing = set(target.read_text(encoding='utf-8', errors='ignore').splitlines()) if target.exists() else set()
-    new_lines = [l.strip() for l in live.read_text(encoding='utf-8', errors='ignore').splitlines() if l.strip() and l.strip() not in existing]
-    if new_lines:
-        with target.open('a', encoding='utf-8') as f:
-            for l in new_lines: f.write(l + '\n')
-        print(f'Telemetria: {len(new_lines)} novos eventos consolidados.')
-    live.unlink(missing_ok=True)
-"
-                }
-            }
-
-            # 2. Atualiza ponteiro de release no README.md
+            # Atualiza ponteiro de release no README.md
             $pointerScript = Join-Path $repoRoot 'scripts\release_pointer.py'
             $readmePath = Join-Path $repoRoot 'README.md'
             if ((Test-Path -LiteralPath $pythonExe) -and (Test-Path -LiteralPath $pointerScript) -and (Test-Path -LiteralPath $readmePath)) {
                 & $pythonExe $pointerScript --manifest $manifestPath --app-config $appConfigPath --readme $readmePath
             }
 
-            # 3. Commit e Push no GitHub (incluindo telemetria e ponteiro da release)
+            # Commit e Push no GitHub (somente manifesto de versão e ponteiro; nunca telemetria)
             if (!$NoPush) {
                 Write-Host "Executando git commit e push para o GitHub..." -ForegroundColor Cyan
                 Push-Location $repoRoot
                 try {
-                    git add logs/perf_telemetry.jsonl mobile/app.json README.md
-                    $commitMsg = "feat(release): publicar APK v$versionName (build $versionCode) e sincronizar telemetria"
+                    git add mobile/app.json README.md
+                    $commitMsg = "feat(release): publicar APK v$versionName (build $versionCode)"
                     git commit -m $commitMsg
                     if ($LASTEXITCODE -eq 0 -or (git status --porcelain).Trim() -eq "") {
                         git push origin HEAD

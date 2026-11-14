@@ -14,7 +14,7 @@ from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
-from bson import json_util
+from bson import ObjectId, json_util
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 from app.account_profiles import account_profiles, legacy_accounts_by_profile, effective_capture_account_key
@@ -193,15 +193,25 @@ def _financial_context_impl(db, month):
     known_profile_keys = {row["key"] for row in profiles}
     known_card_ids = {row["_id"] for row in original_accounts if row.get("tipo") == "cartao_credito"}
     economic_ids = {str(row["_id"]) for row in economic_transactions}
+    candidate_linked_ids = [
+        ObjectId(lid)
+        for row in [*economic_confirmed, *all_confirmed]
+        if ObjectId.is_valid(lid := str(row.get("linked_transaction_id") or ""))
+        and lid not in known_tx_by_id
+    ]
+    if candidate_linked_ids:
+        for row in db.transactions.find({"_id": {"$in": candidate_linked_ids}}, {"_id": 1}):
+            known_tx_by_id[str(row["_id"])] = row
+    known_ledger_ids = set(known_tx_by_id) | economic_ids | {str(value) for value in transaction_ids}
     for captured, row in [(False, row) for row in economic_transactions] + [(True, row) for row in economic_confirmed]:
-        if captured and str(row.get("linked_transaction_id")) in economic_ids:
+        if captured and str(row.get("linked_transaction_id") or "") in known_ledger_ids:
             continue
         effect = effects(row, captured)
         for key in totals:
             totals[key] += effect[key]
     classification_rows = [(False, row) for row in {str(row["_id"]): row for row in [*transactions, *economic_transactions]}.values()] + [(True, row) for row in all_confirmed]
     for captured, row in classification_rows:
-        if captured and str(row.get("linked_transaction_id")) in economic_ids | {str(value) for value in transaction_ids}:
+        if captured and str(row.get("linked_transaction_id") or "") in known_ledger_ids:
             continue
         effect = effects(row, captured)
         unknown += effect["role"] == "unknown"

@@ -258,7 +258,9 @@ class TransactionService:
                 ranked.append(score)
                 if score>best_score: best,best_type,best_score,best_parts=tx,candidate_type,score,parts
             level=classify(best_score) if best else "LOW"
-            validation=(event.get('raw_payload') or {}).get('validation') or {}
+            validation=(event.get('raw_payload') or {}).get('validation')
+            if not isinstance(validation, dict):
+                validation={}
             receipt_mismatch=validation.get('review_required') is True
             if receipt_mismatch and level=='HIGH':level='MEDIUM'
             ranked.sort(reverse=True)
@@ -316,8 +318,21 @@ class TransactionService:
                 if best and best_type=="transaction": item["candidate_transaction_id"]=best["_id"]
                 elif best: item["candidate_provisional_id"]=best["provisional_id"]
                 if receipt_mismatch:
-                    item.update({'reason':'item_total_mismatch','expected_total':validation['total'],'items_total':validation['items_total'],
-                                 'difference':validation['items_total']-validation['total']})
+                    def _safe_dec(val, fallback: Decimal) -> Decimal:
+                        try:
+                            dec = Decimal(str(val))
+                            return dec if dec.is_finite() else fallback
+                        except (InvalidOperation, ValueError, TypeError):
+                            return fallback
+                    exp_dec = _safe_dec(validation.get('total'), amount_decimal).quantize(Decimal('0.01'))
+                    itm_dec = _safe_dec(validation.get('items_total'), exp_dec).quantize(Decimal('0.01'))
+                    diff_dec = (itm_dec - exp_dec).quantize(Decimal('0.01'))
+                    item.update({
+                        'reason': 'item_total_mismatch',
+                        'expected_total': float(exp_dec),
+                        'items_total': float(itm_dec),
+                        'difference': float(diff_dec),
+                    })
                 self.review.insert_one(item,**kwargs)
                 self.events.update_one({"event_id":event["event_id"],"processing_status":"pending"},{"$set":{"processing_status":"review_required","confidence":best_score,
                     **({'processing_error':'item_total_mismatch'} if receipt_mismatch else {})}},**kwargs)

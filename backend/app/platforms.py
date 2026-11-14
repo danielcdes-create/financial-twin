@@ -143,12 +143,19 @@ def _safe_find(collection, query: dict[str, Any], limit: int = 800) -> list[dict
     return rows[:limit]
 
 
-def _safe_category_subcategories(db, *, preloaded_transactions=None, preloaded_captures=None) -> dict[str, list[str]]:
+def _safe_category_subcategories(
+    db,
+    *,
+    preloaded_transactions=None,
+    preloaded_captures=None,
+    cache_result: bool = True,
+) -> dict[str, list[str]]:
     try:
         return category_subcategories(
             db,
             preloaded_transactions=preloaded_transactions,
             preloaded_captures=preloaded_captures,
+            cache_result=cache_result,
         )
     except Exception:
         return {k: list(v) for k, v in CURATED_SUBCATEGORIES.items()}
@@ -288,13 +295,20 @@ def _build_historical_context(
             platforms_by_key[_norm(by_id[pid].get("nome_padrao"))] = by_id[pid]
         cand_raw = str(row.get("merchant_raw") or row.get("estabelecimento_original") or row.get("descricao_original") or "").strip()
         raw_candidates.append((row, False, _row_has_user_review(row), _row_flow(row), _norm(cand_raw)))
+    from app.reference_cache import subcategory_catalog_cache
+    warm_subcats = subcategory_catalog_cache.peek(db) if allowed_subcats is None else None
     resolved_subcats = (
         allowed_subcats
         if allowed_subcats is not None
-        else _safe_category_subcategories(
-            db,
-            preloaded_transactions=ledger_rows,
-            preloaded_captures=all_live_captures or (confirmed_captures + active_edited),
+        else (
+            warm_subcats
+            if warm_subcats is not None
+            else _safe_category_subcategories(
+                db,
+                preloaded_transactions=ledger_rows,
+                preloaded_captures=all_live_captures or (confirmed_captures + active_edited),
+                cache_result=False,
+            )
         )
     )
     return {

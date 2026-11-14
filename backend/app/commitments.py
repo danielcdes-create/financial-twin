@@ -223,21 +223,24 @@ def schedule(item: dict, count: int = 12, *, offset: int = 0, include_base: bool
         available = min(available, 1 - offset)
     end = as_date(item["end_date"]) if item.get("end_date") else None
     settled_dates = _settled_occurrence_dates(item)
+    def _dec(val):
+        return val.to_decimal() if hasattr(val, "to_decimal") else Decimal(str(val))
     def row_amount(number):
         if item.get("kind") != "obrigacao" or not total:
-            return float(item["amount"])
-        total_amount = Decimal(str(item["amount"]))
+            return float(_dec(item["amount"]))
+        total_amount = _dec(item["amount"])
         base = (total_amount / Decimal(total)).quantize(Decimal("0.01"), rounding="ROUND_DOWN")
         if number == total:
             return float(total_amount - base * (total - 1))
         return float(base)
+    cutoff_date = as_date(item['future_cutoff']) if item.get('future_cutoff') else None
     rows = [{"due_date": occurrence(offset).isoformat(),
              **({"base_due_date": occurrence(offset).isoformat()} if include_base else {}),
              "amount": row_amount(first_number + offset),
              "installment_number": first_number + offset if total else None,
              "status": "previsto"} for offset in range(offset, offset + max(0, available))
             if occurrence(offset).isoformat() not in settled_dates
-            and (end is None or occurrence(offset) <= end) and (not item.get('future_cutoff') or occurrence(offset) < as_date(item['future_cutoff']))]
+            and (end is None or occurrence(offset) <= end) and (cutoff_date is None or occurrence(offset) < cutoff_date)]
     return apply_installment_overrides(item, rows, include_base=include_base)
 
 
@@ -245,14 +248,15 @@ def apply_installment_overrides(item: dict, rows: list[dict], *, include_base: b
     """Partial future edits stay on the commitment. The base due date is the key. Cancelled rows leave the projection."""
     overrides = item.get("installment_overrides") or {}
     settled_dates = _settled_occurrence_dates(item)
+    cutoff_date = as_date(item["future_cutoff"]) if item.get("future_cutoff") else None
     if not isinstance(overrides, dict) or not overrides:
-        return [row for row in rows if row["due_date"] not in settled_dates]
+        return [row for row in rows if row["due_date"] not in settled_dates and (cutoff_date is None or as_date(row["due_date"]) < cutoff_date)]
     output = []
     for row in rows:
         base_due = row.get("base_due_date") or row["due_date"]
         patch = overrides.get(base_due)
         if not isinstance(patch, dict):
-            if row["due_date"] in settled_dates:
+            if row["due_date"] in settled_dates or (cutoff_date is not None and as_date(row["due_date"]) >= cutoff_date):
                 continue
             output.append({**row, "base_due_date": base_due} if include_base else row)
             continue
@@ -262,10 +266,13 @@ def apply_installment_overrides(item: dict, rows: list[dict], *, include_base: b
         if include_base:
             updated["base_due_date"] = base_due
         if patch.get("amount") not in (None, ""):
-            updated["amount"] = float(Decimal(str(patch["amount"])))
+            raw_amt = patch["amount"]
+            updated["amount"] = float(raw_amt.to_decimal() if hasattr(raw_amt, "to_decimal") else Decimal(str(raw_amt)))
         if patch.get("due_date"):
             updated["due_date"] = str(patch["due_date"])[:10]
         if updated["due_date"] in settled_dates or base_due in settled_dates:
+            continue
+        if cutoff_date is not None and as_date(updated["due_date"]) >= cutoff_date:
             continue
         output.append(updated)
     return output
@@ -314,13 +321,33 @@ def historical_occurrence_conflicts(item):
 def schedule_from(item: dict, start: date, count: int = 600) -> list[dict]:
     """Seek by frequency without consuming the display limit on overdue history."""
     anchor = as_date(item['next_due_date'])
+    seek_start = start
+    overrides = item.get('installment_overrides')
+    if isinstance(overrides, dict) and overrides:
+        start_iso = start.isoformat()
+        moved_bases = []
+        for base_k, patch in overrides.items():
+            if not isinstance(patch, dict) or patch.get('cancelled'):
+                continue
+            new_due = str(patch.get('due_date') or '')[:10]
+            base_iso = str(base_k or '')[:10]
+            if len(base_iso) == 10 and len(new_due) == 10 and base_iso < start_iso <= new_due:
+                try:
+                    moved_bases.append(as_date(base_iso))
+                except ValueError:
+                    pass
+        if moved_bases:
+            seek_start = min(seek_start, min(moved_bases))
     if item['frequency'] == 'semanal':
-        offset = max(0, (start - anchor).days // 7)
+        offset = max(0, (seek_start - anchor).days // 7)
+        extra = max(0, (start - seek_start).days // 7 + 2)
     else:
         step = {'mensal': 1, 'trimestral': 3, 'semestral': 6, 'anual': 12}[item['frequency']]
-        months = (start.year - anchor.year) * 12 + start.month - anchor.month
+        months = (seek_start.year - anchor.year) * 12 + seek_start.month - anchor.month
         offset = max(0, months // step)
-    return [row for row in schedule(item, count + 1, offset=offset) if row['due_date'] >= start.isoformat()][:count]
+        extra_months = max(0, (start.year - seek_start.year) * 12 + start.month - seek_start.month)
+        extra = extra_months // step + 2 if extra_months else 0
+    return [row for row in schedule(item, count + 1 + extra, offset=offset) if row['due_date'] >= start.isoformat()][:count]
 
 
 def stored_document(body: CommitmentIn, existing: dict | None = None) -> dict:
@@ -347,7 +374,7 @@ def stored_document(body: CommitmentIn, existing: dict | None = None) -> dict:
                   "linked_transactions": existing.get("linked_transactions", []) if existing else []})
     same_schedule=bool(existing and as_date(existing["next_due_date"])==body.next_due_date and existing["frequency"]==body.frequency)
     value["schedule_anchor_day"]=(existing.get("schedule_anchor_day") or as_date(existing["next_due_date"]).day) if same_schedule else body.next_due_date.day
-    value["schedule_anchor_end"]=existing.get("schedule_anchor_end",False) if same_schedule else body.next_due_date.day==calendar.monthrange(body.next_due_date.year,body.next_due_date.month)[1]
+    value["schedule_anchor_end"]=existing.get("schedule_anchor_end",False) if same_schedule else body.next_due_date.day==31
     value["revision"] = (existing.get("revision") or 1) + 1 if existing else 1
     if body.status=='cancelado':value['cancelled_at']=(existing or {}).get('cancelled_at') or value['updated_at']
     if existing:

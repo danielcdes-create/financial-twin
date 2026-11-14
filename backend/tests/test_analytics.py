@@ -78,4 +78,36 @@ class FinancialTotalsTests(unittest.TestCase):
         self.assertTrue(any(item["id"]=="burn_projection" for item in summary["insights"]))
         self.assertTrue(any(item["id"]=="top_saving_category" for item in summary["insights"]))
 
+    def test_post_closing_carry_in_does_not_explode_early_month_projection(self):
+        txs=[
+            # Card purchase on Oct 25 carried into competence 2026-11
+            {"_id":"c1","data_evento":datetime(2026,10,25,15,tzinfo=timezone.utc),"competencia":"2026-11","valor":Decimal128("-2000.00"),"fluxo":"saida","categoria":"Compras","classification":{"migration_reason":"despesa_real"}},
+            # Actual November purchase on Nov 2
+            {"_id":"n1","data_evento":datetime(2026,11,2,15,tzinfo=timezone.utc),"valor":Decimal128("-100.00"),"fluxo":"saida","categoria":"Mercado","classification":{"migration_reason":"despesa_real"}},
+        ]
+        summary=build_cost_control_summary(
+            txs,
+            anchor_date=date(2026,11,2),
+            period="month",
+            period_expenses=Decimal("2100.00"),
+        )
+        # 2000 carry-in + (100 / 2) * 30 = 3500.00 (never 2100/2 * 30 = 31500.00)
+        self.assertEqual(summary["mtd"]["current_expenses"], 2100.0)
+        self.assertEqual(summary["mtd"]["projected_month_expenses"], 3500.0)
+
+    def test_early_month_refund_exceeding_spend_clamps_to_zero(self):
+        txs=[
+            {"_id":"r1","data_evento":datetime(2026,11,1,15,tzinfo=timezone.utc),"valor":Decimal128("200.00"),"fluxo":"entrada","categoria":"Compras","classification":{"migration_reason":"estorno_abate_gasto"}},
+            {"_id":"e1","data_evento":datetime(2026,11,1,16,tzinfo=timezone.utc),"valor":Decimal128("-50.00"),"fluxo":"saida","categoria":"Mercado","classification":{"migration_reason":"despesa_real"}},
+        ]
+        summary=build_cost_control_summary(
+            txs,
+            anchor_date=date(2026,11,2),
+            period="month",
+            period_expenses=Decimal("0.00"),
+        )
+        self.assertEqual(summary["mtd"]["current_expenses"], 0.0)
+        self.assertEqual(summary["mtd"]["daily_burn_current"], 0.0)
+        self.assertEqual(summary["mtd"]["projected_month_expenses"], 0.0)
+
 if __name__=='__main__':unittest.main()

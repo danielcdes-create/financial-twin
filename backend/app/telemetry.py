@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import statistics
+import sys
 import time
 from collections import defaultdict, deque
 from contextvars import ContextVar
@@ -43,14 +44,19 @@ _CLIENT_META_KEYS = {
     "uploading", "status_code", "timed_out", "kind",
 }
 _ID_RE = re.compile(
-    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{24}"
+    r"[0-9a-fA-F]{64}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{24}"
 )
+_MONTH_SEGMENT_RE = re.compile(r"(?<=/)\d{4}-(?:0[1-9]|1[0-2])(?=/|$)")
+_TRACE_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
+MAX_TELEMETRY_ROUTE_KEYS = 256
 
 
 def public_route(path: str) -> str:
-    """Route label without query string or document ids."""
+    """Route label without query string, month slugs, or document/session ids."""
     cleaned = path.split("?", 1)[0]
-    return _ID_RE.sub("{id}", cleaned)[:180]
+    cleaned = _ID_RE.sub("{id}", cleaned)
+    cleaned = _MONTH_SEGMENT_RE.sub("{month}", cleaned)
+    return cleaned[:180]
 
 
 def safe_span_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
@@ -284,6 +290,8 @@ class TelemetryAggregator:
         backup_count: int | None = None,
     ) -> None:
         self.max_samples = max_samples_per_key
+        self._explicit_log = log_path is not None or bool(os.getenv("PERF_LOG_PATH"))
+        self._persist_to_disk = self._explicit_log or ("unittest" not in sys.modules)
         self.log_path = log_path or TELEMETRY_LOG_PATH
         self.max_log_bytes = max_log_bytes if max_log_bytes is not None else TELEMETRY_MAX_LOG_BYTES
         self.backup_count = backup_count if backup_count is not None else TELEMETRY_BACKUP_COUNT
@@ -298,10 +306,11 @@ class TelemetryAggregator:
         self._client_events: dict[str, deque[dict[str, Any]]] = defaultdict(
             lambda: deque(maxlen=self.max_samples)
         )
-        self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        if log_path is None:
-            self._consolidate_legacy_live_log()
-        self._load_existing_log()
+        if self._persist_to_disk:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            if log_path is None:
+                self._consolidate_legacy_live_log()
+            self._load_existing_log()
 
     def _consolidate_legacy_live_log(self) -> None:
         try:
@@ -328,12 +337,18 @@ class TelemetryAggregator:
         source = payload.get("source")
         if source == "backend" and payload.get("method") and payload.get("route"):
             key = f"{payload['method']} {payload['route']}"
+            if key not in self._backend_routes and len(self._backend_routes) >= MAX_TELEMETRY_ROUTE_KEYS:
+                key = f"{payload['method']} OVERFLOW"
             self._backend_routes[key].append(payload)
             for span in payload.get("spans") or []:
                 if isinstance(span, dict) and span.get("span") and isinstance(span.get("duration_ms"), (int, float)):
-                    self._backend_spans[str(span["span"])].append(float(span["duration_ms"]))
+                    span_key = str(span["span"])[:120]
+                    if span_key in self._backend_spans or len(self._backend_spans) < MAX_TELEMETRY_ROUTE_KEYS:
+                        self._backend_spans[span_key].append(float(span["duration_ms"]))
         elif source == "mobile":
             key = f"{payload.get('category', 'unknown')}:{payload.get('name', 'unknown')}"
+            if key not in self._client_events and len(self._client_events) >= MAX_TELEMETRY_ROUTE_KEYS:
+                key = f"{payload.get('category', 'unknown')}:OVERFLOW"
             self._client_events[key].append(payload)
 
     def _load_existing_log(self, max_tail_lines: int = 2000) -> None:
@@ -391,7 +406,7 @@ class TelemetryAggregator:
         self._append_jsonl_batch([payload])
 
     def _append_jsonl_batch(self, payloads: list[dict[str, Any]]) -> None:
-        if not payloads:
+        if not payloads or not self._persist_to_disk:
             return
         try:
             serialized = "".join(
@@ -568,9 +583,10 @@ def install_telemetry(app: FastAPI) -> None:
         if request.url.path in {"/live", "/v1/telemetry/events"}:
             return await call_next(request)
 
-        trace_id = request.headers.get("X-Trace-Id") or str(uuid4())
-        client_action = request.headers.get("X-Client-Action") or ""
-        client_tab = request.headers.get("X-Client-Tab") or ""
+        raw_trace_id = (request.headers.get("X-Trace-Id") or "").strip()
+        trace_id = raw_trace_id if _TRACE_ID_RE.fullmatch(raw_trace_id) else str(uuid4())
+        client_action = (request.headers.get("X-Client-Action") or "")[:40]
+        client_tab = (request.headers.get("X-Client-Tab") or "")[:40]
 
         trace = RequestTrace(
             trace_id=trace_id,
@@ -600,7 +616,9 @@ def install_telemetry(app: FastAPI) -> None:
                 if c.duration_ms >= SLOW_QUERY_THRESHOLD_MS
             ]
 
-            route_template = public_route(getattr(request.scope.get("route"), "path", request.url.path))
+            matched_route = request.scope.get("route")
+            route_path = getattr(matched_route, "path", None)
+            route_template = public_route(route_path) if route_path else "UNMATCHED"
             record = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "trace_id": trace_id,
@@ -638,18 +656,20 @@ def install_telemetry(app: FastAPI) -> None:
 
             if "response" in locals():
                 response.headers["X-Trace-Id"] = trace_id
-                response.headers["Server-Timing"] = (
-                    f'total;dur={total_ms}, '
-                    f'db;dur={db_ms};desc="{trace.db_call_count} queries", '
-                    f'app;dur={app_ms}'
-                )
-                response.headers["X-Perf-Metrics"] = json.dumps(
-                    {
-                        "total_ms": total_ms,
-                        "db_ms": db_ms,
-                        "app_ms": app_ms,
-                        "db_calls": trace.db_call_count,
-                        "n_plus_one": n_plus_one,
-                    },
-                    separators=(",", ":"),
-                )
+                is_authenticated = bool(getattr(getattr(request, "state", None), "authenticated", False))
+                if is_authenticated:
+                    response.headers["Server-Timing"] = (
+                        f'total;dur={total_ms}, '
+                        f'db;dur={db_ms};desc="{trace.db_call_count} queries", '
+                        f'app;dur={app_ms}'
+                    )
+                    response.headers["X-Perf-Metrics"] = json.dumps(
+                        {
+                            "total_ms": total_ms,
+                            "db_ms": db_ms,
+                            "app_ms": app_ms,
+                            "db_calls": trace.db_call_count,
+                            "n_plus_one": n_plus_one,
+                        },
+                        separators=(",", ":"),
+                    )

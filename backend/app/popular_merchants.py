@@ -11,6 +11,21 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal
+
+
+_GENERIC_VENDOR_LABELS = frozenset({
+    "PADARIA",
+    "CONDOMINIO",
+    "SALARIO",
+    "RENDIMENTO CONTA",
+    "ANUIDADE CARTAO",
+    "ESTORNO DE ANUIDADE",
+    "JUROS LIMITE DA CONTA",
+    "IOF",
+    "SEGURO CARTAO PROTEGIDO",
+    "ESTORNO PARCIAL",
+})
 
 
 def normalize_merchant_text(text: str | None) -> str:
@@ -61,7 +76,7 @@ _RULES: tuple[tuple[re.Pattern[str], PopularMerchantInfo], ...] = tuple(
                 "iFood",
                 "Saúde e Cuidados",
                 "Farmácia",
-                brand_aliases=("DROGARIAS PACHECO", "DROGARIA PACHECO", "PACHECO"),
+                brand_aliases=("DROGARIAS PACHECO", "DROGARIA PACHECO"),
                 context_hints=("FARMACIA", "REMEDIO", "IFOOD"),
             ),
         ),
@@ -72,7 +87,7 @@ _RULES: tuple[tuple[re.Pattern[str], PopularMerchantInfo], ...] = tuple(
                 None,
                 "Saúde e Cuidados",
                 "Farmácia",
-                brand_aliases=("DROGA RAIA", "DROGARAIA", "RAIA"),
+                brand_aliases=("DROGA RAIA", "DROGARAIA"),
                 context_hints=("FARMACIA", "REMEDIO"),
             ),
         ),
@@ -83,7 +98,7 @@ _RULES: tuple[tuple[re.Pattern[str], PopularMerchantInfo], ...] = tuple(
                 None,
                 "Saúde e Cuidados",
                 "Farmácia",
-                brand_aliases=("DROGARIA ARAUJO", "ARAUJO"),
+                brand_aliases=("DROGARIA ARAUJO", "ARAUJO LOJA"),
                 context_hints=("FARMACIA", "REMEDIO"),
             ),
         ),
@@ -171,30 +186,8 @@ _RULES: tuple[tuple[re.Pattern[str], PopularMerchantInfo], ...] = tuple(
                 "Mercado Pago",
                 "Alimentação",
                 "Padaria",
-                brand_aliases=("MP PADARIA", "PADARIA"),
+                brand_aliases=("MP PADARIA",),
                 context_hints=("PAO", "CAFE", "LANCHE"),
-            ),
-        ),
-        (
-            r"\bMP\s*\*?\s*GARCIA|\bDIEGO\s+SILAS\s+GARCIA",
-            PopularMerchantInfo(
-                "Cantina Garcia",
-                "Mercado Pago",
-                "Alimentação",
-                "Restaurantes/Bares",
-                brand_aliases=("CANTINA GARCIA", "MP GARCIA", "DIEGO SILAS GARCIA", "GARCIA"),
-                context_hints=("CANTINA", "LANCHE", "CAFE"),
-            ),
-        ),
-        (
-            r"\bMATEUS\s*SILVA(?:CONTAGEM|\b)",
-            PopularMerchantInfo(
-                "Mateus Silva",
-                None,
-                "Alimentação",
-                "Restaurantes/Bares",
-                brand_aliases=("MATEUS SILVA",),
-                context_hints=("LANCHE", "CANTINA", "CAFE"),
             ),
         ),
         (
@@ -204,7 +197,7 @@ _RULES: tuple[tuple[re.Pattern[str], PopularMerchantInfo], ...] = tuple(
                 None,
                 "Alimentação",
                 "Supermercado/Feira/Açougue",
-                brand_aliases=("SACOLAO ABC", "SACOLAO"),
+                brand_aliases=("SACOLAO ABC",),
                 context_hints=("HORTIFRUTI", "FEIRA", "MERCADO"),
             ),
         ),
@@ -237,7 +230,7 @@ _RULES: tuple[tuple[re.Pattern[str], PopularMerchantInfo], ...] = tuple(
                 None,
                 "Transporte",
                 "Combustível/Recarga",
-                brand_aliases=("POSTO FENIX", "FENIX"),
+                brand_aliases=("POSTO FENIX",),
                 context_hints=("POSTO", "GASOLINA", "COMBUSTIVEL", "ETANOL", "ABASTECIMENTO"),
             ),
         ),
@@ -281,7 +274,7 @@ _RULES: tuple[tuple[re.Pattern[str], PopularMerchantInfo], ...] = tuple(
                 None,
                 "Lazer e Estilo",
                 "Viagens/Hospedagem",
-                brand_aliases=("AZUL LINHAS AEREAS", "AZUL", "VOEAZUL"),
+                brand_aliases=("AZUL LINHAS AEREAS", "AZUL LINHAS", "VOEAZUL"),
                 context_hints=("PASSAGEM", "VOO", "VIAGEM"),
             ),
         ),
@@ -380,7 +373,7 @@ _RULES: tuple[tuple[re.Pattern[str], PopularMerchantInfo], ...] = tuple(
                 None,
                 "Habitação",
                 "Condomínio",
-                brand_aliases=("CONDOMINIO", "DSC CONDOMINIAL", "TAXA DE CONDOMINIO", "BOLETO CONDOMINIO"),
+                brand_aliases=("DSC CONDOMINIAL", "TAXA DE CONDOMINIO", "BOLETO CONDOMINIO"),
                 context_hints=("PREDIO", "APARTAMENTO"),
             ),
         ),
@@ -391,7 +384,7 @@ _RULES: tuple[tuple[re.Pattern[str], PopularMerchantInfo], ...] = tuple(
                 None,
                 "Habitação",
                 "Água/Gás",
-                brand_aliases=("SUPERGASBRAS", "GAS", "CONTA DE GAS"),
+                brand_aliases=("SUPERGASBRAS",),
                 context_hints=("GAS ENCANADO",),
             ),
         ),
@@ -402,7 +395,7 @@ _RULES: tuple[tuple[re.Pattern[str], PopularMerchantInfo], ...] = tuple(
                 None,
                 "Habitação",
                 "Energia",
-                brand_aliases=("CEMIG", "CONTA DE LUZ", "LUZ", "ENERGIA ELETRICA"),
+                brand_aliases=("CEMIG", "CEMIG DISTRIBUICAO"),
                 context_hints=("ENERGIA",),
             ),
         ),
@@ -618,14 +611,17 @@ def _clean_ifood_submerchant(raw_tail: str) -> str:
     return f"{title} (iFood)"
 
 
-def classify_official_descriptor(description: str, bank_category_hint: str = "") -> PopularMerchantInfo:
+def classify_official_descriptor(
+    description: str,
+    bank_category_hint: str = "",
+    *,
+    signed_amount: Decimal | None = None,
+) -> PopularMerchantInfo:
     desc = (description or "").strip()
     for regex, info in _RULES:
         if regex.search(desc):
             platform = info.platform
             if info.popular_vendor == "Lanche Bem" and not desc.upper().startswith("CAPPTA"):
-                platform = None
-            if info.popular_vendor == "Cantina Garcia" and not desc.upper().startswith("MP"):
                 platform = None
             if info.popular_vendor == "Drogarias Pacheco" and not desc.upper().startswith("IFD"):
                 platform = None
@@ -665,14 +661,14 @@ def classify_official_descriptor(description: str, bank_category_hint: str = "")
 
     if re.match(r"^PIX\s+TRANSF\s+", desc, flags=re.IGNORECASE):
         person = re.sub(r"\s*\d{2}/\d{2}$", "", re.sub(r"^PIX\s+TRANSF\s+", "", desc, flags=re.IGNORECASE)).strip().title()
-        norm_person = normalize_merchant_text(person)
+        is_incoming = signed_amount is not None and signed_amount > 0
         return PopularMerchantInfo(
-            popular_vendor=f"{person} (PIX)",
+            popular_vendor=f"{person} (PIX)" if person else "Transferência PIX",
             platform=None,
-            categoria="Receitas",
-            subcategoria="Reembolsos",
-            brand_aliases=(norm_person,) if len(norm_person) >= 3 else (),
-            context_hints=("PIX", "REEMBOLSO"),
+            categoria="Receitas" if is_incoming else None,
+            subcategoria="Reembolsos" if is_incoming else None,
+            brand_aliases=(),
+            context_hints=("PIX", "REEMBOLSO") if is_incoming else ("PIX",),
         )
 
     if re.match(r"^PIX\s+QRS\s+", desc, flags=re.IGNORECASE):
@@ -685,7 +681,7 @@ def classify_official_descriptor(description: str, bank_category_hint: str = "")
             platform="Mercado Pago" if is_mp else None,
             categoria="Compras" if is_mp else "Alimentação",
             subcategoria="Eletrônicos/Eletrodomésticos" if is_mp else "Restaurantes/Bares",
-            brand_aliases=(norm_body,) if len(norm_body) >= 4 else (),
+            brand_aliases=(norm_body,) if len(norm_body) >= 6 and " " in norm_body else (),
             context_hints=("PIX", "QRCODE"),
         )
 
@@ -697,7 +693,7 @@ def classify_official_descriptor(description: str, bank_category_hint: str = "")
             platform=None,
             categoria="Alimentação",
             subcategoria="Restaurantes/Bares",
-            brand_aliases=(norm_person,) if len(norm_person) >= 4 else (),
+            brand_aliases=(norm_person,) if len(norm_person) >= 6 and " " in norm_person else (),
             context_hints=("PIX", "CARTAO"),
         )
 
@@ -720,6 +716,14 @@ def classify_official_descriptor(description: str, bank_category_hint: str = "")
     )
 
 
+def _brand_set_for_info(info: PopularMerchantInfo) -> set[str]:
+    vendor_norm = normalize_merchant_text(info.popular_vendor)
+    out = {normalize_merchant_text(a) for a in info.brand_aliases if a} - {""}
+    if vendor_norm and vendor_norm not in _GENERIC_VENDOR_LABELS:
+        out.add(vendor_norm)
+    return out
+
+
 def brand_keys_for_text(text: str | None) -> set[str]:
     """Return canonical popular-brand keys matched by raw or already-normalized text."""
     raw = str(text or "").strip()
@@ -730,10 +734,7 @@ def brand_keys_for_text(text: str | None) -> set[str]:
         if regex.search(raw) or regex.search(norm):
             if not info.brand_aliases:
                 return set()
-            return {
-                normalize_merchant_text(info.popular_vendor),
-                *(normalize_merchant_text(a) for a in info.brand_aliases if a),
-            } - {""}
+            return _brand_set_for_info(info)
     keys: set[str] = set()
     for _regex, info in _RULES:
         for alias in info.brand_aliases:
@@ -744,7 +745,7 @@ def brand_keys_for_text(text: str | None) -> set[str]:
                 len(alias_norm) >= 4
                 and re.search(rf"(?:^| ){re.escape(alias_norm)}(?: |$)", norm)
             ):
-                keys.add(normalize_merchant_text(info.popular_vendor))
+                keys |= _brand_set_for_info(info)
                 keys.add(alias_norm)
                 break
     return keys

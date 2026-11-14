@@ -35,6 +35,8 @@ def _monthly_projection_impl(db, months=None, as_of: date | None = None):
     if months is not None and (isinstance(months, bool) or not isinstance(months, int) or not 1 <= months <= MAX_MONTHS):
         raise HTTPException(422, 'Escolha de 1 a 120 meses.')
     current = as_of or today()
+    # Nota v6: post-2026-10-01 unlinked charges from earlier civil months stay in `carried`
+    # so `summary.overdue` and `summary.this_month` include them while monthly bars stay separated.
     cutoff = COMMITMENT_CUTOFF
     first = current.replace(day=1)
     last_limit = advance(first, 'mensal', MAX_MONTHS) - timedelta(days=1)

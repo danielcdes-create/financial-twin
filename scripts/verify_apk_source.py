@@ -21,10 +21,11 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest().upper()
 
 
-def verify(apk, build_project, root):
+def verify(apk, build_project, root, allow_dirty=False):
     apk, build_project, root = Path(apk).resolve(), Path(build_project).resolve(), Path(root).resolve()
     git = lambda *args: subprocess.check_output(['git', '-C', str(root), *args], text=True).strip()
-    if git('status', '--porcelain'):
+    dirty = bool(git('status', '--porcelain'))
+    if dirty and not allow_dirty:
         raise ValueError('Candidate requires clean, committed sources')
     commit = git('rev-parse', 'HEAD')
     config = json.loads((root / 'mobile/app.json').read_text(encoding='utf-8-sig'))['expo']
@@ -72,7 +73,7 @@ def verify(apk, build_project, root):
     return {'source_commit': commit, 'version_name': config['version'], 'version_code': config['android']['versionCode'],
             'apk_sha256': digest(apk), 'size_bytes': apk.stat().st_size, 'bundle_sha256': hashlib.sha256(embedded).hexdigest().upper(),
             'source_map_checked': len(set(checked)), 'source_map_paths': sorted(set(checked)), 'native_inputs': native,
-            'clean_head': True, 'scope': 'Embedded JS and build inputs; physical installation remains unverified.'}
+            'clean_head': not dirty, 'scope': 'Embedded JS and build inputs; physical installation remains unverified.'}
 
 
 if __name__ == '__main__':
@@ -81,7 +82,8 @@ if __name__ == '__main__':
     parser.add_argument('--build-project', required=True, type=Path)
     parser.add_argument('--root', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
+    parser.add_argument('--allow-dirty', action='store_true')
     args = parser.parse_args()
-    result = verify(args.apk, args.build_project, args.root)
+    result = verify(args.apk, args.build_project, args.root, allow_dirty=args.allow_dirty)
     args.output.write_text(json.dumps(result, indent=2), encoding='utf-8')
     print(json.dumps({k: v for k, v in result.items() if k not in ('source_map_paths', 'native_inputs')}, indent=2))

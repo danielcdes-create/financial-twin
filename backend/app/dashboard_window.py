@@ -38,6 +38,7 @@ PROJECTION = {
     'currency': 1,
     'status': 1,
     'provisional_id': 1,
+    'parcelamento_purchase': 1,
 }
 
 _COMPETENCE_RE = re.compile(r'^\d{4}-(0[1-9]|1[0-2])$')
@@ -104,30 +105,43 @@ def snapshot_for(db, windows):
         timestamps = [normalized_datetime(dt) for dt in (latest_dt, captured_dt) if dt is not None]
 
         economic_timestamps = []
+        capped_economic_timestamps = []
+        current_civil_month = today().strftime('%Y-%m')
+        latest_real_month = max(
+            [current_civil_month]
+            + [local_date(ts).strftime('%Y-%m') for ts in timestamps]
+        )
         for rows in (all_txs, all_captures):
-            best_comp_row = max(
-                (
-                    row for row in rows
-                    if isinstance(row.get('competencia'), str)
-                    and '0001-01' <= row['competencia'] <= '9999-12'
-                    and _COMPETENCE_RE.match(row['competencia'])
-                ),
-                key=lambda r: r['competencia'],
-                default=None,
-            )
+            valid_comp_rows = [
+                row for row in rows
+                if isinstance(row.get('competencia'), str)
+                and '0001-01' <= row['competencia'] <= '9999-12'
+                and _COMPETENCE_RE.match(row['competencia'])
+            ]
+            best_comp_row = max(valid_comp_rows, key=lambda r: r['competencia'], default=None)
             if best_comp_row is not None:
                 inst = economic_instant(best_comp_row)
                 if inst is not None:
                     economic_timestamps.append(inst)
+            best_capped_row = max(
+                (r for r in valid_comp_rows if r['competencia'] <= latest_real_month),
+                key=lambda r: r['competencia'],
+                default=None,
+            )
+            if best_capped_row is not None:
+                c_inst = economic_instant(best_capped_row)
+                if c_inst is not None:
+                    capped_economic_timestamps.append(c_inst)
 
-        timestamps.extend(economic_timestamps)
-        anchor = max(timestamps, default=datetime.now(timezone.utc))
+        unbounded_anchor = max([*timestamps, *economic_timestamps], default=datetime.now(timezone.utc))
+        anchor = max([*timestamps, *capped_economic_timestamps], default=datetime.now(timezone.utc))
 
         date_intervals = []
         competence_intervals = []
         for period, start, end in windows:
-            beginning = period_start(anchor, period, start)
-            ending = day_start(end + timedelta(days=1)) if end else anchor + timedelta(microseconds=1)
+            win_anchor = unbounded_anchor if period == 'all' else anchor
+            beginning = period_start(win_anchor, period, start)
+            ending = day_start(end + timedelta(days=1)) if end else win_anchor + timedelta(microseconds=1)
             if period != 'all':
                 if start or end:
                     beginning = beginning - (ending - beginning)
@@ -152,7 +166,8 @@ def snapshot_for(db, windows):
                 'legacy': latest_dt,
                 'captured': captured_dt,
                 'anchor': anchor,
-                'economic_anchor': max(economic_timestamps, default=None),
+                'unbounded_anchor': unbounded_anchor,
+                'economic_anchor': max(capped_economic_timestamps, default=None),
                 'all_txs': all_txs,
                 'all_captures': all_captures,
             },

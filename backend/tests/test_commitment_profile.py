@@ -281,12 +281,76 @@ class CommitmentProfileTests(unittest.TestCase):
         ))
         self.assertTrue(res["persisted"])
         doc = self.db.commitments.find_one({"_id": cid})
-        self.assertEqual(doc["amount"].to_decimal(), Decimal("275.50"))
+        self.assertEqual(Decimal(str(doc["amount"])), Decimal("275.50"))
+        self.assertIsInstance(doc["amount"], str)
         self.assertEqual(doc["next_due_date"], "2026-11-22")
         self.assertEqual(doc["schedule_anchor_day"], 22)
         self.assertEqual(doc["category"], "Educacao")
         self.assertNotIn("subcategoria", doc)
         self.assertEqual(doc["revision"], 3)
+
+    def test_active_managed_commitment_amount_edit_never_breaks_schedule_or_output(self):
+        from app.commitments import schedule
+        from app.main import commitment_output
+        cid = ObjectId()
+        self.db.commitments.docs.append({
+            "_id": cid,
+            "commitment_id": str(cid),
+            "name": "Streaming Ativo",
+            "kind": "assinatura",
+            "status": "ativo",
+            "frequency": "mensal",
+            "renewal_status": "automatica",
+            "payment_method": "pix",
+            "purchase_date": "2026-01-10",
+            "amount": "39.90",
+            "next_due_date": "2026-11-30",
+            "schedule_anchor_day": 30,
+            "schedule_anchor_end": False,
+            "revision": 1,
+        })
+        apply_commitment_profile(self.db, ProfileWrite(
+            request_id=uuid4(),
+            source="managed",
+            identity=str(cid),
+            expected_revision=1,
+            amount=Decimal("44.90"),
+            due_date=date(2026, 11, 30),
+        ))
+        doc = self.db.commitments.find_one({"_id": cid})
+        self.assertEqual(doc["amount"], "44.90")
+        self.assertFalse(doc["schedule_anchor_end"])
+        out = commitment_output(doc)
+        self.assertEqual(out["amount"], 44.9)
+        self.assertEqual([r["due_date"] for r in schedule(doc, 3)], ["2026-11-30", "2026-12-30", "2027-01-30"])
+        # Legacy Decimal128 stored in DB must also serialize without TypeError
+        doc["amount"] = Decimal128("49.90")
+        self.assertEqual(commitment_output(doc)["amount"], 49.9)
+
+    def test_future_scope_shifts_monthly_due_dates_without_collapsing_series(self):
+        plan_id = ObjectId()
+        self.db.installment_plans.docs.append({
+            "_id": plan_id,
+            "descricao": "CURSO PARCELADO",
+            "status": "ativo",
+            "numero_parcelas": 3,
+            "installments": [
+                {"numero": 1, "competencia": "2026-11", "data_vencimento": datetime(2026, 11, 5, tzinfo=timezone.utc), "valor": money("100.00"), "status": "projetada"},
+                {"numero": 2, "competencia": "2026-12", "data_vencimento": datetime(2026, 12, 5, tzinfo=timezone.utc), "valor": money("100.00"), "status": "projetada"},
+                {"numero": 3, "competencia": "2027-01", "data_vencimento": datetime(2027, 1, 5, tzinfo=timezone.utc), "valor": money("100.00"), "status": "projetada"},
+            ],
+        })
+        apply_commitment_profile(self.db, ProfileWrite(
+            request_id=uuid4(),
+            source="installment",
+            identity=str(plan_id),
+            amount=Decimal("110.00"),
+            due_date=date(2026, 11, 20),
+            scope="future",
+        ))
+        eff = effective_document(self.db, "installment", self.db.installment_plans.docs[-1])
+        dues = [part["data_vencimento"].date().isoformat() for part in eff["installments"]]
+        self.assertEqual(dues, ["2026-11-20", "2026-12-20", "2027-01-20"])
 
 
 if __name__ == "__main__":

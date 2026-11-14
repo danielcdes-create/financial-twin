@@ -1,6 +1,6 @@
 {
   "name": "financial-twin",
-  "version": "1.20.84",
+  "version": "1.20.86",
   "main": "expo-router/entry",
   "dependencies": {
     "expo": "~57.0.27",

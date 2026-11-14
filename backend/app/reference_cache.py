@@ -72,10 +72,16 @@ class ReferenceCache:
                 return cached[2]
             return None
 
-    def set(self, scope, value):
+    def generation(self) -> int:
+        with self._lock:
+            return self._generation
+
+    def set(self, scope, value, *, expected_generation: int | None = None):
         raw_scope = unwrap_database(scope)
         key = scope if isinstance(scope, str) else id(raw_scope)
         with self._lock:
+            if expected_generation is not None and expected_generation != self._generation:
+                return value
             if len(self._values) >= 16 and key not in self._values:
                 self._values.pop(next(iter(self._values)))
             self._values[key] = (raw_scope, monotonic() + self.ttl_seconds, value)

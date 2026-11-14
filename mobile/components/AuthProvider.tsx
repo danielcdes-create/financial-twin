@@ -176,10 +176,17 @@ export default function AuthProvider({children}: {children: React.ReactNode}) {
     const expiresAt = Date.now() + body.expires_in * 1000;
     await awaitForeground(attempt);
     if (biometricOn) {
-      prompting.current = true;
-      try {await biometrics.updateBiometricSession(body.access_token, expiresAt);}
-      catch {/* Keep biometric setting enabled if OS overlay/prompt was dismissed during password login */}
-      finally {prompting.current = false;}
+      if (typeof biometrics.hasUnlockedBiometricAnchor !== 'function' || biometrics.hasUnlockedBiometricAnchor()) {
+        prompting.current = true;
+        try {await biometrics.updateBiometricSession(body.access_token, expiresAt);}
+        catch {/* Keep biometric setting enabled if envelope update fails transiently */}
+        finally {prompting.current = false;}
+      } else {
+        // Password login without an unlocked hardware anchor: clear stale/expired biometric
+        // session cleanly instead of triggering a surprise second OS biometric prompt.
+        await biometrics.clearBiometricSession().catch(() => {});
+        if (mounted.current) setBiometricOn(false);
+      }
     }
     await awaitForeground(attempt);
     unlockedBiometric.current = null;
@@ -210,10 +217,14 @@ export default function AuthProvider({children}: {children: React.ReactNode}) {
   }, [biometricOn]);
 
   const logout = useCallback(async (all = false) => {
-    // Require acknowledgement before reporting server revocation; an offline session can still be locked.
-    await api.json(all ? '/v1/auth/logout-all' : '/v1/auth/logout', {method: 'POST'});
-    lock();
-    await biometrics.clearBiometricSession(); setBiometricOn(false);
+    // Always lock and wipe local CPF + biometric secrets in finally, even if the server is unreachable.
+    try {
+      await api.json(all ? '/v1/auth/logout-all' : '/v1/auth/logout', {method: 'POST'});
+    } finally {
+      lock();
+      await biometrics.clearBiometricSession().catch(() => {});
+      if (mounted.current) setBiometricOn(false);
+    }
   }, [lock]);
 
   const run = useCallback(async (operation: () => Promise<void>, clearSecrets = true) => {

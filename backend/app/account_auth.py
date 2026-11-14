@@ -52,9 +52,20 @@ class PasswordInput(BaseModel):
     device_label: str = Field(default='Meu aparelho', min_length=1, max_length=60)
 
 
-def throttle(request):
-    login_attempts.check(request.client.host if request.client else 'unknown')
-    login_attempts.check('private-owner')
+def _client_host(request) -> str:
+    return request.client.host if getattr(request, 'client', None) else 'unknown'
+
+
+def throttle(request, scope: str = 'login'):
+    host = _client_host(request)
+    login_attempts.check(f'{scope}:{host}')
+    login_attempts.check(f'{scope}:private-owner')
+
+
+def reset_throttle(request, scope: str = 'login'):
+    host = _client_host(request)
+    login_attempts.reset(f'{scope}:{host}')
+    login_attempts.reset(f'{scope}:private-owner')
 
 
 @router.get('/status')
@@ -69,7 +80,7 @@ def status(request: Request):
 
 @router.post('/setup', status_code=201)
 def setup(body: SetupInput, request: Request):
-    throttle(request)
+    throttle(request, 'setup')
     settings = auth_settings()
     if (len(settings.account_setup_token) < 32 or
             not hmac.compare_digest(body.setup_token.encode(), settings.account_setup_token.encode())):
@@ -84,7 +95,7 @@ def setup(body: SetupInput, request: Request):
         raise HTTPException(409, 'A conta já foi configurada. Use Entrar.') from None
     finally:
         owner_cache.invalidate()
-    login_attempts.reset('private-owner')
+    reset_throttle(request, 'setup')
     return session_response(db, account, body.device_label)
 
 
@@ -115,7 +126,7 @@ def login(body: LoginInput, request: Request):
             hash_password(body.password)
         if not account or body.username.strip().lower() != account['username'] or not password_ok:
             raise HTTPException(401, 'Usuário ou senha incorretos.')
-    login_attempts.reset('private-owner')
+    reset_throttle(request, 'login')
     return session_response(db, account, body.device_label)
 
 
@@ -128,7 +139,7 @@ def account_info(request: Request, response: Response, session=Depends(require_s
                 auth_database(request),
                 session['account'],
                 jti,
-                BIOMETRIC_SESSION_SECONDS,
+                None,
                 persist_async=True,
             )
             if renewed:
@@ -168,7 +179,8 @@ def account_update(body: AccountInput, request: Request, session=Depends(require
 
 @router.post('/password')
 def password_change(body: PasswordInput, request: Request, session=Depends(require_session)):
-    throttle(request)
+    pwd_bucket = f"password:{session.get('session_id', 'owner')}"
+    login_attempts.check(pwd_bucket)
     account = session['account']
     if not verify_password(body.current_password, account['password_hash']):
         raise HTTPException(403, 'Senha atual incorreta.')
@@ -182,7 +194,8 @@ def password_change(body: PasswordInput, request: Request, session=Depends(requi
     owner_cache.invalidate()
     if result.matched_count != 1:
         raise HTTPException(409, 'A senha já foi alterada. Entre novamente.')
-    login_attempts.reset('private-owner')
+    login_attempts.reset(pwd_bucket)
+    reset_throttle(request, 'login')
     return session_response(db, {**account, 'auth_version': version, 'password_hash': encoded}, body.device_label)
 
 

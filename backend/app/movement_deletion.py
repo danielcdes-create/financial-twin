@@ -39,14 +39,32 @@ def token(document):
 def blockers(db, source, identity, document):
     key = 'transaction_id' if source == 'ledger' else 'provisional_id'
     reasons = []
+    str_ids = list({str(document.get('_id')), str(identity)})
     if db.commitments.find_one({f'linked_transactions.{key}': identity}):
         reasons.append('Este registro é um pagamento vinculado a um compromisso.')
+    elif getattr(db, 'future_schedule_overrides', None) is not None and db.future_schedule_overrides.find_one({f'payment_links.{key}': identity}):
+        reasons.append('Este registro é um pagamento vinculado a um compromisso.')
+    if source == 'ledger' and db.commitments.find_one({'purchase_transaction_id': {'$in': str_ids}}):
+        reasons.append('Este registro é a compra de origem vinculada a um compromisso.')
+    elif source == 'capture' and db.commitments.find_one({'purchase_provisional_id': identity}):
+        reasons.append('Este registro é a captura de origem vinculada a um compromisso.')
     reference = f'{source}:{identity}'
     if db.refund_claims.find_one({'_id': reference}) or db.financial_cases.find_one({'$or': [
         {'source_refs': reference}, {'refund_ref': reference},
     ]}):
         reasons.append('Este registro está vinculado a um caso financeiro ou reembolso.')
     ids = [document['_id'], identity]
+    if source == 'ledger':
+        if getattr(db, 'installment_plans', None) is not None and db.installment_plans.find_one({'$or': [
+            {'installments.transaction_id': {'$in': ids}},
+            {'installments.open_statement_id': {'$in': ids}},
+        ]}):
+            reasons.append('Este registro está vinculado a um parcelamento.')
+        if getattr(db, 'obligations', None) is not None and db.obligations.find_one({'$or': [
+            {'transaction_id': {'$in': ids}},
+            {'open_statement_id': {'$in': ids}},
+        ]}):
+            reasons.append('Este registro está vinculado a uma obrigação.')
     if db.reconciliations.find_one({'$or': [
         {'origem.entity': 'transactions' if source == 'ledger' else 'provisional_transactions', 'origem.id': {'$in': ids}},
         {'destino.entity': 'transactions' if source == 'ledger' else 'provisional_transactions', 'destino.id': {'$in': ids}},

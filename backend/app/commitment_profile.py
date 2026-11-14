@@ -19,7 +19,7 @@ from pymongo.errors import DuplicateKeyError
 
 from app.atomic import mongo_transaction, session_database
 from app.movement_insert_lock import lock_movement_insert
-from app.commitments import as_date
+from app.commitments import advance, as_date, schedule
 from app.economic_policy import amount
 from app import future_commitments
 from app.future_commitments import (
@@ -77,7 +77,9 @@ def _blank(value):
 
 
 def _provided_fields(body) -> set[str]:
-    return set(getattr(body, 'model_fields_set', getattr(body, '__fields_set__', set())))
+    if hasattr(body, 'model_fields_set'):
+        return set(body.model_fields_set)
+    return set(getattr(body, '__fields_set__', set()))
 
 
 def _cleared_profile_fields(body: ProfileWrite) -> set[str]:
@@ -231,6 +233,39 @@ def _store_override(db, key: str, profile: dict, rows: dict | None, label: str |
     else:
         db.future_schedule_overrides.insert_one({'_id': key, **replacement})
     return replacement['revision']
+
+
+def _ym_tuple(ym: str) -> tuple[int, int] | None:
+    if len(ym) == 7 and ym[4] == '-' and ym[:4].isdigit() and ym[5:].isdigit():
+        m = int(ym[5:])
+        if 1 <= m <= 12:
+            return int(ym[:4]), m
+    return None
+
+
+def _obligation_ym(document: dict) -> str:
+    raw_due = document.get('data_vencimento') or document.get('due_date')
+    if raw_due:
+        try:
+            return as_date(raw_due).strftime('%Y-%m')
+        except Exception:
+            pass
+    return str(document.get('competencia') or '')[:7]
+
+
+def _scoped_future_due(target_due: date | None, index: int, first_ym: str, row_ym: str) -> date | None:
+    if target_due is None:
+        return None
+    if index == 0:
+        return target_due
+    start_pair = _ym_tuple(first_ym)
+    row_pair = _ym_tuple(row_ym)
+    if start_pair and row_pair:
+        delta = (row_pair[0] * 12 + row_pair[1]) - (start_pair[0] * 12 + start_pair[1])
+        steps = delta if delta > 0 else index
+    else:
+        steps = index
+    return advance(target_due, 'mensal', steps)
 
 
 def _patch_row(db, source, identity, row_id, new_amount: Decimal | None, due: date | None, cancel=False):
@@ -493,12 +528,27 @@ def apply_commitment_profile(db, body: ProfileWrite):
                     sets.pop('subcategoria', None)
                 if body.frequency:
                     sets['frequency'] = body.frequency
-                if body.amount is not None:
-                    sets['amount'] = Decimal128(body.amount)
-                if body.due_date is not None:
-                    sets['next_due_date'] = body.due_date.isoformat() if isinstance(document.get('next_due_date'), str) else _stamp(body.due_date)
-                    sets['schedule_anchor_day'] = body.due_date.day
-                    sets['schedule_anchor_end'] = body.due_date.day == calendar.monthrange(body.due_date.year, body.due_date.month)[1]
+                open_sched = schedule(document, 2, include_base=True) if document.get('status') == 'ativo' and document.get('kind') == 'parcelamento' else []
+                single_next_override = bool(body.scope == 'next' and len(open_sched) > 1 and (body.amount is not None or body.due_date is not None))
+                if single_next_override:
+                    first_occ = open_sched[0]
+                    base_due_key = first_occ.get('base_due_date') or first_occ['due_date']
+                    overrides = dict(document.get('installment_overrides') or {}) if isinstance(document.get('installment_overrides'), dict) else {}
+                    existing_patch = dict(overrides.get(base_due_key) or {}) if isinstance(overrides.get(base_due_key), dict) else {}
+                    if body.amount is not None:
+                        existing_patch['amount'] = str(body.amount)
+                    if body.due_date is not None:
+                        existing_patch['due_date'] = body.due_date.isoformat()
+                    existing_patch.setdefault('cancelled', False)
+                    overrides[base_due_key] = existing_patch
+                    sets['installment_overrides'] = overrides
+                else:
+                    if body.amount is not None:
+                        sets['amount'] = str(body.amount)
+                    if body.due_date is not None:
+                        sets['next_due_date'] = body.due_date.isoformat() if isinstance(document.get('next_due_date'), str) else _stamp(body.due_date)
+                        sets['schedule_anchor_day'] = body.due_date.day
+                        sets['schedule_anchor_end'] = body.due_date.day == 31
                 update_doc = {'$set': sets, '$inc': {'revision': 1}}
                 if unsets:
                     update_doc['$unset'] = unsets
@@ -513,7 +563,10 @@ def apply_commitment_profile(db, body: ProfileWrite):
                             opens.append(link)
                     opens.sort(key=lambda link: link.get('due_date') or '')
                     chosen = opens if body.scope == 'future' else opens[:1]
-                    amount_ids = _apply_amount_to_statement(writing, [link['transaction_id'] for link in chosen], body.amount, body.due_date)
+                    first_ym = str(chosen[0].get('due_date') or '')[:7] if chosen else ''
+                    for idx, link in enumerate(chosen):
+                        row_due = _scoped_future_due(body.due_date, idx, first_ym, str(link.get('due_date') or '')[:7])
+                        amount_ids.extend(_apply_amount_to_statement(writing, [link['transaction_id']], body.amount, row_due))
             elif body.source == 'installment':
                 label = profile.get('display_name')
                 _store_override(writing, f"installment:{body.identity}", profile, None, label, cleared)
@@ -521,10 +574,13 @@ def apply_commitment_profile(db, body: ProfileWrite):
                     rows = _open_installment_rows(writing, body.identity)
                     chosen = rows if body.scope == 'future' else rows[:1]
                     plan = load(writing, 'installment', body.identity)
-                    for row in chosen:
-                        _patch_row(writing, 'installment', body.identity, row['row_id'], body.amount, body.due_date)
+                    first_ym = str(chosen[0].get('due_date') or chosen[0].get('month') or '')[:7] if chosen else ''
+                    for idx, row in enumerate(chosen):
+                        row_ym = str(row.get('due_date') or row.get('month') or '')[:7]
+                        row_due = _scoped_future_due(body.due_date, idx, first_ym, row_ym)
+                        _patch_row(writing, 'installment', body.identity, row['row_id'], body.amount, row_due)
                         part = plan['installments'][row['row_id'] - 1]
-                        amount_ids.extend(_apply_amount_to_statement(writing, _open_statement_ids(part), body.amount, body.due_date))
+                        amount_ids.extend(_apply_amount_to_statement(writing, _open_statement_ids(part), body.amount, row_due))
             else:
                 documents = [row for row in writing.obligations.find({}) if obligation_series_key(row) == body.identity]
                 opens = _series_rows(writing, body.identity)
@@ -532,9 +588,11 @@ def apply_commitment_profile(db, body: ProfileWrite):
                     _store_override(writing, f"obligation:{document['_id']}", profile, None, profile.get('display_name'), cleared)
                 if body.scope and (body.amount is not None or body.due_date is not None):
                     chosen = opens if body.scope == 'future' else opens[:1]
-                    for document in chosen:
-                        _patch_row(writing, 'obligation', str(document['_id']), 1, body.amount, body.due_date)
-                        amount_ids.extend(_apply_amount_to_statement(writing, _open_statement_ids(document), body.amount, body.due_date))
+                    first_ym = _obligation_ym(chosen[0]) if chosen else ''
+                    for idx, document in enumerate(chosen):
+                        row_due = _scoped_future_due(body.due_date, idx, first_ym, _obligation_ym(document))
+                        _patch_row(writing, 'obligation', str(document['_id']), 1, body.amount, row_due)
+                        amount_ids.extend(_apply_amount_to_statement(writing, _open_statement_ids(document), body.amount, row_due))
             result = {'persisted': True, 'request_id': str(body.request_id), 'source': body.source, 'identity': body.identity, 'linked': linked, 'amount_rows': amount_ids, 'duplicate_request': False}
             writing.audit_log.insert_one({'event': 'commitment_profile_synced', 'source': body.source, 'identity': body.identity,
                 'linked': linked, 'amount_rows': amount_ids, 'created_at': datetime.now(timezone.utc)})

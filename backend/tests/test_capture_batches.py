@@ -145,7 +145,8 @@ class FileImportStatusTests(unittest.TestCase):
             result = file_status(UploadFile(file=stream, filename='synthetic.pdf'), uuid4(), self.db)
         self.assertFalse(result['imported'])
         self.assertEqual(result['sha256'], hashlib.sha256(data).hexdigest())
-        read.assert_called_once_with(10 * 1024 * 1024 + 1)
+        self.assertGreater(read.call_count, 1)
+        self.assertTrue(all(call.args == (65536,) for call in read.call_args_list))
 
     def test_invalid_or_missing_event_id_and_missing_file_are_rejected(self):
         with patch.object(self.db.capture_batches, 'find') as lookup:

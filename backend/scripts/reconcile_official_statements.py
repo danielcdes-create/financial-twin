@@ -11,6 +11,7 @@ Para efetivar no banco com backup automático prévio, adicione `--apply`.
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import sys
@@ -26,10 +27,8 @@ if str(BACKEND_DIR) not in sys.path:
 from bson import json_util
 from pymongo import MongoClient
 
-from app.atomic import AtomicUnavailable, mongo_transaction, session_database
 from app.config import get_settings
 from app.main import configured_mongodb_uri
-from app.movement_insert_lock import lock_movement_insert
 from app.official_reconciler import (
     apply_reconciliation_plan,
     build_reconciliation_plan,
@@ -61,7 +60,12 @@ TOUCHED_COLLECTIONS = (
 )
 
 
-def _discover_pdfs(pdf_args: list[str] | None, pdf_dir: str | None) -> list[Path]:
+def _discover_pdfs(
+    pdf_args: list[str] | None,
+    pdf_dir: str | None,
+    *,
+    discover_user_dirs: bool = False,
+) -> list[Path]:
     found: list[Path] = []
     seen_resolved: set[Path] = set()
 
@@ -91,21 +95,26 @@ def _discover_pdfs(pdf_args: list[str] | None, pdf_dir: str | None) -> list[Path
     if found:
         return found
 
-    home = Path.home()
     search_dirs = [
-        Path("G:/Meu Drive"),
-        Path("G:/My Drive"),
         REPO_ROOT / "data" / "comprovantes",
         REPO_ROOT / "data",
-        home / "Downloads",
-        home / "OneDrive" / "Downloads",
-        home / "Desktop",
-        home / "OneDrive" / "Desktop",
-        home / "OneDrive" / "Área de Trabalho",
-        home / "Documents",
-        home / "OneDrive" / "Documents",
-        home / "OneDrive" / "Documentos",
     ]
+    if discover_user_dirs:
+        home = Path.home()
+        search_dirs.extend(
+            [
+                Path("G:/Meu Drive"),
+                Path("G:/My Drive"),
+                home / "Downloads",
+                home / "OneDrive" / "Downloads",
+                home / "Desktop",
+                home / "OneDrive" / "Desktop",
+                home / "OneDrive" / "Área de Trabalho",
+                home / "Documents",
+                home / "OneDrive" / "Documents",
+                home / "OneDrive" / "Documentos",
+            ]
+        )
     for directory in search_dirs:
         if not directory.is_dir():
             continue
@@ -115,7 +124,7 @@ def _discover_pdfs(pdf_args: list[str] | None, pdf_dir: str | None) -> list[Path
 
     if not found:
         raise FileNotFoundError(
-            "Nenhum PDF oficial informado ou localizado automaticamente. "
+            "Nenhum PDF oficial informado ou localizado em `data/comprovantes`. "
             "Passe `--pdf <arquivo1.pdf> <arquivo2.pdf>` ou `--pdf-dir <pasta>`."
         )
     return found
@@ -168,6 +177,9 @@ def _summarize_plan(docs: list[OfficialStatementDocument], plans: list[Any]) -> 
             "matched_exact": counts.get("matched_exact", 0),
             "matched_principal": counts.get("matched_principal", 0),
             "missing": counts.get("missing", 0),
+            "skipped_deleted_by_user": counts.get("skipped_deleted_by_user", 0),
+            "skipped_overlap_duplicate": counts.get("skipped_overlap_duplicate", 0),
+            "ambiguous_skip": counts.get("ambiguous_skip", 0),
             "skipped_prior_payment": counts.get("skipped_prior_payment", 0),
         },
     }
@@ -182,7 +194,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--cpf",
         default=os.environ.get("FIN_PDF_CPF"),
-        help="CPF (opcional) caso algum PDF esteja criptografado sem extrato aberto no lote.",
+        help="Prefira definir a variável FIN_PDF_CPF ou usar --cpf-prompt para não expor o CPF em argv.",
+    )
+    parser.add_argument(
+        "--cpf-prompt",
+        action="store_true",
+        help="Solicita o CPF de forma oculta no terminal (sem gravar no histórico de comandos).",
+    )
+    parser.add_argument(
+        "--cpf-stdin",
+        action="store_true",
+        help="Lê o CPF da entrada padrão (stdin) sem expor em argv.",
+    )
+    parser.add_argument(
+        "--discover-user-dirs",
+        action="store_true",
+        help="Permite buscar PDFs em Downloads/Desktop/Drive do usuário quando --pdf/--pdf-dir não forem passados.",
     )
     parser.add_argument(
         "--report-dir",
@@ -211,8 +238,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    pdf_paths = _discover_pdfs(args.pdf, args.pdf_dir)
-    docs = parse_official_pdf_batch(pdf_paths, cpf=args.cpf)
+    cpf_value = args.cpf
+    if args.cpf_stdin:
+        cpf_value = sys.stdin.readline().strip()
+    elif args.cpf_prompt and not cpf_value:
+        cpf_value = getpass.getpass("CPF para desbloqueio em memória dos PDFs: ").strip()
+
+    pdf_paths = _discover_pdfs(args.pdf, args.pdf_dir, discover_user_dirs=args.discover_user_dirs)
+    docs = parse_official_pdf_batch(pdf_paths, cpf=cpf_value)
 
     report_dir = Path(args.report_dir).expanduser().resolve()
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -263,7 +296,6 @@ def main(argv: list[str] | None = None) -> int:
             backup_path = _write_pre_apply_backup(db, report_dir)
             result_payload["backup_jsonl"] = str(backup_path)
             _ensure_collections_outside_tx(db)
-            lock_movement_insert(db)
             plans, targets = build_reconciliation_plan(db, docs)
             apply_summary = apply_reconciliation_plan(
                 db,
@@ -271,6 +303,7 @@ def main(argv: list[str] | None = None) -> int:
                 plans,
                 targets,
                 force_balances=args.force_balances,
+                allow_standalone=args.allow_standalone,
             )
             result_payload.update(_summarize_plan(docs, plans))
             result_payload["applied"] = apply_summary

@@ -17,6 +17,7 @@ from app.commitment_estimates import effective_commitments
 from app.commitments import COMMITMENT_CUTOFF, commitment_cutoff, as_date, linked_due_dates, schedule_from
 from app.economic_policy import amount, eligible_payment
 from app.financial_time import local_date, today
+from app.movement_insert_lock import lock_movement_insert
 from app.source_tokens import require_source_token
 
 Source = Literal['installment', 'obligation', 'managed']
@@ -318,6 +319,7 @@ def write(db, source, identity, body, deleting=False):
     try:
         with mongo_transaction(db) as session:
             writing = session_database(db, session)
+            lock_movement_insert(writing)
             previous = writing.future_commitment_commands.find_one({'_id': str(body.request_id)})
             if previous:
                 if previous['request_digest'] != request_digest: raise HTTPException(409, 'Identificador já usado para outra alteração.')
@@ -497,6 +499,7 @@ def link_imported_payment(db, source, identity, body: ImportedPaymentLink):
     try:
         with mongo_transaction(db) as session:
             writing = session_database(db, session)
+            lock_movement_insert(writing)
             previous = writing.future_commitment_commands.find_one({'_id': str(body.request_id)})
             if previous:
                 if previous.get('request_digest') != request_digest: raise HTTPException(409, 'Identificador já usado para outra alteração.')
@@ -546,6 +549,7 @@ def unlink_imported_payment(db, source, identity, body: ImportedPaymentUnlink):
     try:
         with mongo_transaction(db) as session:
             writing = session_database(db, session)
+            lock_movement_insert(writing)
             previous = writing.future_commitment_commands.find_one({'_id': str(body.request_id)})
             if previous:
                 if previous.get('request_digest') != request_digest: raise HTTPException(409, 'Identificador já usado para outra alteração.')
@@ -600,6 +604,7 @@ def update_label(source: Source, identity: str, body: FutureLabelWrite, db=Depen
     try:
         with mongo_transaction(db) as session:
             writing = session_database(db, session)
+            lock_movement_insert(writing)
             previous = writing.future_commitment_commands.find_one({'_id': str(body.request_id)})
             if previous:
                 if previous['request_digest'] != request_digest: raise HTTPException(409, 'Identificador já usado para outra alteração.')

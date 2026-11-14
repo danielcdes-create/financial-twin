@@ -52,7 +52,7 @@ function LinkedPaymentSheet({item, link, api, money, onChanged, onSwap}: {item: 
     const dialogValid = captureScope();
     Alert.alert('Desvincular pagamento', 'O lançamento continua no extrato. A agenda só volta se este for o vínculo mais recente que a moveu.', [
       {text: 'Cancelar', style: 'cancel'},
-      {text: 'Desvincular', onPress: () => {void (async () => {
+      {text: 'Desvincular', onPress: async () => {
         if (!dialogValid() || busy) return;
         const valid = captureScope();
         setBusy(true);
@@ -64,7 +64,7 @@ function LinkedPaymentSheet({item, link, api, money, onChanged, onSwap}: {item: 
         } catch (error: any) {
           if (valid()) Alert.alert('Não foi possível desvincular', error.message);
         } finally {if (valid()) setBusy(false);}
-      })();}},
+      }},
     ]);
   };
   return <View>
@@ -97,7 +97,7 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
   summary?: React.ReactNode; chart?: React.ReactNode; paymentStamp?: string;
   linkUndo?: {commitmentId: string; name: string} | null; onUndoLink?: () => void;
   monthOpen?: boolean;
-  bindCharge?: (opener: (entry: {source_ref?: string}) => void) => void;
+  bindCharge?: (opener: ((entry: {source_ref?: string}) => boolean | void) | null) => void;
 }) {
   const [paidTarget, setPaidTarget] = useState<string | null>(null);
   const [paidOpen, setPaidOpen] = useState(false);
@@ -173,10 +173,14 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
   useLayoutEffect(() => {
     bindCharge?.(entry => {
       const card = cardForCharge(cards, entry);
-      if (!card) return;
+      if (!card) return false;
       setScheduleKey(null);
       setOpenKey(card.key);
+      return true;
     });
+    return () => {
+      bindCharge?.(null);
+    };
   }, [bindCharge, cards]);
 
   const removeSeries = async (card: Card) => {
@@ -296,17 +300,17 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
     const name = ['', 'jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'][month];
     Alert.alert('Terminar em', `Última cobrança em ${name}/${year}. Depois disso não há projeção. Vínculos e extrato permanecem.`, [
       {text: 'Cancelar', style: 'cancel'},
-      {text: 'Confirmar término', onPress: () => {void saveEnd(card, end);}},
+      {text: 'Confirmar término', onPress: () => saveEnd(card, end)},
     ]);
   };
   const askClose = (card: Card) => {
     const item = card.payload;
     Alert.alert('Encerrar compromisso', closureWarning(item.kind === 'assinatura' ? 'assinatura' : 'financiamento'), [
       {text: 'Cancelar', style: 'cancel'},
-      {text: `Confirmar encerramento de ${item.name}`, onPress: () => {void closeManaged(card);}},
+      {text: `Confirmar encerramento de ${item.name}`, onPress: () => closeManaged(card)},
     ]);
   };
-  const confirmRemoval = (message: string, label: string, run: () => void, title = 'Remover parcelas futuras') => {
+  const confirmRemoval = (message: string, label: string, run: () => unknown, title = 'Remover parcelas futuras') => {
     Alert.alert(title, message, [
       {text: 'Cancelar', style: 'cancel'},
       {text: label, style: 'destructive', onPress: run},
@@ -354,7 +358,7 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
       if (closing) {
         Alert.alert(dialogTitle, message, [
           {text: 'Cancelar', style: 'cancel'},
-          {text: `Confirmar encerramento de ${card.title}`, onPress: () => {void removePreview();}},
+          {text: `Confirmar encerramento de ${card.title}`, onPress: () => removePreview()},
         ]);
       } else confirmRemoval(message, 'Confirmar remoção', removePreview);
     } catch (failure: any) {
@@ -499,7 +503,7 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
           <Text style={s.paidTitle}>{`Pagas (${paid.length})`}</Text>
           <Text style={s.paidChevron}>{paidOpen ? '⌃' : '⌄'}</Text>
         </Pressable>
-        {paidOpen && <View style={s.paidBody}>{paid.map((row: {key: string; due: string; amount: number; label: string; paymentLink?: any; identity?: string; source?: 'installment' | 'obligation'; revision?: number}) => <View key={row.key}><Text style={s.paidLine}>{`${dateLabel(row.due) || 'sem data'} · ${money(row.amount)} · ${row.label}`}</Text>{row.paymentLink && <Pressable accessibilityRole="button" accessibilityLabel={`Desfazer vínculo de ${dateLabel(row.due) || row.due}`} disabled={busy} onPress={() => {void undoImported({source: row.source || 'obligation', identity: String(row.identity || ''), revision: Number(row.revision || 0), title: card.title, transactionId: row.paymentLink.transaction_id, provisionalId: row.paymentLink.provisional_id});}} style={s.scheduleLink}><Text style={s.scheduleLinkText}>Desfazer vínculo</Text></Pressable>}</View>)}</View>}
+        {paidOpen && <View style={s.paidBody}>{paid.map((row: {key: string; due: string; amount: number; label: string; paymentLink?: any; identity?: string; source?: 'installment' | 'obligation'; revision?: number}) => <View key={row.key}><Text style={s.paidLine}>{`${dateLabel(row.due) || 'sem data'} · ${money(row.amount)} · ${row.label}`}</Text>{row.paymentLink && <Pressable accessibilityRole="button" accessibilityLabel={`Desfazer vínculo de ${dateLabel(row.due) || row.due}`} disabled={busy} onPress={() => undoImported({source: row.source || 'obligation', identity: String(row.identity || ''), revision: Number(row.revision || 0), title: card.title, transactionId: row.paymentLink.transaction_id, provisionalId: row.paymentLink.provisional_id})} style={s.scheduleLink}><Text style={s.scheduleLinkText}>Desfazer vínculo</Text></Pressable>}</View>)}</View>}
       </View>}
       {profileEdit === card.key && <CommitmentProfileEditor card={card} api={api} cardLabelFor={cardLabelFor} accountLabelFor={accountLabelFor} cardChoices={cardChoices} accountChoices={accountChoices} onUpdated={onUpdated} onClose={() => setProfileEdit(null)} />}
       {futureEdit === card.key && card.source !== 'managed' && <FutureCommitmentEditor source={card.source === 'installment' ? 'installment' : 'obligation'} identity={card.source === 'installment' ? String(item.id) : String((item.items || []).find((part: {payment_link?: unknown; id?: string}) => !part.payment_link)?.id || item.items?.[0]?.id || '')} name={card.title} api={api} onUpdated={onUpdated} onRemoved={({delete_request_id}) => {const identity = card.source === 'installment' ? String(item.id) : String((item.items || []).find((part: {payment_link?: unknown; id?: string}) => !part.payment_link)?.id || item.items?.[0]?.id || ''); rememberUndo(card.key, card.source === 'installment' ? 'installment' : 'obligation', card.title, [{identity, delete_request_id}]);}} />}
@@ -511,6 +515,8 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
     if (!linkRequest || busy) return;
     const card = cards.find(item => item.key === linkRequest.cardKey);
     if (linkRequest.swap && card?.source === 'managed') {
+      const valid = captureScope();
+      if (!valid()) return;
       const {item, link} = linkRequest.swap;
       const source = link.transaction_id ? {transaction_id: link.transaction_id} : {provisional_id: link.provisional_id};
       setBusy(true);
@@ -519,12 +525,13 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
           request_id: creationId(), expected_revision: item.revision || 1, expected_source_token: transaction.source_token, ...source,
           ...(transaction.source_kind === 'confirmed_capture' ? {replacement_provisional_id: transaction.provisional_id} : {replacement_transaction_id: transaction.id}),
         })});
+        if (!valid()) return;
         setLinkRequest(null);
         Alert.alert('Lançamento trocado', 'O vínculo passou a usar o lançamento escolhido. A agenda não mudou.');
         await onUpdated();
       } catch (error: any) {
-        Alert.alert('Não foi possível trocar', error.message);
-      } finally {setBusy(false);}
+        if (valid()) Alert.alert('Não foi possível trocar', error.message);
+      } finally {if (valid()) setBusy(false);}
       return;
     }
     if (!card) return;
@@ -554,7 +561,7 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
         title: 'Vincular pagamento',
         scroll: false,
         onClose: () => setLinkRequest(null),
-        body: <PaymentLinkScreen api={h.api} commitment={subject} due={linkRequest.due} amount={linkRequest.amount} stateLabel={linkRequest.state} money={h.money} preferredId={linkRequest.preferredId} disabled={busy} lookup={!managedLink} onConfirm={transaction => {void h.confirmSelection(transaction);}}/>,
+        body: <PaymentLinkScreen api={h.api} commitment={subject} due={linkRequest.due} amount={linkRequest.amount} stateLabel={linkRequest.state} money={h.money} preferredId={linkRequest.preferredId} disabled={busy} lookup={!managedLink} onConfirm={transaction => h.confirmSelection(transaction)}/>,
       });
     } else if (paid) {
       scheduleOverlay.setPanel({title: 'Pagamento vinculado', onClose: () => setPaidTarget(null), body: <LinkedPaymentSheet item={paid.item} link={paid.link} api={h.api} money={h.money} onChanged={async () => {setPaidTarget(null); await h.onUpdated();}} onSwap={() => setLinkRequest({cardKey: `managed:${paid.item.commitment_id}`, due: String(paid.link.due_date || paid.item.next_due_date || '').slice(0, 10), amount: Number(paid.link.actual_amount || paid.item.amount || 0), state: 'Pago vinculado', origin: 'detail', swap: {item: paid.item, link: paid.link}})}/>});
@@ -576,8 +583,8 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
       const canClose = !opened.completed && (opened.source !== 'managed' || opened.payload.status === 'ativo');
       const menu = opened.completed ? [] : [
         ...(canEnd ? [{label: 'Terminar em', accessibilityLabel: `Terminar ${opened.title} em`, onPress: () => {const stored = String(opened.payload.end_date || '').slice(0, 10); setEndMonth(stored.length === 10 ? `${stored.slice(5, 7)}/${stored.slice(0, 4)}` : ''); setEndEdit(opened.key);}}] : []),
-        ...(canClose ? [{label: 'Encerrar', accessibilityLabel: `Encerrar ${opened.source === 'managed' ? opened.payload.name : opened.title}`, onPress: () => opened.source === 'managed' ? h.askClose(opened) : void h.askRemove(opened, 'encerrar')}] : []),
-        {label: 'Remover parcelas futuras', accessibilityLabel: `Remover parcelas futuras de ${opened.title}`, onPress: () => {void h.askRemove(opened);}},
+        ...(canClose ? [{label: 'Encerrar', accessibilityLabel: `Encerrar ${opened.source === 'managed' ? opened.payload.name : opened.title}`, onPress: () => opened.source === 'managed' ? h.askClose(opened) : h.askRemove(opened, 'encerrar')}] : []),
+        {label: 'Remover parcelas futuras', accessibilityLabel: `Remover parcelas futuras de ${opened.title}`, onPress: () => h.askRemove(opened)},
         {label: 'Editar parcelas futuras', accessibilityLabel: `Editar futuras de ${opened.title}`, onPress: () => setFutureEdit(opened.key)},
       ];
       scheduleOverlay.setPanel({
@@ -625,7 +632,7 @@ export default function CommitmentBoard({width, managedLoaded, items, legacy, ob
     <View style={wide ? s.column : undefined} accessibilityLabel="Lista de compromissos">
       {undoOffers.map(offer => <View key={offer.key} style={s.card}><Text style={s.meta}>A exclusão de {offer.title} saiu da lista e pode ser desfeita. Pagamentos já vinculados não foram alterados.</Text><Pressable accessibilityRole="button" accessibilityLabel={`Desfazer exclusão de ${offer.title}`} disabled={busy} onPress={() => undoOffer(offer)} style={s.secondary}><Text style={s.secondaryText}>Desfazer exclusão de futuras</Text></Pressable></View>)}
       {linkUndo && !openKey && <View style={s.card}><Text style={s.meta}>Pagamento vinculado a {linkUndo.name}.</Text><Pressable accessibilityRole="button" accessibilityLabel="Desfazer vínculo" onPress={onUndoLink} style={s.compactPrimary}><Text style={s.primaryText}>Vinculado · Desfazer</Text></Pressable></View>}
-      {importedUndo && !openKey && <View style={s.card}><Text style={s.meta}>Pagamento vinculado a {importedUndo.title}.</Text><Pressable accessibilityRole="button" accessibilityLabel="Desfazer vínculo" disabled={busy} onPress={() => {void undoImported(importedUndo);}} style={s.compactPrimary}><Text style={s.primaryText}>Vinculado · Desfazer</Text></Pressable></View>}
+      {importedUndo && !openKey && <View style={s.card}><Text style={s.meta}>Pagamento vinculado a {importedUndo.title}.</Text><Pressable accessibilityRole="button" accessibilityLabel="Desfazer vínculo" disabled={busy} onPress={() => undoImported(importedUndo)} style={s.compactPrimary}><Text style={s.primaryText}>Vinculado · Desfazer</Text></Pressable></View>}
       {summary}
       {!!reconcile.length && <View accessibilityLabel="A conciliar" style={s.card}><Text style={s.heading}>{`A conciliar (${reconcile.length})`}</Text>{shownReconcile.map(entry => {
         return <View key={entry.key} style={s.reconcile}>

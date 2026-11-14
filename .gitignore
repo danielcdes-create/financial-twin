@@ -10,7 +10,6 @@ audit_work/
 *.err.log
 logs/*
 *.jsonl
-!logs/perf_telemetry.jsonl
 *.jks
 *.keystore
 *.key

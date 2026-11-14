@@ -69,7 +69,7 @@ const newTraceId = (): string =>
     return (c === 'x' ? r : (r & 3) | 8).toString(16);
   });
 
-const ID_IN_NAME = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{24}/i;
+const ID_IN_NAME = /[0-9a-f]{64}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{24}|\b20\d{2}-\d{2}(?:-\d{2})?\b/i;
 
 const redactTelemetryName = (name: string) =>
   name.split('?')[0].replace(new RegExp(ID_IN_NAME.source, 'gi'), '{id}').slice(0, 160);
@@ -443,6 +443,9 @@ class PerformanceTelemetryCollector {
       this.memoryRing.shift();
     }
     this.outbox.push(event);
+    if (this.outbox.length > MAX_MEMORY_EVENTS) {
+      this.outbox.splice(0, this.outbox.length - MAX_MEMORY_EVENTS);
+    }
 
     if (this.db?.runAsync) {
       void this.db
@@ -474,8 +477,11 @@ class PerformanceTelemetryCollector {
     try {
       await this.uploader(batch);
     } catch {
-      // Re-enfileira em caso de offline sem perder os eventos recentes
+      // Re-enfileira em caso de offline sem perder os eventos recentes, respeitando teto de memória
       this.outbox.unshift(...batch.slice(-50));
+      if (this.outbox.length > MAX_MEMORY_EVENTS) {
+        this.outbox.splice(0, this.outbox.length - MAX_MEMORY_EVENTS);
+      }
     } finally {
       this.flushing = false;
     }

@@ -546,25 +546,26 @@ def category_subcategories(
     all_categories=None,
     preloaded_transactions=None,
     preloaded_captures=None,
+    cache_result: bool = True,
 ) -> dict[str, list[str]]:
     raw_db = unwrap_database(db)
-    if (
+    is_full_scan = (
         all_categories is None
         and preloaded_transactions is None
         and preloaded_captures is None
-        and isinstance(raw_db, Database)
-    ):
+    )
+    if is_full_scan and isinstance(raw_db, Database):
         return subcategory_catalog_cache.get(raw_db, lambda: _compute_category_subcategories(raw_db))
+    should_cache = bool(cache_result and all_categories is None and isinstance(raw_db, Database))
+    gen = subcategory_catalog_cache.generation() if should_cache else None
     result = _compute_category_subcategories(
         db,
         all_categories=all_categories,
         preloaded_transactions=preloaded_transactions,
         preloaded_captures=preloaded_captures,
     )
-    if all_categories is None:
-        subcategory_catalog_cache.set("catalog", result)
-        if isinstance(raw_db, Database):
-            subcategory_catalog_cache.set(raw_db, result)
+    if should_cache:
+        subcategory_catalog_cache.set(raw_db, result, expected_generation=gen)
     return result
 
 
