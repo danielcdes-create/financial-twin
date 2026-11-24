@@ -87,7 +87,9 @@ No navegador, a sessão autenticada dura 12 horas e o token fica só na memória
 
 O Android recebe prints pela opção de compartilhar imagem de outros apps. A leitura pela xAI depende de um toque explícito e todos os campos permanecem editáveis. Nenhuma análise cria lançamento financeiro. Contratos, premissas, testes e recuperação: [PURCHASE-CHECK.md](docs/PURCHASE-CHECK.md).
 
-Release privado atual: **1.20.86 / versionCode 132**, [APK ARM64](mobile/artifacts/financial-twin-1.20.86.apk). SHA256: `BF8F574F4081DEA2A6ED255E0B624D07B7B550CD9FA708871EE094C4008D2F9E`. Registro gerado do manifesto validado; homologação física consta do relatório da entrega.
+Release privado atual: **1.20.87 / versionCode 133**, [APK ARM64](mobile/artifacts/financial-twin-1.20.87.apk). SHA256: `BE36FB1F5D913829AB21AC206A1B4D46932F6E0E479E87E74FF3415B3561F5AD`. Registro gerado do manifesto validado; homologação física consta do relatório da entrega.
+
+Histórico preservado (registro anterior): **1.20.86 / versionCode 132**, [APK ARM64](mobile/artifacts/financial-twin-1.20.86.apk). SHA256: `BF8F574F4081DEA2A6ED255E0B624D07B7B550CD9FA708871EE094C4008D2F9E`. Registro gerado do manifesto validado; homologação física consta do relatório da entrega.
 
 Histórico preservado (registro anterior): **1.20.85 / versionCode 131**, [APK ARM64](mobile/artifacts/financial-twin-1.20.85.apk). SHA256: `4875F6F9A09C5EEB12C2433C3EBEBE441055218F8F77E823FE9F9FA4E855CFC3`. Registro gerado do manifesto validado; homologação física consta do relatório da entrega.
 

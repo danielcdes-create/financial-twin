@@ -128,3 +128,14 @@
 | ↳ `app/handle-share.tsx` | 0,00% | **88,46%** | **+88,46 pp** | 0,00% | **71,43%** | **+71,43 pp** |
 | ↳ `utils/costControlInsights.ts` | 83,00% | **100,00%** | **+17,00 pp** | 13,10% | **41,27%** | **+28,17 pp** |
 | ↳ `utils/telemetry.ts` | 79,95% | **93,07%** | **+13,12 pp** | 47,37% | **62,39%** | **+15,02 pp** |
+
+---
+
+## 6. Fase 5 — Artefatos de Release Gerados e Verificados (`v1.20.87` / `versionCode 133`)
+
+| Artefato | Caminho Local | Tamanho | SHA-256 Verificado | Notas de Proveniência |
+| :--- | :--- | :---: | :--- | :--- |
+| **APK Android ARM64 Assinado** | `mobile/artifacts/financial-twin-1.20.87.apk` (`financial-twin-arm64.apk`) | `48.189.064` B | `BE36FB1F5D913829AB21AC206A1B4D46932F6E0E479E87E74FF3415B3561F5AD` | Assinante privado RSA-4096 `71F7B221100670BEC8448A2DA69FE39747F0BCC0A6C883A03AB21D068CF0A552` |
+| **Proveniência do Bundle & Nativo** | `mobile/artifacts/financial-twin-1.20.87.provenance.json` | — | `A8B8D645677E69BB94A0A4C8589765C09B5E0EE77939959CA6C0D69BF6164219` | `clean_head: true`, `107` fontes JS/TS + `4` entradas nativas conferidas contra `555a90e` |
+| **Pacote Determinístico VPS** | `deploy/packages/financial-twin-vps-hardened-1.20.87-20261124.tar.gz` | `87` arquivos | `0869c27353bd671c717470aeac9953bc0252f4c261faef0d6bf207a86015af87` | Tar/gzip determinístico (`mtime=0`), inclui scripts de recuperação e `backfill_descriptor_keys.py` |
+| **Bundle Web Desktop** | `mobile/desktop-dist/` | `944` módulos | — | Exportado via `expo export --platform web` para `http://127.0.0.1:8000` |
