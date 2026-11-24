@@ -15,15 +15,19 @@ from app.main import CLASSIFICATION_FIELDS, _build_classification_options, cache
 from app.reference_cache import classification_cache, dashboard_snapshot_cache, historical_context_cache, subcategory_catalog_cache, unwrap_database
 
 
-def dashboard_db(transactions, captures=(), commitments=(), accounts=()):
+def dashboard_db(transactions, captures=(), commitments=(), accounts=(), rules=()):
     db = MagicMock()
+    db.__getitem__.side_effect = lambda name: getattr(db, name)
     db.transactions.find.return_value.limit.return_value = list(transactions)
+    db.transactions.find.return_value.sort.return_value.limit.return_value = list(transactions)
+    db.transactions.find.return_value.__iter__.side_effect = lambda: iter(transactions)
     db.provisional_transactions.find.return_value = list(captures)
     db.review_queue.count_documents.return_value = 0
     db.provisional_transactions.count_documents.return_value = 0
     db.obligations.find.return_value = []
     db.installment_plans.find.return_value = []
     db.commitments.find.return_value = list(commitments)
+    db.commitment_amount_rules.find.return_value = list(rules)
     db.accounts.find.return_value = list(accounts)
     db.account_profiles.find.return_value = []
     db.future_schedule_overrides.find.return_value = []
@@ -52,45 +56,117 @@ class PerformancePlanTests(unittest.TestCase):
         self.assertEqual(result["expenses"], 10_001.0)
 
     def test_dashboard_overview_reads_one_transaction_snapshot(self):
+        from bson import ObjectId
+        from app.commitment_estimates import effective_commitments
+
         stamp = datetime(2026, 9, 10, tzinfo=timezone.utc)
+        acc_oid = ObjectId()
+        providers = ["cemig", "claro", "tim", "supergasbras", "cemig"]
         commitments = [
             {
                 "commitment_id": f"c-{idx}",
                 "name": f"Conta Variável {idx}",
                 "kind": "assinatura",
-                "amount": 100.0,
-                "amount_mode": "rolling_average",
+                "amount": "100.00",
+                "amount_mode": "last_three_bills",
                 "frequency": "mensal",
                 "next_due_date": "2026-09-15",
                 "purchase_date": "2026-01-15",
-                "account_id": "acc-1",
+                "account_id": str(acc_oid),
                 "status": "ativo",
             }
             for idx in range(5)
         ]
+        rules = [
+            {
+                "_id": f"c-{idx}",
+                "method": "last_three_bills",
+                "provider": providers[idx],
+                "account_id": str(acc_oid),
+            }
+            for idx in range(5)
+        ]
+        bill_txs = [
+            {
+                "_id": ObjectId(),
+                "account_id": acc_oid,
+                "data_evento": datetime(2026, m, 10, tzinfo=timezone.utc),
+                "valor": Decimal128(val),
+                "moeda": "BRL",
+                "fluxo": "saida",
+                "tipo": "pagamento",
+                "descricao_original": "CONTA CEMIG ENERGIA",
+                "categoria": "Habitação",
+                "classification": {"migration_reason": "despesa_real"},
+            }
+            for m, val in [(7, "-110.00"), (8, "-120.00"), (9, "-130.00")]
+        ]
         db = dashboard_db(
-            [{"_id": 1, "data_evento": stamp, "valor": Decimal128("-20.00"),
-              "fluxo": "saida", "categoria": "Mercado",
-              "classification": {"migration_reason": "despesa_real"}}],
+            [
+                {
+                    "_id": ObjectId(),
+                    "account_id": acc_oid,
+                    "data_evento": stamp,
+                    "valor": Decimal128("-20.00"),
+                    "moeda": "BRL",
+                    "fluxo": "saida",
+                    "tipo": "compra",
+                    "descricao_original": "SUPERMERCADO",
+                    "categoria": "Mercado",
+                    "classification": {"migration_reason": "despesa_real"},
+                },
+                *bill_txs,
+            ],
             commitments=commitments,
-            accounts=[{"_id": "acc-1", "instituicao": "Itaú", "tipo": "conta_corrente"}],
+            accounts=[{"_id": acc_oid, "instituicao": "Itaú", "tipo": "conta_corrente", "status": "ativo"}],
+            rules=rules,
         )
-        result = dashboard_overview(period="month", year_start=stamp.date().replace(month=1, day=1),
-                                    month_start=stamp.date().replace(day=1), month_end=stamp.date(), db=db)
+        db.credit_card_bills.find.return_value = [
+            {
+                "_id": ObjectId(),
+                "card_account_id": ObjectId(),
+                "competencia": "2026-09",
+                "valor_total": Decimal128("450.00"),
+                "saldo_aberto": Decimal128("450.00"),
+                "status": "aberta",
+            }
+        ]
+        result = dashboard_overview(
+            period="month",
+            year_start=stamp.date().replace(month=1, day=1),
+            month_start=stamp.date().replace(day=1),
+            month_end=stamp.date(),
+            db=db,
+        )
         self.assertEqual(db.transactions.find.call_count, 1)
         self.assertEqual(db.provisional_transactions.find.call_count, 1)
         self.assertLessEqual(db.accounts.find.call_count, 1)
         self.assertEqual(db.accounts.find_one.call_count, 0)
         self.assertEqual(db.transactions.find_one.call_count, 0)
         self.assertEqual(db.provisional_transactions.find_one.call_count, 0)
-        self.assertEqual(result["selected"]["expenses"], 20.0)
-        self.assertEqual(result["month"]["expenses"], 20.0)
-        self.assertEqual(result["year"]["expenses"], 20.0)
+        self.assertEqual(result["selected"]["expenses"], 150.0)
+        self.assertEqual(result["month"]["expenses"], 150.0)
+        self.assertEqual(result["year"]["expenses"], 380.0)
         self.assertEqual(db.commitments.find.call_count, 1)
         self.assertEqual(db.installment_plans.find.call_count, 1)
         self.assertEqual(db.review_queue.count_documents.call_count, 1)
         self.assertEqual(db.investments.count_documents.call_count, 1)
         self.assertEqual(db.obligations.find.call_count, 2)
+
+        # Also exercise non-preloaded batch-fetch path in commitment_estimates.py:147-166
+        batch_db = dashboard_db(
+            bill_txs,
+            commitments=commitments,
+            accounts=[{"_id": acc_oid, "instituicao": "Itaú", "tipo": "conta_corrente", "status": "ativo"}],
+            rules=rules,
+        )
+        estimated = effective_commitments(batch_db, commitments, as_of=stamp.date())
+        self.assertEqual(batch_db.transactions.find.call_count, 1)
+        self.assertEqual(batch_db.provisional_transactions.find.call_count, 1)
+        self.assertLessEqual(batch_db.accounts.find.call_count, 1)
+        self.assertEqual(estimated[0]["amount"], "120.00")
+        self.assertFalse(estimated[0]["amount_estimate"]["requires_review"])
+        self.assertEqual(estimated[0]["amount_estimate"]["sample_count"], 3)
 
     def test_mongo_snapshot_does_not_open_transaction_session(self):
         db = MagicMock()

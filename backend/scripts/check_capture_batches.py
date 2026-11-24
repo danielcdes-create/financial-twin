@@ -229,8 +229,8 @@ def run(output):
     recovered = legacy(failed_bytes, failed_operation)
     check('same legacy command recovers once after second-row rollback', recovered['accepted'] == 2 and legacy(failed_bytes, failed_operation) == recovered and db.provisional_transactions.count_documents({}) == capture_before + 2)
     app.dependency_overrides.pop(require_session)
-    call('DELETE', path, {'expected_sha256': draft['batch']['sha256']}, status=401)
-    check('batch removal requires an authenticated session', True)
+    unauth_delete = http.request('DELETE', path, json={'expected_sha256': draft['batch']['sha256']})
+    check('batch removal requires an authenticated session', unauth_delete.status_code == 401)
     report = {'database': name, 'configured_financial_database_untouched': True, 'checks': checks, 'passed': True}
     target.write_text(json.dumps(report, indent=2), encoding='utf-8')
     print(json.dumps(report, indent=2)); client.close()

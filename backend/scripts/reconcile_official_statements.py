@@ -11,6 +11,7 @@ Para efetivar no banco com backup automático prévio, adicione `--apply`.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import getpass
 import json
 import os
@@ -48,6 +49,7 @@ TOUCHED_COLLECTIONS = (
     "transactions",
     "provisional_transactions",
     "raw_events",
+    "review_queue",
     "merchants",
     "accounts",
     "account_profiles",
@@ -75,22 +77,37 @@ def _discover_pdfs(
             seen_resolved.add(resolved)
             found.append(resolved)
 
+    def _iter_files_sorted(directory: Path) -> list[Path]:
+        return [
+            entry
+            for entry in sorted(directory.iterdir(), key=lambda item: (item.name.lower(), item.name))
+            if entry.is_file()
+        ]
+
     for raw in pdf_args or []:
         p = Path(raw).expanduser()
         if not p.exists():
             raise FileNotFoundError(f"Arquivo PDF não encontrado: {p}")
+        if not p.is_file() or p.suffix.lower() != ".pdf":
+            raise ValueError(f"Caminho inválido para --pdf (esperado arquivo .pdf): {p}")
         _add(p)
 
     if pdf_dir:
         d = Path(pdf_dir).expanduser()
         if not d.is_dir():
             raise NotADirectoryError(f"Diretório de PDFs não encontrado: {d}")
+        entries = _iter_files_sorted(d)
+        matched_official = False
         for pattern in AUTO_DISCOVERY_PATTERNS:
-            for candidate in sorted(d.glob(pattern)):
-                _add(candidate)
-        if not found:
-            for candidate in sorted(d.glob("*.pdf")):
-                _add(candidate)
+            pat_lower = pattern.lower()
+            for candidate in entries:
+                if fnmatch.fnmatchcase(candidate.name.lower(), pat_lower):
+                    _add(candidate)
+                    matched_official = True
+        if not matched_official:
+            for candidate in entries:
+                if candidate.suffix.lower() == ".pdf":
+                    _add(candidate)
 
     if found:
         return found
@@ -118,9 +135,12 @@ def _discover_pdfs(
     for directory in search_dirs:
         if not directory.is_dir():
             continue
+        entries = _iter_files_sorted(directory)
         for pattern in AUTO_DISCOVERY_PATTERNS:
-            for candidate in sorted(directory.glob(pattern)):
-                _add(candidate)
+            pat_lower = pattern.lower()
+            for candidate in entries:
+                if fnmatch.fnmatchcase(candidate.name.lower(), pat_lower):
+                    _add(candidate)
 
     if not found:
         raise FileNotFoundError(

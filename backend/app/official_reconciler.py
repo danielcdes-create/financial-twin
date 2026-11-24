@@ -81,6 +81,54 @@ def _get_collection_schema(db: Any, collection_name: str) -> dict[str, Any] | No
 
 _MIN_COMPETITION_MARGIN = 15
 
+_CANONICAL_TX_PROPS = frozenset(
+    {
+        "_id",
+        "external_key",
+        "schema_version",
+        "created_at",
+        "updated_at",
+        "status_revisao",
+        "editado_em",
+        "revisado_em",
+        "account_id",
+        "data_evento",
+        "data_lancamento",
+        "competencia",
+        "valor",
+        "moeda",
+        "fluxo",
+        "tipo",
+        "natureza",
+        "descricao_original",
+        "estabelecimento_original",
+        "merchant_id",
+        "platform_id",
+        "merchant_location_id",
+        "operator_entity_id",
+        "categoria",
+        "subcategoria",
+        "localidade",
+        "localidade_fornecedor",
+        "localidade_descritor",
+        "localidade_contexto",
+        "localidade_real_validada",
+        "origem_localidade",
+        "metodo_pagamento",
+        "bill_id",
+        "installment",
+        "foreign_amount",
+        "balance_after",
+        "purchase_channel",
+        "purchase_origin",
+        "detalhe",
+        "recorrencia",
+        "classification",
+        "source",
+        "status_conciliacao",
+    }
+)
+
 
 @contextmanager
 def _atomic_unit(db: Any, *, allow_standalone: bool = False):
@@ -1047,7 +1095,14 @@ class _MerchantCache:
             "updated_at": now,
             "tipo_entidade": "marca",
             "nome_padrao": canonical,
-            "aliases": [],
+            "aliases": [
+                {
+                    "valor": canonical,
+                    "normalizado": normalize_merchant_text(canonical) or canonical.upper(),
+                    "status": "confirmado",
+                    "source_record_ids": [],
+                }
+            ],
         }
         target_db.merchants.insert_one(doc)
         self._register(doc)
@@ -1363,6 +1418,13 @@ def apply_reconciliation_plan(
     skipped_ambiguous = 0
     skipped_overlap = 0
 
+    tx_schema = _get_collection_schema(db, "transactions")
+    allowed_tx_props = (
+        set(tx_schema.get("properties") or []) & _CANONICAL_TX_PROPS
+        if (tx_schema and tx_schema.get("additionalProperties") is False)
+        else set(_CANONICAL_TX_PROPS)
+    )
+
     # 2. Apply item reconciliations & missing insertions in bounded atomic chunks
     CHUNK_SIZE = 20
     for chunk_start in range(0, len(plans), CHUNK_SIZE):
@@ -1391,7 +1453,15 @@ def apply_reconciliation_plan(
 
                     if plan.status != "already_reconciled":
                         set_fields: dict[str, Any] = {"updated_at": now}
-                        cleared = set(raw_doc.get("user_cleared_fields") or []) if cand.source == "capture" else set()
+                        cleared = set(raw_doc.get("user_cleared_fields") or [])
+                        if cand.source == "ledger":
+                            ov_col = getattr(writing, "transaction_field_overrides", None)
+                            if ov_col is not None and hasattr(ov_col, "find_one"):
+                                ov_doc = ov_col.find_one({"_id": cand.doc_id})
+                                if isinstance(ov_doc, dict) and isinstance(
+                                    ov_doc.get("user_cleared_fields"), (list, tuple, set)
+                                ):
+                                    cleared |= {str(f) for f in ov_doc["user_cleared_fields"] if f}
                         learn_alias = item.description if plan.strong_identity else None
 
                         if raw_doc.get("merchant_id"):
@@ -1401,7 +1471,7 @@ def apply_reconciliation_plan(
                         elif not item.technical_transit and not item.own_transfer and item.kind not in {"bill_payment", "bill_payment_credit"}:
                             preferred_vendor = cand.popular_name or item.popular_vendor
                             m_oid = merchant_cache.ensure_merchant(preferred_vendor, learn_alias, now, db=writing)
-                            if m_oid is not None and "merchant_id" not in cleared:
+                            if m_oid is not None and "merchant_id" not in cleared and "vendedor" not in cleared:
                                 set_fields["merchant_id"] = m_oid
 
                         if (
@@ -1448,21 +1518,17 @@ def apply_reconciliation_plan(
                             # Strictly schema-compliant fields for db.transactions
                             if raw_doc.get("status_conciliacao") != "confirmado":
                                 set_fields["status_conciliacao"] = "confirmado"
-                            if not raw_doc.get("categoria") and item.categoria:
+                            if not raw_doc.get("categoria") and item.categoria and "categoria" not in cleared:
                                 set_fields["categoria"] = item.categoria
-                            if not raw_doc.get("subcategoria") and item.subcategoria:
+                            if not raw_doc.get("subcategoria") and item.subcategoria and "subcategoria" not in cleared:
                                 set_fields["subcategoria"] = item.subcategoria
+                            set_fields = {
+                                k: v
+                                for k, v in set_fields.items()
+                                if k in allowed_tx_props and v is not None
+                            }
 
-                        try:
-                            collection.update_one({"_id": cand.doc_id}, {"$set": set_fields})
-                        except Exception:
-                            if cand.source == "ledger":
-                                collection.update_one(
-                                    {"_id": cand.doc_id},
-                                    {"$set": {"status_conciliacao": "confirmado", "updated_at": now}},
-                                )
-                            else:
-                                raise
+                        collection.update_one({"_id": cand.doc_id}, {"$set": set_fields})
 
                         if cand.source == "capture" and was_promoted_to_confirmed:
                             if raw_doc.get("event_id"):
@@ -1677,6 +1743,7 @@ def apply_reconciliation_plan(
                     "card_account_id": card_oid,
                     "competencia": doc.competencia,
                     "data_vencimento": due_utc,
+                    "data_pagamento": paid_utc if open_bal == 0 else None,
                     "saldo_anterior": Decimal128("0.00"),
                     "novos_lancamentos": Decimal128(f"{tot:.2f}"),
                     "encargos": Decimal128("0.00"),
@@ -1707,6 +1774,10 @@ def apply_reconciliation_plan(
                     "principal": Decimal128(f"{tot:.2f}"),
                     "juros": Decimal128("0.00"),
                     "multa": Decimal128("0.00"),
+                    "mora": Decimal128("0.00"),
+                    "tarifas": Decimal128("0.00"),
+                    "seguros": Decimal128("0.00"),
+                    "outros_encargos": Decimal128("0.00"),
                     "encargos": Decimal128("0.00"),
                     "descontos": Decimal128("0.00"),
                     "dias_atraso": dias_atraso,
@@ -1754,8 +1825,11 @@ def apply_reconciliation_plan(
                     bill_set["pagamentos"] = Decimal128(f"{eff_paid:.2f}")
                 if "valor_pago" in existing_bill or (not bill_strict or "valor_pago" in bill_props):
                     bill_set["valor_pago"] = Decimal128(f"{eff_paid:.2f}")
+                if eff_open == 0 and paid_utc is not None:
+                    if "data_pagamento" in existing_bill or (not bill_strict or "data_pagamento" in bill_props):
+                        bill_set["data_pagamento"] = paid_utc
                 if bill_strict:
-                    bill_set = {k: v for k, v in bill_set.items() if k in bill_props or k in existing_bill}
+                    bill_set = {k: v for k, v in bill_set.items() if k in bill_props}
 
                 linked_obls = list(writing.obligations.find({"tipo": "fatura_cartao", "origem_id": bill_oid}))
                 obl_update_doc: dict[str, Any] | None = None
@@ -1777,13 +1851,16 @@ def apply_reconciliation_plan(
                         if "data_liquidacao" in existing_obl or (not obl_strict or "data_liquidacao" in obl_props):
                             obl_set["data_liquidacao"] = paid_utc or existing_obl.get("data_liquidacao") or now
                     if obl_strict:
-                        obl_set = {k: v for k, v in obl_set.items() if k in obl_props or k in existing_obl}
+                        obl_set = {k: v for k, v in obl_set.items() if k in obl_props}
                     obl_update_doc = {"$set": obl_set}
                     if eff_open > 0 and "data_liquidacao" in existing_obl:
                         obl_update_doc["$unset"] = {"data_liquidacao": ""}
 
                 prev_bill_snapshot = dict(existing_bill)
-                writing.credit_card_bills.update_one({"_id": bill_oid}, {"$set": bill_set})
+                bill_update_doc: dict[str, Any] = {"$set": bill_set}
+                if eff_open > 0 and "data_pagamento" in existing_bill:
+                    bill_update_doc["$unset"] = {"data_pagamento": ""}
+                writing.credit_card_bills.update_one({"_id": bill_oid}, bill_update_doc)
                 if obl_update_doc is not None:
                     try:
                         writing.obligations.update_one({"_id": linked_obls[0]["_id"]}, obl_update_doc)

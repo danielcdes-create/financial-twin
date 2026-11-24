@@ -26,13 +26,17 @@ from app.insights import planning_context, closure
 
 
 def run(output):
-    target = Path(output).resolve(); target.parent.mkdir(parents=True, exist_ok=True)
-    uri = configured_mongodb_uri(get_settings()); require_synthetic_target(uri)
+    target = Path(output).resolve()
+    if target.is_dir() or not target.suffix:
+        target.mkdir(parents=True, exist_ok=True)
+        target = target / 'domain-ledger-fixes.json'
+    else:
+        target.parent.mkdir(parents=True, exist_ok=True)
+    uri = configured_mongodb_uri(get_settings()) or 'mongodb://127.0.0.1:27017/?replicaSet=financialTwinTest'
+    require_synthetic_target(uri)
     name = 'financial_twin_test_domain_' + uuid4().hex[:12]
     assert name.startswith('financial_twin_test_domain_')
     client = MongoClient(uri, tz_aware=True, serverSelectionTimeoutMS=10000)
-    client.admin.command('ping')
-    assert client.admin.command('hello').get('setName'), 'A replica set is required for this probe.'
     db = client[name]; checks = []
     collections = ('accounts','transactions','account_profiles','account_balance_snapshots','provisional_transactions',
         'audit_log','capture_batch_locks','commitments','review_queue','credit_card_bills','obligations',
@@ -40,11 +44,6 @@ def run(output):
         'source_records','investments','transaction_descriptor_index','merchants','merchant_aliases','platforms',
         'platform_aliases','transaction_evidence','raw_events','deleted_movements')
     fixture = Path(__file__).parents[1] / 'tests' / 'fixtures'
-    for collection in collections:
-        options = json.loads((fixture / (collection + '-validator.json')).read_text(encoding='utf-8')) if collection in {'accounts','transactions'} else {}
-        db.create_collection(collection, **options)
-    db.commitments.create_index('commitment_id', unique=True)
-    db.commitments.create_index('linked_transactions.transaction_id', unique=True, sparse=True)
 
     def reset():
         for collection in collections: db[collection].delete_many({})
@@ -76,6 +75,14 @@ def run(output):
             expected_revision=item['revision'],expected_source_token=source_token(tx),transaction_id=str(tx['_id']),**values),db)
 
     try:
+        client.admin.command('ping')
+        hello = client.admin.command('hello')
+        assert hello.get('setName') and hello.get('isWritablePrimary'), 'A writable replica set primary is required for this probe.'
+        for collection in collections:
+            options = json.loads((fixture / (collection + '-validator.json')).read_text(encoding='utf-8')) if collection in {'accounts','transactions'} else {}
+            db.create_collection(collection, **options)
+        db.commitments.create_index('commitment_id', unique=True)
+        db.commitments.create_index('linked_transactions.transaction_id', unique=True, sparse=True)
         reset(); origin=account('Itaú'); destination=account('Santander')
         source=movement(origin,date(2026,9,30),'-100.00',nature='TRANSFERENCIA')
         opposite=movement(destination,date(2026,9,30),'100.00',nature='TRANSFERENCIA')

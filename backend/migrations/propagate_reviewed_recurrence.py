@@ -1,11 +1,17 @@
-"""Propagate user reviewed recurrence to records with the same normalized descriptor."""
+"""Propagate user reviewed recurrence to records with the same normalized descriptor.
 
+Dry run by default. Pass --apply to persist updates to MongoDB.
+"""
+
+import argparse
+import sys
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
 from pymongo import MongoClient
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.config import Settings
 from app.main import canonical_key, configured_mongodb_uri
 
@@ -14,17 +20,21 @@ def raw_descriptor(item: dict) -> str:
     return str(item.get("estabelecimento_original") or item.get("descricao_original") or "")
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--apply", action="store_true", help="Apply recurrence propagation writes (default: dry-run).")
+    args = parser.parse_args(argv)
     settings = Settings(_env_file=Path(__file__).resolve().parents[2] / ".env")
     client = MongoClient(configured_mongodb_uri(settings), serverSelectionTimeoutMS=10000)
     try:
         database = client[settings.mongodb_database]
         now = datetime.now(timezone.utc)
-        database.categories.update_one(
-            {"key": "habitacao"},
-            {"$set": {"name": "Habitação", "key": "habitacao", "active": True, "updated_at": now, "source": "system_migration"}, "$setOnInsert": {"created_at": now}},
-            upsert=True,
-        )
+        if args.apply:
+            database.categories.update_one(
+                {"key": "habitacao"},
+                {"$set": {"name": "Habitação", "key": "habitacao", "active": True, "updated_at": now, "source": "system_migration"}, "$setOnInsert": {"created_at": now}},
+                upsert=True,
+            )
         reviewed = list(database.transactions.find({"recorrencia.source": "mobile_manual_review"}))
         grouped: dict[str, list[dict]] = defaultdict(list)
         for item in reviewed:
@@ -32,6 +42,7 @@ def main() -> None:
             if key:
                 grouped[key].append(item)
         updated_count = 0
+        eligible_count = 0
         skipped_conflicts = 0
         for descriptor_key, sources in grouped.items():
             signatures = {
@@ -68,6 +79,9 @@ def main() -> None:
                     before.append({"id": candidate["_id"], "categoria": candidate.get("categoria"), "subcategoria": candidate.get("subcategoria"), "recorrencia": candidate.get("recorrencia")})
             if not target_ids:
                 continue
+            eligible_count += len(target_ids)
+            if not args.apply:
+                continue
             update = {"categoria": category, "recorrencia": desired_recurrence, "updated_at": now}
             if subcategory:
                 update["subcategoria"] = subcategory
@@ -86,7 +100,10 @@ def main() -> None:
                     "created_at": now,
                 }
             )
-        print(f"updated={updated_count} groups={len(grouped)} skipped_conflicts={skipped_conflicts}")
+        if args.apply:
+            print(f"mode=apply updated={updated_count} groups={len(grouped)} skipped_conflicts={skipped_conflicts}")
+        else:
+            print(f"mode=dry-run eligible={eligible_count} groups={len(grouped)} skipped_conflicts={skipped_conflicts}")
     finally:
         client.close()
 

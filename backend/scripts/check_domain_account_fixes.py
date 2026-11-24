@@ -23,6 +23,7 @@ from app import main
 from app.account_positions import account_positions
 from app.analytics import calculate_financial_totals
 from app.capture_batches import BatchCommit, BatchReview, commit, fingerprint
+from app.config import get_settings
 from app.economic_policy import effects
 from app.financial_time import local_date
 from app.month_close import view
@@ -34,20 +35,21 @@ from test_domain_account_time_privacy import fixture
 from test_matching_scope_conservative import ConservativeMatchingScopeTests
 
 
-def run(output, uri='mongodb://127.0.0.1:27017/?replicaSet=financialTwinTest'):
+def run(output, uri=None):
+    uri = uri or main.configured_mongodb_uri(get_settings()) or 'mongodb://127.0.0.1:27017/?replicaSet=financialTwinTest'
     require_synthetic_target(uri)
     assert urlsplit(uri).hostname in {'127.0.0.1', 'localhost', '::1'}, 'Local replica set only'
     output = Path(output).resolve()
-    output.parent.mkdir(parents=True, exist_ok=True)
+    if output.is_dir() or not output.suffix:
+        output.mkdir(parents=True, exist_ok=True)
+        output = output / 'domain-account-fixes.json'
+    else:
+        output.parent.mkdir(parents=True, exist_ok=True)
     client = MongoClient(uri, serverSelectionTimeoutMS=10000, tz_aware=True)
-    hello = client.admin.command('hello')
-    assert hello.get('setName') == 'financialTwinTest', 'Explicit synthetic replica set required'
-    assert hello.get('isWritablePrimary'), 'Synthetic primary must be writable'
     name = 'financial_twin_test_domain_account_' + uuid4().hex[:24]
-    assert name not in client.list_database_names()
     db = client[name]
     results = []
-    report = {'database': name, 'replica_set': hello['setName'], 'target': 'loopback',
+    report = {'database': name, 'replica_set': None, 'target': 'loopback',
               'financial_database_accessed': False, 'external_ai': False, 'lifespan_started': False,
               'checks': results, 'database_dropped': False}
     collections = ('accounts', 'account_profiles', 'account_balance_snapshots', 'transactions',
@@ -80,6 +82,10 @@ def run(output, uri='mongodb://127.0.0.1:27017/?replicaSet=financialTwinTest'):
                 'classification': {'migration_reason': 'receita_ou_movimentacao'}}
 
     try:
+        hello = client.admin.command('hello')
+        assert hello.get('setName') and hello.get('isWritablePrimary'), 'Writable synthetic replica set required'
+        report['replica_set'] = hello['setName']
+        assert name not in client.list_database_names()
         for collection in collections:
             db.create_collection(collection)
         clear()
@@ -317,13 +323,18 @@ def run(output, uri='mongodb://127.0.0.1:27017/?replicaSet=financialTwinTest'):
         report['failure'] = type(failure).__name__ + ': ' + str(failure)
         raise
     finally:
-        assert db.name == name and name.startswith('financial_twin_test_domain_account_')
-        client.drop_database(name)
-        report['database_dropped'] = name not in client.list_database_names()
-        client.close()
-        save()
+        try:
+            assert db.name == name and name.startswith('financial_twin_test_domain_account_')
+            client.drop_database(name)
+            report['database_dropped'] = name not in client.list_database_names()
+        except Exception:
+            if report.get('passed') is not False:
+                raise
+        finally:
+            client.close()
+            save()
     print(json.dumps({'checks': len(results), 'passed': report['passed'], 'database_dropped': report['database_dropped']}))
 
 
 if __name__ == '__main__':
-    run(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else 'mongodb://127.0.0.1:27017/?replicaSet=financialTwinTest')
+    run(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else None)

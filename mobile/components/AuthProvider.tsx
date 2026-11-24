@@ -223,6 +223,9 @@ export default function AuthProvider({children}: {children: React.ReactNode}) {
     } finally {
       lock();
       await biometrics.clearBiometricSession().catch(() => {});
+      if (typeof biometrics.clearSavedPdfCpf === 'function') {
+        await biometrics.clearSavedPdfCpf().catch(() => {});
+      }
       if (mounted.current) setBiometricOn(false);
     }
   }, [lock]);

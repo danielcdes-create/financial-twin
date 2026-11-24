@@ -154,10 +154,49 @@ class OfficialStatementDocument:
         return data
 
 
-def _infer_statement_item_date(ddmm: str, ref_year: int, ref_month: int) -> tuple[date, bool]:
+def _require_line_index(
+    lines: list[str],
+    marker: str,
+    path: Path,
+    context: str,
+    *,
+    need_next: bool = False,
+) -> int:
+    try:
+        idx = lines.index(marker)
+    except ValueError as exc:
+        raise ValueError(f"{context} ('{marker}') não encontrado em {path.name}.") from exc
+    if need_next and idx + 1 >= len(lines):
+        raise ValueError(f"Valor para {context} ('{marker}') ausente em {path.name}.")
+    return idx
+
+
+def _infer_statement_item_date(
+    ddmm: str,
+    ref_year: int,
+    ref_month: int,
+    installment_number: int | None = None,
+) -> tuple[date, bool]:
     day_num, month_num = map(int, ddmm.split("/"))
-    # Purchase months > ref_month belong to the prior calendar year (e.g. Dec purchase on Jan bill)
-    year = ref_year - 1 if month_num > ref_month else ref_year
+    ref_total = ref_year * 12 + (ref_month - 1)
+    if installment_number is not None and installment_number >= 2:
+        exp_total = ref_total - (installment_number - 1)
+        exp_year = exp_total // 12
+        best_year: int | None = None
+        best_dist: int | None = None
+        for cand_year in (exp_year - 1, exp_year, exp_year + 1, ref_year, ref_year - 1):
+            cand_total = cand_year * 12 + (month_num - 1)
+            if cand_total > ref_total:
+                continue
+            dist = abs(cand_total - exp_total)
+            if best_dist is None or dist < best_dist or (dist == best_dist and cand_year < (best_year or cand_year)):
+                best_dist = dist
+                best_year = cand_year
+        year = best_year if best_year is not None else (ref_year - 1 if month_num > ref_month else ref_year)
+    else:
+        # Purchase months > ref_month belong to the prior calendar year (e.g. Dec purchase on Jan bill)
+        year = ref_year - 1 if month_num > ref_month else ref_year
+
     if month_num == 2 and day_num == 29 and not calendar.isleap(year):
         for candidate_year in range(year - 1, year - 5, -1):
             if calendar.isleap(candidate_year):
@@ -165,8 +204,10 @@ def _infer_statement_item_date(ddmm: str, ref_year: int, ref_month: int) -> tupl
                 break
     max_day = calendar.monthrange(year, month_num)[1]
     d_obj = date(year, month_num, min(day_num, max_day))
-    # Prior cycle installment if more than ~38 days before ref_month's 10th
-    prior_cycle = (ref_year * 12 + ref_month) - (year * 12 + month_num) >= 2
+    # Prior cycle installment if more than ~38 days before ref_month's 10th or installment >= 2
+    prior_cycle = (ref_year * 12 + ref_month) - (year * 12 + month_num) >= 2 or (
+        installment_number is not None and installment_number >= 2
+    )
     return d_obj, prior_cycle
 
 
@@ -238,8 +279,11 @@ def _parse_itau_card_invoice(path: Path, digest: str, pages: list[list[str]]) ->
 
     due_m = re.search(r"Vencimento:\s*(\d{2})/(\d{2})/(\d{4})", joined)
     if not due_m:
-        idx_v = lines.index("Com vencimento em:")
-        d_s, m_s, y_s = lines[idx_v + 1].split("/")
+        idx_v = _require_line_index(lines, "Com vencimento em:", path, "Data de vencimento da fatura Itaú", need_next=True)
+        m_v_line = re.match(r"^(\d{2})/(\d{2})/(\d{4})$", lines[idx_v + 1])
+        if not m_v_line:
+            raise ValueError(f"Data de vencimento inválida na fatura Itaú {path.name}: {lines[idx_v + 1]!r}")
+        d_s, m_s, y_s = m_v_line.group(1), m_v_line.group(2), m_v_line.group(3)
     else:
         d_s, m_s, y_s = due_m.group(1), due_m.group(2), due_m.group(3)
     due_dt = date(int(y_s), int(m_s), int(d_s))
@@ -247,8 +291,17 @@ def _parse_itau_card_invoice(path: Path, digest: str, pages: list[list[str]]) ->
     doc_key = f"fatura_itau_{card_final}_{due_dt.year:04d}{due_dt.month:02d}"
     target = f"card:itau:{card_final}"
 
-    idx_total = lines.index("Total desta fatura")
+    idx_total = _require_line_index(lines, "Total desta fatura", path, "Total da fatura Itaú", need_next=True)
     total_amount = parse_brl_decimal(lines[idx_total + 1])
+
+    prior_balance: Decimal | None = None
+    total_pagamentos_header: Decimal | None = None
+    for i, line in enumerate(lines):
+        if i + 1 < len(lines) and _BRL_RE.match(lines[i + 1]):
+            if re.match(r"^(?:Total da fatura anterior|Saldo anterior)$", line, re.IGNORECASE):
+                prior_balance = parse_brl_decimal(lines[i + 1])
+            elif re.match(r"^Total dos pagamentos$", line, re.IGNORECASE):
+                total_pagamentos_header = parse_brl_decimal(lines[i + 1])
 
     holder_name = ""
     for i, line in enumerate(lines):
@@ -258,22 +311,24 @@ def _parse_itau_card_invoice(path: Path, digest: str, pages: list[list[str]]) ->
 
     items: list[OfficialStatementItem] = []
     row_idx = 0
+    pay_idx = 0
 
-    # Prior bill payment credit
+    # Prior bill & mid-cycle payment credits (collect ALL payment lines in the cycle)
     for i, line in enumerate(lines):
         m_pay = re.match(r"^Pagamento efetuado em\s+(\d{2})/(\d{2})/(\d{4})$", line)
         if m_pay and i + 1 < len(lines) and _BRL_RE.match(lines[i + 1]):
             pay_dt = date(int(m_pay.group(3)), int(m_pay.group(2)), int(m_pay.group(1)))
             pay_val = parse_brl_decimal(lines[i + 1])
+            signed_pay = -abs(pay_val)
             items.append(
                 OfficialStatementItem(
                     doc_key=doc_key,
-                    row_index=0,
+                    row_index=pay_idx,
                     target=target,
                     date=pay_dt.isoformat(),
                     purchase_date_hint=pay_dt.isoformat(),
                     statement_month=competencia,
-                    amount=f"{pay_val:.2f}",
+                    amount=f"{signed_pay:.2f}",
                     kind="bill_payment_credit",
                     description="Pagamento efetuado (fatura anterior)",
                     popular_vendor="Pagamento Fatura Anterior Itaú",
@@ -285,7 +340,7 @@ def _parse_itau_card_invoice(path: Path, digest: str, pages: list[list[str]]) ->
                     skip_insert=True,
                 )
             )
-            break
+            pay_idx -= 1
 
     # 1. National purchases & refunds
     if "Total dos pagamentos" in lines and "Lançamentos no cartão" in lines:
@@ -341,8 +396,8 @@ def _parse_itau_card_invoice(path: Path, digest: str, pages: list[list[str]]) ->
                 idx += 3
 
             row_idx += 1
-            item_dt, prior_cycle = _infer_statement_item_date(dt_ddmm, due_dt.year, due_dt.month)
             inst_num, inst_tot = _parse_installment_suffix(est)
+            item_dt, prior_cycle = _infer_statement_item_date(dt_ddmm, due_dt.year, due_dt.month, inst_num)
             info = classify_official_descriptor(est, cat_hint)
             signed_amt = -val
             is_refund = signed_amt > 0
@@ -388,7 +443,8 @@ def _parse_itau_card_invoice(path: Path, digest: str, pages: list[list[str]]) ->
             if m_intl and idx + 1 < len(iblock) and _BRL_RE.match(iblock[idx + 1]):
                 dt_ddmm, est = m_intl.group(1), m_intl.group(2).strip()
                 brl_val = parse_brl_decimal(iblock[idx + 1])
-                last_intl_dt, _ = _infer_statement_item_date(dt_ddmm, due_dt.year, due_dt.month)
+                inst_num_i, _ = _parse_installment_suffix(est)
+                last_intl_dt, _ = _infer_statement_item_date(dt_ddmm, due_dt.year, due_dt.month, inst_num_i)
                 signed_amt = -brl_val
                 is_refund = signed_amt > 0
                 info = classify_official_descriptor(est, signed_amount=signed_amt)
@@ -525,9 +581,21 @@ def _parse_itau_card_invoice(path: Path, digest: str, pages: list[list[str]]) ->
             )
 
     computed_net = sum(Decimal(it.amount) for it in items if not it.skip_insert)
-    if computed_net != -total_amount:
+    carryover = Decimal("0.00")
+    if prior_balance is not None:
+        pay_items = [Decimal(it.amount) for it in items if it.kind == "bill_payment_credit"]
+        if pay_items:
+            sum_payments = sum(abs(v) for v in pay_items)
+        elif total_pagamentos_header is not None:
+            sum_payments = abs(total_pagamentos_header)
+        else:
+            sum_payments = Decimal("0.00")
+        carryover = prior_balance - sum_payments
+    expected_total = carryover + (-computed_net)
+    if expected_total != total_amount:
         raise ValueError(
-            f"Divergência matemática na fatura Itaú {path.name}: soma dos itens={-computed_net:.2f} != total={total_amount:.2f}"
+            f"Divergência matemática na fatura Itaú {path.name}: "
+            f"calculado={expected_total:.2f} (saldo_anterior_liq={carryover:.2f} + itens={-computed_net:.2f}) != total={total_amount:.2f}"
         )
 
     return OfficialStatementDocument(
@@ -577,7 +645,7 @@ def _parse_itau_bank_statement(path: Path, digest: str, pages: list[list[str]]) 
         if m_nome:
             holder_first = m_nome.group(1).upper()
 
-    start_idx = lines.index("saldo (R$)") + 1
+    start_idx = _require_line_index(lines, "saldo (R$)", path, "Cabeçalho de saldo do extrato Itaú") + 1
     raw_entries: list[tuple[date, str, Decimal]] = []
     daily_balances: list[tuple[date, Decimal]] = []
     idx = start_idx
@@ -940,24 +1008,46 @@ def _parse_santander_card_invoice(path: Path, digest: str, pages: list[list[str]
         raise ValueError(f"Final do cartão principal Santander não encontrado em {path.name}.")
     main_card_final = card_m.group(1)
 
-    idx_v = lines.index("Vencimento")
-    d_s, m_s, y_s = lines[idx_v + 1].split("/")
+    due_m = re.search(r"\bVencimento\s*:?\s*(\d{2})/(\d{2})/(\d{4})\b", joined)
+    if due_m:
+        d_s, m_s, y_s = due_m.group(1), due_m.group(2), due_m.group(3)
+    else:
+        idx_v = _require_line_index(lines, "Vencimento", path, "Data de vencimento da fatura Santander", need_next=True)
+        m_v_line = re.match(r"^(\d{2})/(\d{2})/(\d{4})$", lines[idx_v + 1])
+        if not m_v_line:
+            raise ValueError(f"Data de vencimento inválida na fatura Santander {path.name}: {lines[idx_v + 1]!r}")
+        d_s, m_s, y_s = m_v_line.group(1), m_v_line.group(2), m_v_line.group(3)
     due_dt = date(int(y_s), int(m_s), int(d_s))
     competencia = f"{due_dt.year:04d}-{due_dt.month:02d}"
     doc_key = f"fatura_santander_{main_card_final}_{due_dt.year:04d}{due_dt.month:02d}"
     target = f"card:santander:{main_card_final}"
 
-    idx_saldo = lines.index("(=) Saldo Desta Fatura")
+    idx_saldo = _require_line_index(
+        lines, "(=) Saldo Desta Fatura", path, "Total da fatura Santander", need_next=True
+    )
     total_amount = parse_brl_decimal(lines[idx_saldo + 1])
 
-    start_idx = lines.index("Detalhamento da Fatura") + 1
-    end_idx = lines.index("Resumo da Fatura")
+    start_idx = _require_line_index(lines, "Detalhamento da Fatura", path, "Seção de detalhamento Santander") + 1
+    end_idx = _require_line_index(lines, "Resumo da Fatura", path, "Seção de resumo Santander")
+    if start_idx > end_idx:
+        raise ValueError(f"Estrutura de seções inválida na fatura Santander {path.name}.")
     block = lines[start_idx:end_idx]
+    resumo_block = lines[end_idx:]
+
+    prior_balance: Decimal | None = None
+    resumo_payments: Decimal | None = None
+    for j, rline in enumerate(resumo_block):
+        if j + 1 < len(resumo_block) and _BRL_RE.match(resumo_block[j + 1]):
+            if re.match(r"^(?:\([=+]?\)\s*)?Saldo\s+Anterior$", rline, re.IGNORECASE):
+                prior_balance = parse_brl_decimal(resumo_block[j + 1])
+            elif re.match(r"^(?:\(-\)\s*)?Pagamentos(?:\s*/\s*Cr[ée]ditos)?$", rline, re.IGNORECASE):
+                resumo_payments = parse_brl_decimal(resumo_block[j + 1])
 
     additional_finals: list[str] = []
     current_subcard = main_card_final
     items: list[OfficialStatementItem] = []
     row_idx = 0
+    pay_idx = 0
     refund_counters: dict[tuple[str, str, str], int] = {}
 
     idx = 0
@@ -985,12 +1075,13 @@ def _parse_santander_card_invoice(path: Path, digest: str, pages: list[list[str]
                 idx += 3
             elif idx + 1 < len(block) and _BRL_RE.match(block[idx + 1]):
                 raw_val = parse_brl_decimal(block[idx + 1])
+                inst_num, inst_tot = _parse_installment_suffix(desc)
                 idx += 2
             else:
                 idx += 1
                 continue
 
-            item_dt, prior_cycle = _infer_statement_item_date(dt_ddmm, due_dt.year, due_dt.month)
+            item_dt, prior_cycle = _infer_statement_item_date(dt_ddmm, due_dt.year, due_dt.month, inst_num)
             # On Santander card invoice: positive raw_val is expense, negative raw_val is payment/refund
             signed_amt = -raw_val
             upper_desc = desc.upper()
@@ -1001,7 +1092,7 @@ def _parse_santander_card_invoice(path: Path, digest: str, pages: list[list[str]
                 items.append(
                     OfficialStatementItem(
                         doc_key=doc_key,
-                        row_index=0,
+                        row_index=pay_idx,
                         target=target,
                         subcard_final=current_subcard,
                         date=item_dt.isoformat(),
@@ -1019,6 +1110,7 @@ def _parse_santander_card_invoice(path: Path, digest: str, pages: list[list[str]
                         skip_insert=True,
                     )
                 )
+                pay_idx -= 1
                 continue
 
             row_idx += 1
@@ -1064,10 +1156,22 @@ def _parse_santander_card_invoice(path: Path, digest: str, pages: list[list[str]
         idx += 1
 
     computed_net = sum(Decimal(it.amount) for it in items if not it.skip_insert)
-    if computed_net != -total_amount:
+    carryover = Decimal("0.00")
+    if prior_balance is not None:
+        pay_items = [Decimal(it.amount) for it in items if it.kind == "bill_payment_credit"]
+        if pay_items:
+            sum_prior_payments = sum(abs(v) for v in pay_items)
+        elif resumo_payments is not None:
+            refund_sum = sum(Decimal(it.amount) for it in items if not it.skip_insert and Decimal(it.amount) > 0)
+            sum_prior_payments = max(Decimal("0.00"), abs(resumo_payments) - refund_sum)
+        else:
+            sum_prior_payments = Decimal("0.00")
+        carryover = prior_balance - sum_prior_payments
+    expected_total = carryover + (-computed_net)
+    if expected_total != total_amount:
         raise ValueError(
             f"Divergência matemática na fatura Santander {path.name}: "
-            f"soma dos itens={-computed_net:.2f} != total={total_amount:.2f}"
+            f"calculado={expected_total:.2f} (saldo_anterior_liq={carryover:.2f} + itens={-computed_net:.2f}) != total={total_amount:.2f}"
         )
 
     return OfficialStatementDocument(

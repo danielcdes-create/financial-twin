@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+import re
 import subprocess
 import zipfile
 from pathlib import Path
@@ -9,12 +10,17 @@ from pathlib import Path
 REQUIRED_SOURCES = {
     'App.tsx', 'app/handle-share.tsx', 'utils/moneyInput.ts', 'utils/localBack.ts', 'utils/nativeInbox.ts',
     'utils/voiceEvidence.ts', 'utils/voiceDraft.ts', 'utils/captureSubmission.ts', 'utils/syncQueue.ts',
-    'utils/useClassificationOptions.ts', 'components/AccountPositions.tsx', 'components/CardManager.tsx',
+    'utils/useClassificationOptions.ts', 'utils/biometricSession.ts', 'utils/authState.ts', 'utils/apiClient.ts',
+    'components/AuthProvider.tsx', 'components/AccountSecurity.tsx', 'components/AppUpdate.tsx',
+    'components/AccountPositions.tsx', 'components/CardManager.tsx',
     'components/CommitmentManager.tsx', 'components/FinancialLab.tsx', 'components/FutureCommitmentEditor.tsx',
     'components/RecordReview.tsx', 'components/ProvisionalReview.tsx', 'components/StatementBatchReview.tsx',
     'components/TransactionEditor.tsx', 'components/VoiceCapture.tsx', 'components/CapturePanel.tsx',
     'components/MonthClose.tsx', 'components/PurchaseCheck.tsx',
 }
+
+_LOCAL_DIR_RE = re.compile(r'(?:^|/)(?:mobile/)?(?:app|components|utils|modules|plugins)/')
+_SOURCE_SUFFIXES = ('.tsx', '.ts', '.js', '.jsx', '.mjs', '.cjs', '.json')
 
 
 def digest(path):
@@ -39,6 +45,8 @@ def verify(apk, build_project, root, allow_dirty=False):
         raise ValueError('APK bundle differs from the inspected build output')
     source_map = json.loads((build_project / 'android/app/build/generated/sourcemaps/react/release/index.android.bundle.map').read_text(encoding='utf-8'))
     tracked = {str(Path(p).relative_to('mobile')).replace('\\', '/') for p in git('ls-files', 'mobile').splitlines()}
+    mobile_prefix = (root / 'mobile').as_posix().rstrip('/').lower() + '/'
+    build_prefix = build_project.as_posix().rstrip('/').lower() + '/'
     checked = []
     contents = source_map.get('sourcesContent', [])
     if len(contents) != len(source_map['sources']):
@@ -51,6 +59,20 @@ def verify(apk, build_project, root, allow_dirty=False):
         relative = next((p for p in sorted(tracked, key=len, reverse=True)
                          if Path(p).suffix in ('.tsx', '.ts', '.js', '.json') and (name == p or name.endswith('/' + p))), None)
         if relative is None:
+            lower_name = name.lower()
+            if (
+                '?' not in name
+                and '\x00' not in name
+                and '/android/' not in lower_name
+                and '/.expo/' not in lower_name
+                and Path(name).suffix.lower() in _SOURCE_SUFFIXES
+                and (
+                    lower_name.startswith(mobile_prefix)
+                    or lower_name.startswith(build_prefix)
+                    or bool(_LOCAL_DIR_RE.search(lower_name))
+                )
+            ):
+                raise ValueError('Untracked source embedded in bundle: ' + name)
             continue
         if content is None:
             raise ValueError('Build map omits local source content: ' + relative)

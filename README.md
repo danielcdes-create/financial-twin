@@ -292,7 +292,7 @@ Technical specification: [NT-001](docs/NT-001-CONFIABILIDADE-E-EVOLUCAO.md). Exe
 
 The app includes evidence-backed closure, purchase decision scenarios, charge/refund cases, account liquidity proposals, and savings experiments under **Mais → Decisões e evidências**. These workflows do not execute bank payments or send messages. Missing balances and incomplete statement coverage remain explicit.
 
-Run `scripts/validate.ps1` for all backend/client tests, Expo compatibility, the dependency-security gate, typecheck and lint. Add `-Integration -TestMongoUri 'mongodb://127.0.0.1:27017/?replicaSet=financialTwinTest'` for all nine integration suites, including backup/restore and C regressions. The target guard rejects remote MongoDB before test writes. CI invokes the same client runner and integration dispatcher. Read the runbook before production recovery or Android builds.
+Run `scripts/validate.ps1` for all backend/client tests, Expo compatibility, the dependency-security gate, typecheck and lint. Add `-Integration -TestMongoUri 'mongodb://127.0.0.1:27017/?replicaSet=financialTwinTest'` for all 14 integration suites, including backup/restore and C regressions. The target guard rejects remote MongoDB before test writes. CI invokes the same client runner and integration dispatcher. Read the runbook before production recovery or Android builds.
 
 
 

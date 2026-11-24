@@ -13,9 +13,61 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parents[1]))
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from app.auth import (BIOMETRIC_SESSION_SECONDS, OWNER_ID, create_session_token, renew_session_token, require_session,
+from app.auth import (BIOMETRIC_SESSION_SECONDS, MAX_SESSIONS, OWNER_ID, create_session_token, renew_session_token, require_session,
                       session_hash, session_response, hash_password, verify_password, LoginAttempts)
 from app.main import app
+
+
+class _StatefulAccountCollection:
+    def __init__(self, get_doc):
+        self._get_doc = get_doc
+
+    def find_one(self, query):
+        doc = self._get_doc()
+        if not doc:
+            return None
+        for k, v in (query or {}).items():
+            if k == 'sessions.id':
+                if not any(s.get('id') == v for s in doc.get('sessions', [])):
+                    return None
+            elif doc.get(k) != v:
+                return None
+        return doc
+
+    def update_one(self, query, update):
+        doc = self.find_one(query)
+        if doc is None:
+            return SimpleNamespace(matched_count=0, modified_count=0)
+        if isinstance(update, list):
+            # Aggregation pipeline used by session_response: filter expired + append + slice(-MAX_SESSIONS)
+            stage = update[0].get('$set', {}).get('sessions', {})
+            slice_args = stage.get('$slice', [])
+            concat_args = slice_args[0].get('$concatArrays', [])
+            filter_spec = concat_args[0].get('$filter', {})
+            cutoff_now = filter_spec.get('cond', {}).get('$gt', [None, 0])[1]
+            appended = list(concat_args[1].get('$literal', []))
+            cap = abs(int(slice_args[1]))
+            kept = [s for s in doc.get('sessions', []) if int(s.get('expires_at') or 0) > cutoff_now]
+            doc['sessions'] = (kept + appended)[-cap:]
+            return SimpleNamespace(matched_count=1, modified_count=1)
+        sets = update.get('$set', {})
+        target_sid = (query or {}).get('sessions.id')
+        for k, v in sets.items():
+            if k.startswith('sessions.$.'):
+                sub = k.split('sessions.$.', 1)[1]
+                for s in doc.get('sessions', []):
+                    if s.get('id') == target_sid:
+                        s[sub] = v
+                        break
+            else:
+                doc[k] = v
+        if '$inc' in update:
+            for k, v in update['$inc'].items():
+                doc[k] = doc.get(k, 0) + v
+        if '$pull' in update and 'sessions' in update['$pull']:
+            cond = update['$pull']['sessions']
+            doc['sessions'] = [s for s in doc.get('sessions', []) if s.get('id') != cond.get('id')]
+        return SimpleNamespace(matched_count=1, modified_count=1)
 
 
 class SessionTests(unittest.TestCase):
@@ -27,8 +79,7 @@ class SessionTests(unittest.TestCase):
         self.account = {'_id': OWNER_ID, 'kind': 'app_identity', 'auth_version': 2,
                         'username': 'daniel', 'display_name': 'Daniel', 'password_hash': 'hash',
                         'sessions': [{'id': session_hash(self.identity), 'expires_at': int(time.time()) + 100}]}
-        self.db = SimpleNamespace(account=SimpleNamespace(find_one=lambda query: self.account,
-                                                          update_one=lambda *a, **kw: SimpleNamespace(matched_count=1)))
+        self.db = SimpleNamespace(account=_StatefulAccountCollection(lambda: self.account))
         self.request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(db=self.db)))
         self.token = create_session_token(OWNER_ID, 2, self.identity)
 
@@ -51,16 +102,38 @@ class SessionTests(unittest.TestCase):
             with self.assertRaises(HTTPException): self.check(self.token)
 
     def test_biometric_device_session_and_sliding_renewal(self):
+        # Seed an already-expired stale session to verify session_response prunes it
+        self.account['sessions'].append({'id': 'stale-expired', 'expires_at': int(time.time()) - 10})
         mobile_resp = session_response(self.db, self.account, 'Android')
         self.assertEqual(mobile_resp['expires_in'], BIOMETRIC_SESSION_SECONDS)
+        self.assertFalse(any(s['id'] == 'stale-expired' for s in self.account['sessions']))
+        self.assertEqual(len(self.account['sessions']), 2)
         web_resp = session_response(self.db, self.account, 'Navegador')
         self.assertEqual(web_resp['expires_in'], 43200)
+        self.assertEqual(len(self.account['sessions']), 3)
+        self.assertIsNotNone(self.check(mobile_resp['access_token']))
+        self.assertIsNotNone(self.check(web_resp['access_token']))
+
+        # Sliding renewal updates existing session in-place without duplicating
         renewed = renew_session_token(self.db, self.account, self.identity)
         self.assertIsNotNone(renewed)
         self.assertEqual(renewed['expires_in'], BIOMETRIC_SESSION_SECONDS)
-        self.assertEqual(len(self.account['sessions']), 1)
+        self.assertEqual(len(self.account['sessions']), 3)
         with patch('app.auth.time.time', return_value=int(time.time()) + 86400):
             self.assertEqual(self.check(renewed['access_token'])['session_id'], session_hash(self.identity))
+            with self.assertRaises(HTTPException):
+                self.check(web_resp['access_token'])
+
+        # MAX_SESSIONS cap is strictly enforced across repeated logins
+        for idx in range(MAX_SESSIONS + 3):
+            session_response(self.db, self.account, f'Device-{idx}')
+        self.assertEqual(len(self.account['sessions']), MAX_SESSIONS)
+
+        # Stale auth_version snapshot is rejected with 401 when account version changes
+        stale_snapshot = {**self.account, 'auth_version': self.account['auth_version'] - 1}
+        with self.assertRaises(HTTPException) as stale_err:
+            session_response(self.db, stale_snapshot, 'Android')
+        self.assertEqual(stale_err.exception.status_code, 401)
 
     def test_revoke_and_password_version_invalidate(self):
         self.account['sessions'] = []

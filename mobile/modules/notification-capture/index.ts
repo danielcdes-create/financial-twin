@@ -1,7 +1,7 @@
 import { requireNativeModule } from 'expo-modules-core';
 export type CapturedEvent = { event_id:string; source_type:'android_notification'; source_provider:string; captured_at:string; raw_payload:Record<string,unknown>; parsed_payload?:Record<string,unknown> };
 export type InboxSnapshot = {version:2; events:CapturedEvent[]; state:'ready'|'needs_recovery'|'unavailable'; recovery_count:number; dropped_count?:number; error:string};
-type NativeCapture = { isEnabled():boolean; openSettings():void; getQueuedEvents():string; getInboxSnapshot?():string; exportRecovery?():string; markSynced(eventId:string):void };
+type NativeCapture = { isEnabled():boolean; openSettings():void; getQueuedEvents():string; getInboxSnapshot?():string; exportRecovery?():string; markSynced(eventId:string):void; installApk?(contentUri:string,mimeType:string):void };
 let native:NativeCapture|undefined;
 try { native=requireNativeModule<NativeCapture>('NotificationCapture'); } catch {}
 export function validateCapturedEvent(value: unknown): value is CapturedEvent {
@@ -30,4 +30,5 @@ export default {
   getQueuedEvents:():CapturedEvent[]=>{const snapshot=getInboxSnapshot();if(snapshot.state==='unavailable')throw new Error(snapshot.error);return snapshot.events;},
   exportRecovery:():string=>{if(!native?.exportRecovery)throw new Error('Atualize o Android para exportar a recuperação.');return native.exportRecovery();},
   markSynced:(id:string)=>native?.markSynced(id),
+  installApk:native?.installApk?(contentUri:string,mimeType='application/vnd.android.package-archive')=>native.installApk!(contentUri,mimeType):undefined,
 };

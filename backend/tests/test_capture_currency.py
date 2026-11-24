@@ -82,8 +82,7 @@ class CaptureCurrencyTests(unittest.TestCase):
             {'date': '2026-10-01', 'amount': '-12.59', 'description': 'Synthetic store', 'kind': 'expense'}
         ], complete=True)
         with patch('app.capture_batches.extract_statement', return_value=statement) as extract, \
-             patch('app.capture_batches.store_media', return_value='original-source.pdf') as batch_media, \
-             patch.object(db.statement_extractions, 'update_one', return_value=None):
+             patch('app.capture_batches.store_media', return_value='original-source.pdf') as batch_media:
             first = scan_sync(UploadFile(filename='itau.pdf', file=io.BytesIO(data)), batch_id, request)
             repeated = scan_sync(UploadFile(filename='itau.pdf', file=io.BytesIO(data)), batch_id, request)
         self.assertEqual(first['event_id'], str(batch_id))

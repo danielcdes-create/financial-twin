@@ -24,7 +24,11 @@ $dotEnvPath = Join-Path $projectPath '.env'
 if (Test-Path -LiteralPath $dotEnvPath) {
     Get-Content -LiteralPath $dotEnvPath | ForEach-Object {
         if ($_ -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$') {
-            [System.Environment]::SetEnvironmentVariable($Matches[1], $Matches[2].Trim(), 'Process')
+            $val = $Matches[2].Trim()
+            if (($val.Length -ge 2) -and (($val.StartsWith('"') -and $val.EndsWith('"')) -or ($val.StartsWith("'") -and $val.EndsWith("'")))) {
+                $val = $val.Substring(1, $val.Length - 2)
+            }
+            [System.Environment]::SetEnvironmentVariable($Matches[1], $val, 'Process')
         }
     }
 }
@@ -63,9 +67,11 @@ if (Test-Path -LiteralPath $appConfigPath) {
     $gradlePath = Join-Path $projectPath 'android\app\build.gradle'
     if (Test-Path -LiteralPath $gradlePath) {
         $gradleContent = Get-Content -LiteralPath $gradlePath -Raw
-        $gradleContent = [regex]::Replace($gradleContent, '(?m)^\s*versionCode\s+\d+', "        versionCode $versionCode")
-        $gradleContent = [regex]::Replace($gradleContent, '(?m)^\s*versionName\s+"[^"]+"', "        versionName `"$versionName`"")
-        Set-Content -LiteralPath $gradlePath -Value $gradleContent -NoNewline
+        $updatedGradle = [regex]::Replace($gradleContent, '(?m)^(\s*versionCode\s+)\d+', "`${1}$versionCode")
+        $updatedGradle = [regex]::Replace($updatedGradle, '(?m)^(\s*versionName\s+)"[^"]+"', "`${1}`"$versionName`"")
+        if ($updatedGradle -cne $gradleContent) {
+            Set-Content -LiteralPath $gradlePath -Value $updatedGradle -NoNewline
+        }
     }
 }
 
@@ -193,7 +199,10 @@ try {
             $sourceVerifier = Join-Path $repoRoot 'scripts\verify_apk_source.py'
             $provenanceSha = ''
             if ((Test-Path -LiteralPath $pythonExe) -and (Test-Path -LiteralPath $sourceVerifier)) {
-                & $pythonExe $sourceVerifier --apk $destination --build-project $activeProject --root $repoRoot --output $provenancePath --allow-dirty | Out-Null
+                $verifyArgs = @('--apk', $destination, '--build-project', $activeProject, '--root', $repoRoot, '--output', $provenancePath)
+                $gitDirty = (& git -C $repoRoot status --porcelain 2>$null | Out-String).Trim()
+                if ($gitDirty) { $verifyArgs += '--allow-dirty' }
+                & $pythonExe $sourceVerifier @verifyArgs | Out-Null
                 if ($LASTEXITCODE -ne 0) { throw 'Falha ao verificar a proveniência do bundle JS/nativo embutido no APK.' }
                 $provenanceSha = (Get-FileHash -LiteralPath $provenancePath -Algorithm SHA256).Hash
             }
@@ -233,6 +242,7 @@ try {
             $readmePath = Join-Path $repoRoot 'README.md'
             if ((Test-Path -LiteralPath $pythonExe) -and (Test-Path -LiteralPath $pointerScript) -and (Test-Path -LiteralPath $readmePath)) {
                 & $pythonExe $pointerScript --manifest $manifestPath --app-config $appConfigPath --readme $readmePath
+                if ($LASTEXITCODE -ne 0) { throw 'Falha ao validar/atualizar o ponteiro de release no README.md.' }
             }
 
             # Commit e Push no GitHub (somente manifesto de versão e ponteiro; nunca telemetria)

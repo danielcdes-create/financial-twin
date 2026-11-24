@@ -52,7 +52,7 @@ function Install-ReleaseFile([string]$Source,[string]$Target){
     try {
         Copy-Item -LiteralPath $Source -Destination $temporary
         if((Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash){throw 'Cópia de publicação divergente.'}
-        [IO.File]::Move($temporary,$Target,$true)
+        Move-Item -LiteralPath $temporary -Destination $Target -Force
     } finally {if(Test-Path -LiteralPath $temporary){Remove-Item -LiteralPath $temporary}}
 }
 
@@ -111,7 +111,7 @@ try {
     $provenance=Get-Content -LiteralPath $stagedProvenance -Raw | ConvertFrom-Json
     if($provenance.clean_head -ne $true -or $provenance.source_commit -ne $sourceCommit -or $provenance.apk_sha256 -ne $releaseInfo.sha256 -or $provenance.size_bytes -ne $releaseInfo.size_bytes -or $provenance.version_name -ne $releaseInfo.version_name -or $provenance.version_code -ne $releaseInfo.version_code){throw 'A proveniência não corresponde ao candidato e ao commit verificados.'}
     $releaseInfo.provenance_sha256=(Get-FileHash -LiteralPath $stagedProvenance -Algorithm SHA256).Hash
-    $releaseInfo | ConvertTo-Json | Set-Content -LiteralPath $stagedManifest -Encoding utf8NoBOM
+    [System.IO.File]::WriteAllText($stagedManifest, ($releaseInfo | ConvertTo-Json), [System.Text.UTF8Encoding]::new($false))
     Copy-Item -LiteralPath $readme -Destination $stagedReadme
     & $python $pointerScript --manifest $stagedManifest --app-config $appConfigPath --readme $stagedReadme | Out-Null
     if($LASTEXITCODE -ne 0){throw 'O ponteiro de release em staging não foi validado.'}

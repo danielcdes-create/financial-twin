@@ -111,6 +111,7 @@ object NotificationInbox {
   fun snapshot(prefs:SharedPreferences):JSONObject=synchronized(NotificationCaptureService.QUEUE_LOCK) {
     try {
       val (events,recovery,droppedCount)=read(prefs)
+      if(failure!=null && prefs.edit().commit())failure=null
       JSONObject().put("version",2).put("events",events).put("state",if(failure!=null)"unavailable" else if(recovery.length()>0)"needs_recovery" else "ready")
         .put("recovery_count",recovery.length()).put("dropped_count",droppedCount)
         .put("error",failure?:if(recovery.length()>0)"Há conteúdo de notificações preservado para recuperação." else "")

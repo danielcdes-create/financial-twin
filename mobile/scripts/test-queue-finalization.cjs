@@ -34,7 +34,7 @@ const receipt=await restarted.readQueueAcknowledgement(db,c);
 assert.equal(receipt.event_id,c.event_id,'Restart retains receipt without resubmission');
 const archived=(await db.getAllAsync('SELECT * FROM queue_acknowledgements WHERE event_id=?',c.event_id))[0];
 assert.equal(JSON.parse(archived.identity)[2],c.local_uri,'Original private bytes stay linked to durable receipt');
-assert.doesNotMatch(fs.readFileSync('utils/queueFinalization.ts','utf8'),/removeFile|\.delete\(/,'Finalization cannot delete original bytes in a filesystem race');
+assert.doesNotMatch(fs.readFileSync('utils/queueFinalization.ts','utf8'),/removeQueuedFile|removeFile|\.delete\(/,'Finalization cannot delete original bytes in a filesystem race');
 await assert.rejects(()=>readQueueAcknowledgement(db,{...c,payload:'changed'}),/outro conteúdo/);
 console.log('Queue finalization: null URI, matching identity, durable ACK, concurrent shared reference, session and restart receipt passed; original bytes preserved.');
 })().catch(error=>{console.error(error);process.exitCode=1;});

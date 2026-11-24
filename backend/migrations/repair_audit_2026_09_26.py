@@ -31,7 +31,7 @@ def plan(db):
             if doc.get("merchant_id") == doc.get("platform_id") and merchants.get(doc["merchant_id"]) in PLATFORM_NAMES]
     direct_service = [doc for doc in same if merchants[doc["merchant_id"]] == "iFood"
                       and "IFOOD CLUB" in str(doc.get("estabelecimento_original") or "").upper()]
-    platform_only = [doc for doc in same if doc not in direct_service]
+    platform_only = [doc for doc in same if doc not in direct_service and doc.get("status_revisao") != "validado"]
     conflicting = [doc for doc in db.provisional_transactions.find({"status": "confirmed"})
                    if isinstance(doc.get("valor"), Decimal128)
                    and ((doc["valor"].to_decimal() < 0 and doc.get("fluxo") == "entrada")

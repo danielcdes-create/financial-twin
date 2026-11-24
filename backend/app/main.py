@@ -367,6 +367,54 @@ def _sync_merchant_alias(db, merchant:dict[str,Any], raw_source:str|None, suppli
         merchant["aliases"]=aliases
         db.merchants.update_one({"_id":merchant["_id"]},{"$set":{"aliases":aliases,"updated_at":now}})
 
+def _overrides_collection(db):
+    if db is None:
+        return None
+    try:
+        col = getattr(db, "transaction_field_overrides", None)
+    except Exception:
+        col = None
+    if col is None and isinstance(db, dict) and "transaction_field_overrides" in db:
+        col = db["transaction_field_overrides"]
+    if col is not None and hasattr(col, "find_one") and hasattr(col, "find"):
+        return col
+    return None
+
+def _load_tx_override_cleared(db, tx_id) -> set[str]:
+    if tx_id is None:
+        return set()
+    col = _overrides_collection(db)
+    if col is None:
+        return set()
+    try:
+        doc = col.find_one({"_id": tx_id})
+    except Exception:
+        return set()
+    if isinstance(doc, dict) and isinstance(doc.get("user_cleared_fields"), (list, tuple, set)):
+        return {str(f) for f in doc["user_cleared_fields"] if isinstance(f, str) and f}
+    return set()
+
+def _load_tx_overrides_map(db, tx_ids: list) -> dict[str, set[str]]:
+    if not tx_ids:
+        return {}
+    col = _overrides_collection(db)
+    if col is None:
+        return {}
+    try:
+        rows = col.find({"_id": {"$in": list(tx_ids)}}, {"user_cleared_fields": 1})
+    except TypeError:
+        try:
+            rows = col.find({"_id": {"$in": list(tx_ids)}})
+        except Exception:
+            return {}
+    except Exception:
+        return {}
+    out: dict[str, set[str]] = {}
+    for doc in rows:
+        if isinstance(doc, dict) and doc.get("_id") is not None and isinstance(doc.get("user_cleared_fields"), (list, tuple, set)):
+            out[str(doc["_id"])] = {str(f) for f in doc["user_cleared_fields"] if isinstance(f, str) and f}
+    return out
+
 def with_merchant_name(document:dict[str,Any], db, *, include_historical:bool=True, merchants_by_id:dict|None=None, history_cache:dict|None=None):
     result=json_safe(document)
     if document.get('provisional_id'): result['categoria']=document.get('categoria_sugerida')
@@ -392,6 +440,8 @@ def with_merchant_name(document:dict[str,Any], db, *, include_historical:bool=Tr
             result["fornecedor"]=merchant["nome_padrao"]
     platform_id=document.get("platform_id")
     user_cleared=set(document.get("user_cleared_fields") or [])
+    if not document.get("provisional_id") and document.get("_id") is not None:
+        user_cleared |= _load_tx_override_cleared(db, document["_id"])
     if platform_id:
         platform=_lookup_merchant(platform_id)
         if platform and platform.get("nome_padrao"): result["plataforma"]=platform["nome_padrao"]
@@ -409,6 +459,8 @@ def with_merchant_names(documents:list[dict[str,Any]], db):
     """Enrich a page with merchant/platform names using one bounded lookup."""
     merchant_ids={item.get(key) for item in documents for key in ("merchant_id","platform_id") if item.get(key)}
     merchants={str(item["_id"]):item.get("nome_padrao") for item in db.merchants.find({"_id":{"$in":list(merchant_ids)}},{"nome_padrao":1})} if merchant_ids else {}
+    ledger_ids=[item["_id"] for item in documents if not item.get("provisional_id") and item.get("_id") is not None]
+    overrides_by_id=_load_tx_overrides_map(db, ledger_ids) if ledger_ids else {}
     results=[]
     overrides=cached_taxonomy_overrides(db)
     has_active_provisional=any(item.get("provisional_id") and item.get("status") in {"provisional","enriched"} for item in documents)
@@ -426,6 +478,8 @@ def with_merchant_names(documents:list[dict[str,Any]], db):
             result["fornecedor"]=merchant_name
         platform_name=merchants.get(str(document.get("platform_id")))
         user_cleared=set(document.get("user_cleared_fields") or [])
+        if not document.get("provisional_id") and document.get("_id") is not None:
+            user_cleared |= overrides_by_id.get(str(document["_id"]), set())
         if platform_name:
             result["plataforma"]=platform_name
         elif "plataforma" not in user_cleared and not document.get("platform_id") and (detected:=platform_identity(document.get("merchant_raw") or document.get("estabelecimento_original") or document.get("descricao_original"))):
@@ -541,7 +595,8 @@ def find_or_create_platform(db, name:str, now:datetime):
     if not platform:
         platform=db.merchants.find_one({"nome_padrao":canonical})
     if platform: return platform
-    platform={"_id":ObjectId(),"external_key":identity[0] if identity else f"platform-user-{uuid4()}","schema_version":2,"created_at":now,"updated_at":now,"tipo_entidade":"marca","nome_padrao":canonical,"aliases":[]}
+    norm_alias=re.sub(r"\s+"," ",re.sub(r"[^A-Z0-9 ]"," ",canonical.upper())).strip() or canonical.upper()
+    platform={"_id":ObjectId(),"external_key":identity[0] if identity else f"platform-user-{uuid4()}","schema_version":2,"created_at":now,"updated_at":now,"tipo_entidade":"marca","nome_padrao":canonical,"aliases":[{"valor":canonical,"normalizado":norm_alias,"status":"confirmado","source_record_ids":[]}]}
     db.merchants.insert_one(platform)
     return platform
 
@@ -1414,7 +1469,8 @@ def _update_transaction_classification(transaction_id:str, update:TransactionCla
     clear_supplier=supplier_name is not None and not supplier_name.strip()
     if clear_supplier: supplier_name=None
     platform_name=changes.pop("plataforma",None)
-    user_cleared=set(item.get("user_cleared_fields") or [])
+    initial_override_cleared=_load_tx_override_cleared(db, object_id)
+    user_cleared=set(initial_override_cleared) | set(item.get("user_cleared_fields") or [])
     has_platform_context=any(key in item for key in ('platform_id','plataforma')) or bool(platform_identity(item.get("estabelecimento_original") or item.get("descricao_original"))) or 'plataforma' in (item.get('historical_prefill_fields') or [])
     clear_platform=platform_name=='' and has_platform_context
     if changes.get("localidade"): changes["localidade"]=canonical_distinct(db,"localidade",changes["localidade"])
@@ -1443,6 +1499,7 @@ def _update_transaction_classification(transaction_id:str, update:TransactionCla
     if changed or merchant_changed or clear_supplier or platform_name or clear_platform or recurrence_changed:
         set_values["editado_em"]=now
     if recurrence_changed: set_values["recorrencia"]=recurrence
+    unset_values={}
     created_merchant_id=None
     if merchant_changed:
         raw_source=item.get("estabelecimento_original") or item.get("descricao_original")
@@ -1458,44 +1515,44 @@ def _update_transaction_classification(transaction_id:str, update:TransactionCla
         _sync_merchant_alias(db,merchant,raw_source,supplier_name,platform_active,platform_name,item.get("merchant_id"),now)
         supplier_name=merchant["nome_padrao"]
         set_values["merchant_id"]=merchant["_id"]
-        if "vendedor" in item: set_values["vendedor"]=supplier_name
-        if "merchant_name" in item: set_values["merchant_name"]=supplier_name
+        for legacy_k in ("vendedor","merchant_name"):
+            if legacy_k in item: unset_values[legacy_k]=""
     platform_changed=clear_platform
     platform_before=with_merchant_name(item,db,include_historical=False).get('plataforma') if platform_name is not None else None
-    unset_values={}
     if changes.get('metodo_pagamento')=='':
         set_values.pop('metodo_pagamento',None);unset_values['metodo_pagamento']=''
     if clear_platform:
         unset_values.update({key:'' for key in ('platform_id','plataforma') if key in item})
-        if 'plataforma' not in user_cleared:
-            user_cleared.add('plataforma')
-            set_values['user_cleared_fields']=sorted(user_cleared)
+        user_cleared.add('plataforma')
     if platform_name:
         platform=find_or_create_platform(db,platform_name,now)
         platform_changed=item.get("platform_id")!=platform["_id"]
         if platform_changed: set_values["platform_id"]=platform["_id"]
-        if "plataforma" in item: set_values["plataforma"]=platform["nome_padrao"]
-        if 'plataforma' in user_cleared:
-            user_cleared.discard('plataforma')
-            set_values['user_cleared_fields']=sorted(user_cleared)
+        if "plataforma" in item: unset_values["plataforma"]=""
+        user_cleared.discard('plataforma')
         if current_merchant and not supplier_name and canonical_key(current_merchant.get("nome_padrao",""))==canonical_key(platform["nome_padrao"]): clear_supplier=True
     if clear_supplier and item.get("merchant_id"):
         unset_values["merchant_id"]=""
     if clear_supplier:
         for key in ("vendedor","merchant_name"):
             if key in item: unset_values[key]=""
-        if 'vendedor' not in user_cleared:
-            user_cleared.add('vendedor')
-            set_values['user_cleared_fields']=sorted(user_cleared)
+        user_cleared.add('vendedor')
     elif supplier_name and 'vendedor' in user_cleared:
         user_cleared.discard('vendedor')
-        set_values['user_cleared_fields']=sorted(user_cleared)
+    if "user_cleared_fields" in item:
+        unset_values["user_cleared_fields"]=""
     if not validate_review and item.get("revisado_em"): unset_values["revisado_em"]=""
     try: db.transactions.update_one({"_id":object_id},{"$set":set_values,**({"$unset":unset_values} if unset_values else {})})
     except WriteError as exc:
-        if created_merchant_id: db.merchants.delete_one({"_id":created_merchant_id})
+        if created_merchant_id and not isinstance(db, _SessionDatabase): db.merchants.delete_one({"_id":created_merchant_id})
         if exc.code==121: raise HTTPException(status_code=409,detail="O registro não passou pelas regras do dicionário financeiro. Revise os valores selecionados.")
         raise
+    ov_col=_overrides_collection(db)
+    if ov_col is not None and (user_cleared!=initial_override_cleared or "user_cleared_fields" in item):
+        if user_cleared:
+            ov_col.update_one({"_id":object_id},{"$set":{"user_cleared_fields":sorted(user_cleared),"updated_at":now}},upsert=True)
+        else:
+            ov_col.delete_one({"_id":object_id})
     if merchant_changed or clear_supplier or platform_name or clear_platform or changed:
         classification_cache.invalidate()
     if changed or merchant_changed or clear_supplier or platform_changed or recurrence_changed:
@@ -1562,6 +1619,20 @@ def _update_transaction_classification(transaction_id:str, update:TransactionCla
             projection={key:1 for key in affected_fields|audit_fields}
             classification_before={peer['_id']:deepcopy(peer) for peer in db.transactions.find({'_id':{'$in':classification_ids}},projection)}
             classification_propagated_count=db.transactions.update_many({"_id":{"$in":classification_ids}},{"$set":classification_values,**({'$unset':classification_unsets} if classification_unsets else {})}).modified_count
+            if ov_col is not None and platform_name is not None and classification_ids:
+                existing_peer_ovs=_load_tx_overrides_map(db, classification_ids)
+                for peer_id in classification_ids:
+                    peer_cleared=set(existing_peer_ovs.get(str(peer_id), set()))
+                    if platform_name=='':
+                        if 'plataforma' not in peer_cleared:
+                            peer_cleared.add('plataforma')
+                            ov_col.update_one({"_id":peer_id},{"$set":{"user_cleared_fields":sorted(peer_cleared),"updated_at":now}},upsert=True)
+                    elif 'plataforma' in peer_cleared:
+                        peer_cleared.discard('plataforma')
+                        if peer_cleared:
+                            ov_col.update_one({"_id":peer_id},{"$set":{"user_cleared_fields":sorted(peer_cleared),"updated_at":now}},upsert=True)
+                        else:
+                            ov_col.delete_one({"_id":peer_id})
             if validate_review and classification_propagated_count: validated_peer_ids.update(classification_ids)
             if classification_propagated_count:
                 classification_after={peer['_id']:peer for peer in db.transactions.find({'_id':{'$in':classification_ids}},projection)}

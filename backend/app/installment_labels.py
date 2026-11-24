@@ -76,7 +76,12 @@ def linked_statement_snapshots(db, groups):
     pairs = [(key, list(identities or [])) for key, identities in groups.items()]
     rows = _rows_for(db, [identity for _, identities in pairs for identity in identities])
     by_id = {str(row.get('_id')): row for row in rows}
-    merchant_ids = [row.get('merchant_id') for row in rows if row.get('merchant_id')]
+    merchant_ids = [
+        row.get(field)
+        for row in rows
+        for field in ('merchant_id', 'platform_id')
+        if row.get(field)
+    ]
     merchants = {str(row['_id']): row.get('nome_padrao') for row in db.merchants.find({'_id': {'$in': merchant_ids}}, {'nome_padrao': 1})} if merchant_ids else {}
     cards = card_labels(db, [row.get('card_id') for row in rows])
     result = {}
@@ -87,6 +92,7 @@ def linked_statement_snapshots(db, groups):
             if not row:
                 continue
             vendor = _as_text(row.get('vendedor')) or _as_text(row.get('merchant_name')) or _as_text(merchants.get(str(row.get('merchant_id') or '')))
+            platform = _as_text(row.get('plataforma')) or _as_text(merchants.get(str(row.get('platform_id') or '')))
             card = _as_text(row.get('card_label')) or cards.get(str(row.get('card_id') or '')) or ''
             snapshot = {
                 'vendedor': vendor,
@@ -95,7 +101,7 @@ def linked_statement_snapshots(db, groups):
                 'subcategoria': _as_text(row.get('subcategoria')),
                 'natureza': _as_text(row.get('natureza')),
                 'metodo_pagamento': _as_text(row.get('metodo_pagamento')),
-                'plataforma': _as_text(row.get('plataforma')),
+                'plataforma': platform,
                 'card_label': card,
             }
             if not any(snapshot.values()):

@@ -63,7 +63,9 @@ if __name__ == '__main__':
         protected = {}
         for path in ('/v1/app-update', '/v1/app-update/apk', '/v1/movements', '/v1/commitments', '/v1/insights/closure?start=2026-09-01&end=2026-09-29'):
             try:
-                get(path)
+                req = UrlRequest('http://127.0.0.1:8000' + path)
+                with urlopen(req, timeout=30) as response:
+                    response.read(64)
             except HTTPError as error:
                 protected[path] = error.code
             else:

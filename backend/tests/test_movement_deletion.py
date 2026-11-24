@@ -181,11 +181,25 @@ class MovementDeletionTests(unittest.TestCase):
         self.assertFalse(self.db.provisional_transactions.docs)
 
     def test_preview_and_delete_require_session_when_protected(self):
-        with patch('app.auth.get_settings', return_value=SimpleNamespace(environment='production', app_password='protected')):
+        mock_settings = SimpleNamespace(
+            environment='production',
+            app_password='protected',
+            jwt_secret='x' * 32,
+            account_setup_token='',
+        )
+        with patch('app.auth.get_settings', return_value=mock_settings):
             http = TestClient(app)
             path = '/v1/movements/ledger/' + self.identity
+            # Missing Bearer token -> 401
             self.assertEqual(http.get(path + '/deletion').status_code, 401)
             self.assertEqual(http.request('DELETE', path, json={'preview_token': 'a' * 64}).status_code, 401)
+            # Invalid Bearer token -> 401
+            bad_headers = {'Authorization': 'Bearer invalid.jwt.token'}
+            self.assertEqual(http.get(path + '/deletion', headers=bad_headers).status_code, 401)
+            self.assertEqual(
+                http.request('DELETE', path, json={'preview_token': 'a' * 64}, headers=bad_headers).status_code,
+                401,
+            )
 
 
 def preview_active(db):

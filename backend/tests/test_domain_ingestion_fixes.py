@@ -164,7 +164,7 @@ class DomainBatchIngestionTests(unittest.TestCase):
         data = b'data;descricao;valor;tipo;moeda\n01/10/2026;Synthetic shop;-12.59;debito;USD\n'
         request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(db=self.db)))
         identity = uuid4()
-        with patch('app.capture_batches.store_media', return_value='retained-source.csv') as store, patch.object(self.db.statement_extractions, 'update_one'):
+        with patch('app.capture_batches.store_media', return_value='retained-source.csv') as store:
             result = scan_sync(UploadFile(filename='foreign.csv', file=io.BytesIO(data)), identity, request)
         self.assertTrue(result['draft_persisted'])
         self.assertEqual(result['batch']['rows'][0]['currency'], 'USD')

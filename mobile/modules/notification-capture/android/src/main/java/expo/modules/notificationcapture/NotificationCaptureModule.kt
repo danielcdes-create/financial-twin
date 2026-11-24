@@ -37,10 +37,23 @@ class NotificationCaptureModule : Module() {
       val context=checkNotNull(appContext.reactContext){"Contexto nativo indisponível"}
       NotificationInbox.markSynced(context.getSharedPreferences(NotificationCaptureService.PREFS,Context.MODE_PRIVATE),eventId)
     }
+    Function("installApk") { contentUri: String, mimeType: String ->
+      val context=checkNotNull(appContext.reactContext){"Contexto nativo indisponível"}
+      val uri=android.net.Uri.parse(contentUri)
+      require(uri.scheme=="content"){"URI do pacote precisa usar content://"}
+      val type=mimeType.ifBlank{"application/vnd.android.package-archive"}
+      context.startActivity(
+        Intent(Intent.ACTION_VIEW)
+          .setDataAndType(uri,type)
+          .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+      )
+    }
   }
   private fun isListenerEnabled(): Boolean {
     val context=appContext.reactContext ?: return false
     val enabled=Settings.Secure.getString(context.contentResolver,"enabled_notification_listeners") ?: return false
-    return enabled.contains(context.packageName)
+    return enabled.split(':').any { entry ->
+      ComponentName.unflattenFromString(entry.trim())?.packageName == context.packageName
+    }
   }
 }

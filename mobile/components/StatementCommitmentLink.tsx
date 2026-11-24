@@ -13,6 +13,31 @@ type Api = (path: string, init?: RequestInit) => Promise<any>;
 const amountOf = (item: any) => typeof item?.valor === 'number' ? item.valor : Number(item?.valor?.$numberDecimal || item?.valor || 0);
 const titleOf = (item: any) => item?.vendedor || item?.fornecedor || item?.merchant_name || item?.merchant_raw || item?.estabelecimento_original || item?.descricao_original || 'Movimentação';
 
+const fetchAllCommitments = async (api: Api): Promise<any[]> => {
+  const first = await api('/v1/commitments');
+  const items: any[] = Array.isArray(first?.items) ? [...first.items] : [];
+  let page = first;
+  let offset = 0;
+  while (
+    page?.has_more === true ||
+    (page?.has_more === undefined &&
+      Array.isArray(page?.items) &&
+      page.items.length >= 200 &&
+      (typeof page?.total !== 'number' || items.length < page.total))
+  ) {
+    const nextOffset =
+      Number.isInteger(page?.next_offset) && page.next_offset > offset
+        ? page.next_offset
+        : offset + page.items.length;
+    if (nextOffset <= offset) break;
+    offset = nextOffset;
+    page = await api(`/v1/commitments?offset=${offset}`);
+    if (!Array.isArray(page?.items) || page.items.length === 0) break;
+    items.push(...page.items);
+  }
+  return items;
+};
+
 export default function StatementCommitmentLink({item, api, money, onLinked, onUnlinked}: {
   item: any; api: Api; money: (value: number) => string; onLinked: (commitment: {id: string; name: string; kind?: string}) => void; onUnlinked?: () => void;
 }) {
@@ -31,8 +56,8 @@ export default function StatementCommitmentLink({item, api, money, onLinked, onU
     setOpen(false);
   }, Boolean(open || swapCommitment), 25);
   const loadCommitment = async () => {
-    const result = await api('/v1/commitments');
-    const found = (result.items || []).find((row: any) => row.commitment_id === item.commitment?.id);
+    const items = await fetchAllCommitments(api);
+    const found = items.find((row: any) => row.commitment_id === item.commitment?.id);
     if (!found) throw new Error('O compromisso não está mais na lista. Atualize o extrato.');
     return found;
   };
@@ -95,9 +120,9 @@ export default function StatementCommitmentLink({item, api, money, onLinked, onU
     setOpen(true);
     setLoading(true);
     try {
-      const result = await api('/v1/commitments');
+      const items = await fetchAllCommitments(api);
       if (!valid()) return;
-      setCommitments((result.items || []).filter((row: any) => row.status === 'ativo' || row.status === 'pausado'));
+      setCommitments(items.filter((row: any) => row.status === 'ativo' || row.status === 'pausado'));
     } catch (error: any) {
       if (valid()) Alert.alert('Não foi possível carregar compromissos', error.message);
     } finally {

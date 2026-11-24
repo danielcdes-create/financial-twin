@@ -3,14 +3,17 @@
 Never prints credentials. Not a cross-service point-in-time snapshot: stop writes
 before a production recovery backup; manifest records this limitation.
 """
-import argparse, gzip, hashlib, json, shutil, sys
+import argparse, gzip, hashlib, json, re, shutil, sys
 from pathlib import Path
 from datetime import datetime, timezone
-sys.path.insert(0,str(Path(__file__).parents[1]))
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from bson import json_util
 from pymongo import MongoClient
 from app.config import get_settings
 from app.main import configured_mongodb_uri
+from app.synthetic_testing import require_synthetic_target
+
+_SHA256_RE=re.compile(r'[0-9a-f]{64}')
 
 def digest(path):return hashlib.sha256(path.read_bytes()).hexdigest()
 def backup(db,target):
@@ -28,8 +31,12 @@ def backup(db,target):
         if batch.get('storage_key'):paths.add(batch['storage_key'])
     for asset in db.media_assets.find({},{'path':1}):
         if asset.get('path'):paths.add(asset['path'])
-    for event in db.raw_events.find({},{'media_storage_key':1,'raw_payload.storage_key':1}):
-        for path in (event.get('media_storage_key'),(event.get('raw_payload') or {}).get('storage_key')):
+    for event in db.raw_events.find({},{'media_storage_key':1,'raw_payload.storage_key':1,'ingest_payload.raw_payload.storage_key':1}):
+        for path in (
+            event.get('media_storage_key'),
+            (event.get('raw_payload') or {}).get('storage_key'),
+            ((event.get('ingest_payload') or {}).get('raw_payload') or {}).get('storage_key'),
+        ):
             if path:paths.add(path)
     for original in sorted(paths):
         path=Path(original)
@@ -46,9 +53,17 @@ def restore(client,name,folder,media_target):
     manifest=json.loads((folder/'manifest.json').read_text(encoding='utf8'))
     # Verify every byte before the first write.
     for key,item in manifest['collections'].items():
-        if digest(folder/(key+'.jsonl.gz'))!=item['sha256']:raise ValueError('Checksum inválido: '+key)
+        if '/' in key or '\\' in key or '..' in key:raise ValueError('Nome de coleção inválido: '+key)
+        col_sha=str(item.get('sha256') or '')
+        if not _SHA256_RE.fullmatch(col_sha):raise ValueError('Checksum inválido: '+key)
+        col_path=folder/(key+'.jsonl.gz')
+        if not col_path.is_file() or digest(col_path)!=col_sha:raise ValueError('Checksum inválido: '+key)
     for item in manifest['files'].values():
-        if not item.get('missing') and digest(folder/'media'/item['sha256'])!=item['sha256']:raise ValueError('Checksum de mídia inválido.')
+        if item.get('missing'):continue
+        file_sha=str(item.get('sha256') or '')
+        if not _SHA256_RE.fullmatch(file_sha):raise ValueError('SHA-256 de mídia inválido.')
+        media_file=folder/'media'/file_sha
+        if not media_file.is_file() or digest(media_file)!=file_sha:raise ValueError('Checksum de mídia inválido.')
     media_target.mkdir(parents=True,exist_ok=False)
     mapping={}
     for original,item in manifest['files'].items():
@@ -63,8 +78,11 @@ def restore(client,name,folder,media_target):
                 if key=='capture_batches' and row.get('storage_key') in mapping:row['storage_key']=mapping[row['storage_key']]
                 if key=='raw_events':
                     if row.get('media_storage_key') in mapping:row['media_storage_key']=mapping[row['media_storage_key']]
-                    raw=row.get('raw_payload') or {}
-                    if raw.get('storage_key') in mapping:raw['storage_key']=mapping[raw['storage_key']]
+                    raw=row.get('raw_payload')
+                    if isinstance(raw,dict) and raw.get('storage_key') in mapping:raw['storage_key']=mapping[raw['storage_key']]
+                    ingest_payload=row.get('ingest_payload')
+                    ingest_raw=ingest_payload.get('raw_payload') if isinstance(ingest_payload,dict) else None
+                    if isinstance(ingest_raw,dict) and ingest_raw.get('storage_key') in mapping:ingest_raw['storage_key']=mapping[ingest_raw['storage_key']]
                 db[key].insert_one(row)
         for index in json_util.loads(item['indexes']):
             if index['name']=='_id_':continue
@@ -74,9 +92,10 @@ def restore(client,name,folder,media_target):
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser();parser.add_argument('mode',choices=['backup','restore']);parser.add_argument('--directory',required=True);parser.add_argument('--test-database');parser.add_argument('--media-target');args=parser.parse_args()
+    if args.mode=='restore' and (not args.test_database or not args.media_target):parser.error('Restore exige --test-database e --media-target.')
     settings=get_settings()
-    with MongoClient(configured_mongodb_uri(settings),serverSelectionTimeoutMS=6000) as client:
+    uri=configured_mongodb_uri(settings)
+    if args.mode=='restore':require_synthetic_target(uri)
+    with MongoClient(uri,serverSelectionTimeoutMS=6000) as client:
         if args.mode=='backup':result=backup(client[settings.mongodb_database],Path(args.directory).resolve());print(json.dumps({'collections':len(result['collections']),'files':len(result['files'])}))
-        else:
-            if not args.test_database or not args.media_target:parser.error('Restore exige --test-database e --media-target.')
-            print(json.dumps(restore(client,args.test_database,Path(args.directory).resolve(),Path(args.media_target).resolve())))
+        else:print(json.dumps(restore(client,args.test_database,Path(args.directory).resolve(),Path(args.media_target).resolve())))

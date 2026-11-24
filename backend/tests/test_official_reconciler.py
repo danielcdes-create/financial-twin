@@ -8,8 +8,11 @@ from pathlib import Path
 
 from bson import ObjectId
 from bson.decimal128 import Decimal128
+from pymongo.errors import WriteError
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
+sys.path.insert(0, str(Path(__file__).parent))
+
 from app.financial_time import LOCAL_ZONE, day_start
 from app.official_reconciler import (
     apply_reconciliation_plan,
@@ -28,83 +31,20 @@ from app.popular_merchants import (
     extract_embedded_purchase_date,
     popular_alias_match,
 )
+from bson_schema_validator import (
+    BsonSchemaValidationError,
+    load_canonical_validators,
+    validate_bson_document,
+)
 from test_subcategories import CatalogCollection, CatalogDB
 
-FIXTURES_DIR = Path(__file__).parent / "fixtures"
-TX_SCHEMA = json.loads((FIXTURES_DIR / "transactions-validator.json").read_text(encoding="utf-8"))["validator"]["$jsonSchema"]
-ACC_SCHEMA = json.loads((FIXTURES_DIR / "accounts-validator.json").read_text(encoding="utf-8"))["validator"]["$jsonSchema"]
-BILL_SCHEMA = {
-    "bsonType": "object",
-    "additionalProperties": False,
-    "required": [
-        "_id", "external_key", "schema_version", "card_account_id", "competencia",
-        "data_vencimento", "saldo_anterior", "novos_lancamentos", "encargos",
-        "pagamentos", "valor_total", "status", "items", "created_at", "updated_at",
-    ],
-    "properties": {
-        "_id": {"bsonType": "objectId"},
-        "external_key": {"bsonType": "string"},
-        "schema_version": {"bsonType": "int"},
-        "card_account_id": {"bsonType": "objectId"},
-        "competencia": {"bsonType": "string"},
-        "data_vencimento": {"bsonType": "date"},
-        "saldo_anterior": {"bsonType": "decimal"},
-        "novos_lancamentos": {"bsonType": "decimal"},
-        "encargos": {"bsonType": "decimal"},
-        "pagamentos": {"bsonType": "decimal"},
-        "valor_pago": {"bsonType": "decimal"},
-        "saldo_aberto": {"bsonType": "decimal"},
-        "valor_total": {"bsonType": "decimal"},
-        "status": {"enum": ["aberta", "paga", "parcialmente_paga", "vencida"]},
-        "items": {"bsonType": "array"},
-        "created_at": {"bsonType": "date"},
-        "updated_at": {"bsonType": "date"},
-    },
-}
-OBL_SCHEMA = {
-    "bsonType": "object",
-    "additionalProperties": False,
-    "required": [
-        "_id", "external_key", "schema_version", "tipo", "origem_id",
-        "data_vencimento", "valor_original", "valor_pago", "saldo_aberto",
-        "principal", "status", "created_at", "updated_at",
-    ],
-    "properties": {
-        "_id": {"bsonType": "objectId"},
-        "external_key": {"bsonType": "string"},
-        "schema_version": {"bsonType": "int"},
-        "tipo": {"enum": ["fatura_cartao", "financiamento", "emprestimo", "imposto", "outro"]},
-        "origem_id": {"bsonType": "objectId"},
-        "competencia": {"bsonType": "string"},
-        "data_vencimento": {"bsonType": "date"},
-        "valor_original": {"bsonType": "decimal"},
-        "valor_pago": {"bsonType": "decimal"},
-        "saldo_aberto": {"bsonType": "decimal"},
-        "principal": {"bsonType": "decimal"},
-        "status": {"enum": ["futura", "paga", "parcialmente_paga", "vencida", "cancelada"]},
-        "created_at": {"bsonType": "date"},
-        "updated_at": {"bsonType": "date"},
-    },
-}
-
-
-def _assert_matches_bson_schema(doc: dict, schema: dict, label: str) -> None:
-    required = set(schema.get("required") or [])
-    missing = required - set(doc.keys())
-    if missing:
-        raise AssertionError(f"{label}: missing required keys {sorted(missing)}")
-    if schema.get("additionalProperties") is False:
-        allowed = set((schema.get("properties") or {}).keys())
-        extra = set(doc.keys()) - allowed
-        if extra:
-            raise AssertionError(f"{label}: forbidden additionalProperties {sorted(extra)}")
-    props = schema.get("properties") or {}
-    for key, val in doc.items():
-        spec = props.get(key) or {}
-        if "enum" in spec and val not in spec["enum"]:
-            raise AssertionError(f"{label}.{key}: {val!r} not in enum {spec['enum']}")
-        if "pattern" in spec and isinstance(val, str) and not re.match(spec["pattern"], val):
-            raise AssertionError(f"{label}.{key}: {val!r} does not match {spec['pattern']}")
+CANONICAL_SCHEMAS = load_canonical_validators()
+TX_SCHEMA = CANONICAL_SCHEMAS["transactions"]
+ACC_SCHEMA = CANONICAL_SCHEMAS["accounts"]
+BILL_SCHEMA = CANONICAL_SCHEMAS["credit_card_bills"]
+OBL_SCHEMA = CANONICAL_SCHEMAS["obligations"]
+PLAN_SCHEMA = CANONICAL_SCHEMAS["installment_plans"]
+REC_SCHEMA = CANONICAL_SCHEMAS["reconciliations"]
 
 
 class ReconcilerCollection(CatalogCollection):
@@ -113,12 +53,28 @@ class ReconcilerCollection(CatalogCollection):
         self._name = name
         self._validator_schema = validator_schema
 
+    def _validate(self, doc: dict) -> None:
+        if self._validator_schema is None:
+            return
+        try:
+            validate_bson_document(self._validator_schema, doc, path=self._name)
+        except BsonSchemaValidationError as exc:
+            raise WriteError(
+                f"Document failed validation ({self._name}): {exc}",
+                121,
+                {"code": 121, "errmsg": str(exc)},
+            ) from exc
+
     def _matches(self, doc, query):
         if not query:
             return True
         for field, expected in query.items():
             if field == "$or":
                 if not any(self._matches(doc, branch) for branch in expected):
+                    return False
+                continue
+            if field == "$and":
+                if not all(self._matches(doc, branch) for branch in expected):
                     return False
                 continue
             value = doc.get(field)
@@ -133,6 +89,10 @@ class ReconcilerCollection(CatalogCollection):
                     return False
                 if "$gte" in expected and (value is None or value < expected["$gte"]):
                     return False
+                if "$gt" in expected and (value is None or value <= expected["$gt"]):
+                    return False
+                if "$lte" in expected and (value is None or value > expected["$lte"]):
+                    return False
                 if "$lt" in expected and (value is None or value >= expected["$lt"]):
                     return False
                 if "$regex" in expected:
@@ -143,8 +103,10 @@ class ReconcilerCollection(CatalogCollection):
         return True
 
     def insert_one(self, doc):
-        if self._validator_schema is not None:
-            _assert_matches_bson_schema(doc, self._validator_schema, self._name)
+        candidate = dict(doc)
+        candidate.setdefault("_id", ObjectId())
+        self._validate(candidate)
+        doc.setdefault("_id", candidate["_id"])
         return super().insert_one(doc)
 
     def update_one(self, query, update, upsert=False):
@@ -152,8 +114,13 @@ class ReconcilerCollection(CatalogCollection):
         if self._validator_schema is not None:
             updated = self.find_one(query)
             if updated is not None:
-                _assert_matches_bson_schema(updated, self._validator_schema, self._name)
+                self._validate(updated)
         return res
+
+    def delete_one(self, query):
+        doc = self.find_one(query)
+        if doc is not None:
+            self.docs.remove(doc)
 
 
 class ReconcilerDB(CatalogDB):
@@ -162,6 +129,8 @@ class ReconcilerDB(CatalogDB):
         "accounts": ACC_SCHEMA,
         "credit_card_bills": BILL_SCHEMA,
         "obligations": OBL_SCHEMA,
+        "installment_plans": PLAN_SCHEMA,
+        "reconciliations": REC_SCHEMA,
     }
 
     def __missing__(self, key):
@@ -170,7 +139,7 @@ class ReconcilerDB(CatalogDB):
 
     def list_collections(self, filter=None):
         target = (filter or {}).get("name")
-        names = [target] if target else list(self.keys())
+        names = [target] if target else list(set(self.keys()) | set(self._SCHEMAS.keys()))
         out = []
         for name in names:
             schema = self._SCHEMAS.get(name)
@@ -322,7 +291,7 @@ class OfficialReconcilerTests(unittest.TestCase):
                 "updated_at": now,
                 "tipo_entidade": "marca",
                 "nome_padrao": "Burger King",
-                "aliases": [],
+                "aliases": [{"valor": "BURGER KING", "normalizado": "BURGER KING", "status": "confirmado"}],
             }
         )
         tx = _valid_ledger_tx(
@@ -367,9 +336,13 @@ class OfficialReconcilerTests(unittest.TestCase):
         self.assertEqual(summary["inserted_new"], 0)
 
         updated_tx = self.db.transactions.find_one({"_id": tx["_id"]})
+        validate_bson_document(TX_SCHEMA, updated_tx, path="transactions")
         self.assertEqual(updated_tx["status_conciliacao"], "confirmado")
         self.assertEqual(updated_tx["descricao_original"], "Burger King")
         self.assertIsNotNone(updated_tx.get("platform_id"))
+
+        validate_bson_document(BILL_SCHEMA, self.db.credit_card_bills.docs[0], path="credit_card_bills")
+        validate_bson_document(OBL_SCHEMA, self.db.obligations.docs[0], path="obligations")
 
         updated_merchant = self.db.merchants.find_one({"_id": bk_id})
         self.assertEqual(updated_merchant["nome_padrao"], "Burger King")
@@ -421,6 +394,48 @@ class OfficialReconcilerTests(unittest.TestCase):
         self.assertEqual(summary2["updated_existing"], 0)
         self.assertEqual(summary2["inserted_new"], 0)
         self.assertEqual(len(self.db.provisional_transactions.docs), 2)
+
+    def test_idempotent_second_run_already_reconciled_on_bank_statement(self):
+        existing_tx = _valid_ledger_tx(
+            account_id=self.checking_id,
+            dt=date(2026, 11, 5),
+            valor="-42.00",
+            descricao="DROGARIA ARAUJO",
+            categoria="Saúde",
+            subcategoria="Farmácia",
+        )
+        self.db.transactions.insert_one(existing_tx)
+
+        bank_doc = OfficialStatementDocument(
+            doc_key="extrato_itau_20261101_20261115",
+            filename="extrato_idemp.pdf",
+            sha256="c1" * 32,
+            kind="bank_statement",
+            institution="Itaú",
+            account_profile_key="itau",
+            period_start="2026-11-01",
+            period_end="2026-11-15",
+            opening_balance="500.00",
+            closing_balance="433.00",
+            closing_as_of="2026-11-15",
+            items=[
+                _make_item("extrato_itau_20261101_20261115", 1, "profile:itau", "2026-11-05", "-42.00", "COMPRA CARTAO DEB DROGARIA ARAUJO"),
+                _make_item("extrato_itau_20261101_20261115", 2, "profile:itau", "2026-11-08", "-25.00", "PIX QRS PADARIA NOVA"),
+            ],
+        )
+        plans1, targets1 = build_reconciliation_plan(self.db, [bank_doc])
+        self.assertEqual([p.status for p in plans1], ["matched_exact", "missing"])
+        summary1 = apply_reconciliation_plan(self.db, [bank_doc], plans1, targets1)
+        self.assertEqual(summary1["updated_existing"], 1)
+        self.assertEqual(summary1["inserted_new"], 1)
+
+        plans2, targets2 = build_reconciliation_plan(self.db, [bank_doc])
+        self.assertEqual([p.status for p in plans2], ["already_reconciled", "already_reconciled"])
+        summary2 = apply_reconciliation_plan(self.db, [bank_doc], plans2, targets2)
+        self.assertEqual(summary2["updated_existing"], 0)
+        self.assertEqual(summary2["inserted_new"], 0)
+        self.assertEqual(len(self.db.transactions.docs), 1)
+        self.assertEqual(len(self.db.provisional_transactions.docs), 1)
 
     def test_pgconta_principal_match_inserts_only_financing_fee_and_syncs_new_card_and_balances(self):
         self.db.provisional_transactions.insert_one(
@@ -523,6 +538,240 @@ class OfficialReconcilerTests(unittest.TestCase):
         self.assertEqual(snap["as_of"], expected_cutoff)
         self.assertEqual(snap["reference_kind"], "civil_day")
         self.assertEqual(snap["as_of_date"], "2026-11-13")
+
+    def test_pix_no_cartao_principal_and_fee_split_on_matched_and_missing_items(self):
+        # Seed pre-existing valid card bill + obligation so bill sync updates instead of creating
+        now = datetime(2026, 11, 1, 12, 0, tzinfo=timezone.utc)
+        bill_oid = ObjectId()
+        due_utc = day_start(date(2026, 11, 20))
+        self.db.credit_card_bills.insert_one({
+            "_id": bill_oid,
+            "external_key": "bill-fatura-itau-1111-202611",
+            "schema_version": 2,
+            "card_account_id": self.card_id,
+            "competencia": "2026-11",
+            "data_vencimento": due_utc,
+            "saldo_anterior": Decimal128("0.00"),
+            "novos_lancamentos": Decimal128("100.00"),
+            "encargos": Decimal128("0.00"),
+            "pagamentos": Decimal128("0.00"),
+            "valor_total": Decimal128("100.00"),
+            "status": "aberta",
+            "items": [],
+            "created_at": now,
+            "updated_at": now,
+        })
+        self.db.obligations.insert_one({
+            "_id": ObjectId(),
+            "external_key": "obl-fatura-itau-1111-202611",
+            "schema_version": 2,
+            "tipo": "fatura_cartao",
+            "origem_id": bill_oid,
+            "competencia": "2026-11",
+            "data_vencimento": due_utc,
+            "valor_original": Decimal128("100.00"),
+            "principal": Decimal128("100.00"),
+            "juros": Decimal128("0.00"),
+            "multa": Decimal128("0.00"),
+            "mora": Decimal128("0.00"),
+            "tarifas": Decimal128("0.00"),
+            "seguros": Decimal128("0.00"),
+            "outros_encargos": Decimal128("0.00"),
+            "dias_atraso": 0,
+            "saldo_aberto": Decimal128("100.00"),
+            "status": "aberta",
+            "created_at": now,
+            "updated_at": now,
+        })
+
+        # Item 1 has a matching principal capture (-200.00); Item 2 is completely missing (-100.00 + -6.00 fee)
+        self.db.provisional_transactions.insert_one({
+            "_id": ObjectId(),
+            "provisional_id": "prov-pix-card-1",
+            "status": "provisional",
+            "data_evento": day_start(date(2026, 11, 5)),
+            "valor": Decimal128("-200.00"),
+            "vendedor": "Oficina Central",
+            "categoria_sugerida": "Transporte",
+            "subcategoria": "Manutenção",
+            "account_id": self.card_id,
+        })
+        doc = OfficialStatementDocument(
+            doc_key="fatura_itau_1111_202611",
+            filename="fatura_pix_cartao.pdf",
+            sha256="d2" * 32,
+            kind="card_statement",
+            institution="Itaú",
+            card_final="1111",
+            competencia="2026-11",
+            due_date="2026-11-20",
+            total_amount="318.50",
+            status="aberta",
+            items=[
+                _make_item(
+                    "fatura_itau_1111_202611",
+                    1,
+                    "card:itau:1111",
+                    "2026-11-05",
+                    "-212.50",
+                    "PIX NO CARTAO OFICINA CENTRAL",
+                    principal_amount="-200.00",
+                    fee_amount="-12.50",
+                ),
+                _make_item(
+                    "fatura_itau_1111_202611",
+                    2,
+                    "card:itau:1111",
+                    "2026-11-06",
+                    "-106.00",
+                    "PIX NO CARTAO FARMACIA CENTRAL",
+                    principal_amount="-100.00",
+                    fee_amount="-6.00",
+                ),
+            ],
+        )
+
+        plans, targets = build_reconciliation_plan(self.db, [doc])
+        self.assertEqual([p.status for p in plans], ["matched_principal", "missing"])
+        self.assertTrue(plans[0].insert_missing_fee)
+
+        summary = apply_reconciliation_plan(self.db, [doc], plans, targets)
+        self.assertEqual(summary["updated_existing"], 1)
+        self.assertEqual(summary["inserted_new"], 1)
+        self.assertEqual(summary["inserted_fees"], 2)
+
+        amounts = sorted(str(r["valor"]) for r in self.db.provisional_transactions.docs)
+        self.assertEqual(amounts, ["-100.00", "-12.50", "-200.00", "-6.00"])
+        fees = [r for r in self.db.provisional_transactions.docs if r.get("natureza") == "TARIFA_ENCARGO"]
+        self.assertEqual(len(fees), 2)
+
+        # Idempotent replay does not insert extra principal or fee captures
+        plans2, targets2 = build_reconciliation_plan(self.db, [doc])
+        self.assertEqual([p.status for p in plans2], ["already_reconciled", "already_reconciled"])
+        summary2 = apply_reconciliation_plan(self.db, [doc], plans2, targets2)
+        self.assertEqual(summary2["inserted_new"], 0)
+        self.assertEqual(summary2["inserted_fees"], 0)
+
+    def test_existing_credit_card_bill_update_and_installment_plan_sync(self):
+        now = datetime(2026, 11, 1, 12, 0, tzinfo=timezone.utc)
+        bill_oid = ObjectId()
+        plan_oid = ObjectId()
+        tx_01 = _valid_ledger_tx(
+            account_id=self.card_id,
+            dt=date(2026, 10, 12),
+            valor="-150.00",
+            descricao="MAGALU 01/03",
+            categoria="Compras",
+            subcategoria=None,
+        )
+        tx_01["installment"] = {"plan_id": plan_oid, "numero": 1, "total": 3}
+        self.db.transactions.insert_one(tx_01)
+
+        self.db.installment_plans.insert_one({
+            "_id": plan_oid,
+            "external_key": "plan-magalu-3x",
+            "schema_version": 2,
+            "transaction_origin_id": tx_01["_id"],
+            "data_compra": day_start(date(2026, 10, 12)),
+            "descricao": "MAGALU",
+            "valor_total_compra": Decimal128("450.00"),
+            "valor_total_source": "derived",
+            "numero_parcelas": 3,
+            "valor_base_parcela": Decimal128("150.00"),
+            "status": "ativo",
+            "installments": [
+                {"numero": 1, "competencia": "2026-10", "valor": Decimal128("150.00"), "status": "paga", "transaction_id": tx_01["_id"]},
+                {"numero": 2, "competencia": "2026-11", "valor": Decimal128("150.00"), "status": "projetada"},
+                {"numero": 3, "competencia": "2026-12", "valor": Decimal128("150.00"), "status": "projetada"},
+            ],
+            "created_at": now,
+            "updated_at": now,
+        })
+
+        due_utc = day_start(date(2026, 11, 20))
+        self.db.credit_card_bills.insert_one({
+            "_id": bill_oid,
+            "external_key": "bill-itau-1111-2026-11",
+            "schema_version": 2,
+            "card_account_id": self.card_id,
+            "competencia": "2026-11",
+            "data_vencimento": due_utc,
+            "saldo_anterior": Decimal128("0.00"),
+            "novos_lancamentos": Decimal128("120.00"),
+            "encargos": Decimal128("0.00"),
+            "pagamentos": Decimal128("0.00"),
+            "valor_pago": Decimal128("0.00"),
+            "saldo_aberto": Decimal128("120.00"),
+            "valor_total": Decimal128("120.00"),
+            "status": "aberta",
+            "items": [],
+            "created_at": now,
+            "updated_at": now,
+        })
+        self.db.obligations.insert_one({
+            "_id": ObjectId(),
+            "external_key": "obl-itau-1111-2026-11",
+            "schema_version": 2,
+            "tipo": "fatura_cartao",
+            "origem_id": bill_oid,
+            "competencia": "2026-11",
+            "data_vencimento": due_utc,
+            "valor_original": Decimal128("120.00"),
+            "valor_pago": Decimal128("0.00"),
+            "principal": Decimal128("120.00"),
+            "juros": Decimal128("0.00"),
+            "multa": Decimal128("0.00"),
+            "mora": Decimal128("0.00"),
+            "tarifas": Decimal128("0.00"),
+            "seguros": Decimal128("0.00"),
+            "outros_encargos": Decimal128("0.00"),
+            "dias_atraso": 0,
+            "saldo_aberto": Decimal128("120.00"),
+            "status": "aberta",
+            "created_at": now,
+            "updated_at": now,
+        })
+
+        item_02 = _make_item("fatura_itau_1111_202611", 1, "card:itau:1111", "2026-10-12", "-150.00", "MAGALU 02/03")
+        item_02.installment_number = 2
+        item_02.installment_total = 3
+        item_02.prior_cycle_installment = True
+        item_02.statement_month = "2026-11"
+
+        doc = OfficialStatementDocument(
+            doc_key="fatura_itau_1111_202611",
+            filename="fatura_nov_paid.pdf",
+            sha256="e4" * 32,
+            kind="card_statement",
+            institution="Itaú",
+            card_final="1111",
+            competencia="2026-11",
+            due_date="2026-11-20",
+            paid_date="2026-11-18",
+            total_amount="150.00",
+            status="paga",
+            items=[item_02],
+        )
+        plans, targets = build_reconciliation_plan(self.db, [doc])
+        self.assertEqual(plans[0].status, "missing")
+        summary = apply_reconciliation_plan(self.db, [doc], plans, targets)
+        self.assertEqual(summary["inserted_new"], 1)
+
+        updated_bill = self.db.credit_card_bills.find_one({"_id": bill_oid})
+        updated_obl = self.db.obligations.find_one({"origem_id": bill_oid})
+        validate_bson_document(BILL_SCHEMA, updated_bill, path="credit_card_bills")
+        validate_bson_document(OBL_SCHEMA, updated_obl, path="obligations")
+        self.assertEqual(updated_bill["status"], "paga")
+        self.assertEqual(updated_bill["valor_total"].to_decimal(), Decimal("150.00"))
+        self.assertEqual(updated_bill["saldo_aberto"].to_decimal(), Decimal("0.00"))
+        self.assertEqual(updated_obl["status"], "paga")
+        self.assertEqual(updated_obl["saldo_aberto"].to_decimal(), Decimal("0.00"))
+        self.assertIsNotNone(updated_obl.get("data_liquidacao"))
+
+        inserted_cap = self.db.provisional_transactions.docs[0]
+        self.assertEqual(inserted_cap["competencia"], "2026-11")
+        self.assertEqual(inserted_cap["parcela_numero"], 2)
+        self.assertEqual(inserted_cap["parcela_total"], 3)
 
     def test_correlate_parsed_statements_marks_card_bill_paid(self):
         bill = OfficialStatementDocument(
@@ -680,9 +929,9 @@ class OfficialReconcilerTests(unittest.TestCase):
         self.assertEqual(inserted.get("parcela_numero"), 5)
 
     def test_deleted_and_cancelled_movements_are_not_resurrected(self):
-        # P0-05: deleted_movements and cancelled captures must be skipped
+        # P0-05: deleted_movements and cancelled captures must be skipped (both bank & card statements)
         deleted_tx = _valid_ledger_tx(
-            account_id=self.card_id,
+            account_id=self.checking_id,
             dt=date(2026, 11, 3),
             valor="-89.90",
             descricao="PETZ",
@@ -706,30 +955,59 @@ class OfficialReconcilerTests(unittest.TestCase):
                 "data_evento": day_start(date(2026, 11, 4)),
                 "valor": Decimal128("-22.50"),
                 "vendedor": "Uber",
-                "account_id": self.card_id,
+                "account_profile_id": "itau",
             }
         )
-        doc = OfficialStatementDocument(
-            doc_key="fatura_itau_1111_202611",
-            filename="fatura.pdf",
+        bank_doc = OfficialStatementDocument(
+            doc_key="extrato_itau_20261101_20261110",
+            filename="extrato_tombstone.pdf",
             sha256="3" * 64,
-            kind="card_statement",
+            kind="bank_statement",
             institution="Itaú",
-            card_final="1111",
-            competencia="2026-11",
-            due_date="2026-11-20",
-            total_amount="112.40",
-            status="aberta",
+            account_profile_key="itau",
+            period_start="2026-11-01",
+            period_end="2026-11-10",
+            opening_balance="200.00",
+            closing_balance="87.60",
+            closing_as_of="2026-11-10",
             items=[
-                _make_item("fatura_itau_1111_202611", 1, "card:itau:1111", "2026-11-03", "-89.90", "PETZ"),
-                _make_item("fatura_itau_1111_202611", 2, "card:itau:1111", "2026-11-04", "-22.50", "UBER *TRIP"),
+                _make_item("extrato_itau_20261101_20261110", 1, "profile:itau", "2026-11-03", "-89.90", "COMPRA CARTAO DEB PETZ"),
+                _make_item("extrato_itau_20261101_20261110", 2, "profile:itau", "2026-11-04", "-22.50", "PIX QRS UBER *TRIP"),
             ],
         )
-        plans, targets = build_reconciliation_plan(self.db, [doc])
+        plans, targets = build_reconciliation_plan(self.db, [bank_doc])
         self.assertEqual([p.status for p in plans], ["skipped_deleted_by_user", "skipped_deleted_by_user"])
-        summary = apply_reconciliation_plan(self.db, [doc], plans, targets)
+        summary = apply_reconciliation_plan(self.db, [bank_doc], plans, targets)
         self.assertEqual(summary["inserted_new"], 0)
         self.assertEqual(summary["skipped_deleted_by_user"], 2)
+
+        # Also verify Pass-1 tombstone when a previously reconciled capture is later cancelled by user
+        live_doc = OfficialStatementDocument(
+            doc_key="extrato_itau_20261111_20261115",
+            filename="extrato_pass1.pdf",
+            sha256="3b" * 32,
+            kind="bank_statement",
+            institution="Itaú",
+            account_profile_key="itau",
+            period_start="2026-11-11",
+            period_end="2026-11-15",
+            opening_balance="87.60",
+            closing_balance="57.60",
+            closing_as_of="2026-11-15",
+            items=[
+                _make_item("extrato_itau_20261111_20261115", 1, "profile:itau", "2026-11-12", "-30.00", "PIX QRS PADARIA REAL"),
+            ],
+        )
+        p_live, t_live = build_reconciliation_plan(self.db, [live_doc])
+        apply_reconciliation_plan(self.db, [live_doc], p_live, t_live)
+        inserted_prov = next(r for r in self.db.provisional_transactions.docs if str(r["valor"]) == "-30.00")
+        inserted_prov["status"] = "cancelled"
+
+        p_after_cancel, t_after_cancel = build_reconciliation_plan(self.db, [live_doc])
+        self.assertEqual([p.status for p in p_after_cancel], ["skipped_deleted_by_user"])
+        s_after = apply_reconciliation_plan(self.db, [live_doc], p_after_cancel, t_after_cancel)
+        self.assertEqual(s_after["inserted_new"], 0)
+        self.assertEqual(s_after["skipped_deleted_by_user"], 1)
 
     def test_overlapping_bank_statements_and_reordered_rows_do_not_duplicate(self):
         # P0-07: partial + full Itaú statement in same batch deduplicate items and keep latest closing balance

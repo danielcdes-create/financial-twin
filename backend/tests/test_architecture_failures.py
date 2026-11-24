@@ -106,14 +106,58 @@ class ArchitectureFailureTests(unittest.TestCase):
             with self.assertRaises(ValueError): store_media(db,b"tampered",digest,".pdf")
 
     def test_cursor_page_orders_sources_without_repeating_anchor(self):
-        stamp=datetime(2026,9,28,12,tzinfo=timezone.utc)
-        db=FakeDB(transactions=ReviewCollection([{"_id":ObjectId(),"data_evento":stamp,"descricao_original":"A"}]),provisional_transactions=ReviewCollection([{"_id":ObjectId(),"provisional_id":"capture-1","data_evento":stamp,"status":"confirmed","merchant_raw":"B"}]))
-        first=cursor_movements(1,None,None,None,None,None,None,db)
-        self.assertEqual(first["items"][0]["movement_source"],"capture")
-        self.assertTrue(first["next_cursor"])
-        # The fake matcher ignores nested cursor clauses; verify the cursor is generated for the selected source.
         from app.main import decode_movement_cursor
-        self.assertEqual(decode_movement_cursor(first["next_cursor"])[1],"capture")
+
+        t_newest = datetime(2026, 9, 29, 12, tzinfo=timezone.utc)
+        t_tie = datetime(2026, 9, 28, 12, tzinfo=timezone.utc)
+        t_oldest = datetime(2026, 9, 27, 12, tzinfo=timezone.utc)
+
+        oid_cap_a = ObjectId("66f800000000000000000002")
+        oid_cap_b = ObjectId("66f800000000000000000004")
+        oid_led_newest = ObjectId("66f800000000000000000005")
+        oid_led_tie = ObjectId("66f800000000000000000003")
+        oid_led_oldest = ObjectId("66f800000000000000000001")
+
+        # Seed out-of-order to ensure Collection.find(...).sort(...) actually sorts
+        db = FakeDB(
+            transactions=Collection([
+                {"_id": oid_led_oldest, "data_evento": t_oldest, "descricao_original": "L-oldest"},
+                {"_id": oid_led_newest, "data_evento": t_newest, "descricao_original": "L-newest"},
+                {"_id": oid_led_tie, "data_evento": t_tie, "descricao_original": "L-tie"},
+            ]),
+            provisional_transactions=Collection([
+                {"_id": oid_cap_a, "provisional_id": "cap-a", "data_evento": t_tie, "status": "confirmed", "merchant_raw": "C-tie-a"},
+                {"_id": oid_cap_b, "provisional_id": "cap-b", "data_evento": t_tie, "status": "confirmed", "merchant_raw": "C-tie-b"},
+            ]),
+        )
+
+        page1 = cursor_movements(2, None, None, None, None, None, None, db)
+        self.assertTrue(page1["has_more"])
+        self.assertTrue(page1["next_cursor"])
+        self.assertEqual(decode_movement_cursor(page1["next_cursor"])[1], "capture")
+
+        page2 = cursor_movements(2, page1["next_cursor"], None, None, None, None, None, db)
+        self.assertTrue(page2["has_more"])
+        self.assertTrue(page2["next_cursor"])
+        self.assertEqual(decode_movement_cursor(page2["next_cursor"])[1], "ledger")
+
+        page3 = cursor_movements(2, page2["next_cursor"], None, None, None, None, None, db)
+        self.assertFalse(page3["has_more"])
+        self.assertIsNone(page3["next_cursor"])
+
+        def _label(item):
+            return item.get("provisional_id") if item["movement_source"] == "capture" else item.get("descricao_original")
+
+        labels_p1 = [_label(x) for x in page1["items"]]
+        labels_p2 = [_label(x) for x in page2["items"]]
+        labels_p3 = [_label(x) for x in page3["items"]]
+        self.assertEqual(labels_p1, ["L-newest", "cap-b"])
+        self.assertEqual(labels_p2, ["cap-a", "L-tie"])
+        self.assertEqual(labels_p3, ["L-oldest"])
+
+        combined = labels_p1 + labels_p2 + labels_p3
+        self.assertEqual(len(combined), 5)
+        self.assertEqual(len(set(combined)), 5)
 
 
 if __name__=="__main__": unittest.main()

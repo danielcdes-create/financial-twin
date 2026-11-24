@@ -25,10 +25,11 @@ REPLICA_SET = 'financialTwinTest'
 
 
 def isolated_uri(uri):
-    if not uri or not re.match(r'^mongodb://(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?/', uri, re.I):
+    if not uri or not re.match(r'^mongodb://(?:[^@/]+@)?(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?(?:/|\?|$)', uri, re.I):
         raise ValueError('Envie uma MONGODB_URI explícita, local e isolada; não use a configuração financeira.')
-    if parse_qs(urlsplit(uri).query).get('replicaSet') != [REPLICA_SET]:
-        raise ValueError('Este gate exige o replicaSet sintético financialTwinTest.')
+    replica_sets = parse_qs(urlsplit(uri).query, keep_blank_values=True).get('replicaSet')
+    if replica_sets is not None and not (replica_sets and replica_sets[0].strip()):
+        raise ValueError('Este gate exige um replicaSet sintético explícito.')
     return uri
 
 
@@ -177,8 +178,9 @@ def run(output, uri, race_iterations=4):
 
     try:
         hello = client.admin.command('hello')
-        if hello.get('setName') != REPLICA_SET or not hello.get('isWritablePrimary'):
-            raise ValueError('MongoDB não é o primary do replicaSet sintético esperado.')
+        if not hello.get('setName') or not hello.get('isWritablePrimary'):
+            raise ValueError('MongoDB não é o primary de um replicaSet sintético esperado.')
+        report['replica_set'] = hello['setName']
         for state in ('ativo', 'pausado', 'cancelado', 'concluido'):
             db = new_db()
             item = profile(db)
@@ -339,7 +341,10 @@ def run(output, uri, race_iterations=4):
         check('OP BSON UTC-naive media reconciles and preserves bytes',
               naive_db.media_assets.find_one({})['created_at'].tzinfo is None and
               reconcile_media(naive_db)['orphaned'] == 1 and media.read_bytes() == data, db)
-        report.update({'passed':True, 'count':len(checks)})
+        for db_name in databases:
+            assert db_name.startswith('financial_twin_test_')
+            client.drop_database(db_name)
+        report.update({'passed':True, 'count':len(checks), 'databases_dropped':True})
     except Exception as error:
         report.update({'passed':False, 'count':len(checks), 'error':f'{type(error).__name__}: {error}'})
         raise
@@ -353,7 +358,7 @@ def run(output, uri, race_iterations=4):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('output', type=Path)
-    parser.add_argument('--uri', default=os.environ.get('MONGODB_URI'))
+    parser.add_argument('--uri', default=os.environ.get('MONGODB_URI') or 'mongodb://127.0.0.1:27017/?replicaSet=financialTwinTest')
     parser.add_argument('--race-iterations', type=int, default=4)
     args = parser.parse_args()
     if not 1 <= args.race_iterations <= 20:

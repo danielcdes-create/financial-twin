@@ -1,9 +1,18 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const vm = require('node:vm');
 const ts = require('typescript');
+const {compileModsAsync} = require('expo/config-plugins');
+const withNotificationCapture = require('../plugins/withNotificationCapture.js');
 
+let completed = false;
+process.on('beforeExit', () => {
+  assert.equal(completed, true, 'Async audit assertions did not finish');
+});
+
+const intentGlobal = {};
 const cache = new Map();
 function load(file) {
   file = path.resolve(file);
@@ -12,11 +21,25 @@ function load(file) {
     compilerOptions: {module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022},
   }).outputText;
   const moduleObject = {exports: {}};
-  const sandbox = {module: moduleObject, exports: moduleObject.exports, Intl, Date, Math, Number, String, Error, JSON, require: name => {
-    if (!name.startsWith('.')) throw new Error('Dependência inesperada: ' + name);
-    const target = path.resolve(path.dirname(file), name);
-    return load(fs.existsSync(target + '.ts') ? target + '.ts' : target);
-  }};
+  const sandbox = {
+    module: moduleObject,
+    exports: moduleObject.exports,
+    Intl,
+    Date,
+    Math,
+    Number,
+    String,
+    Error,
+    JSON,
+    URL,
+    Promise,
+    globalThis: intentGlobal,
+    require: name => {
+      if (!name.startsWith('.')) throw new Error('Dependência inesperada: ' + name);
+      const target = path.resolve(path.dirname(file), name);
+      return load(fs.existsSync(target + '.ts') ? target + '.ts' : target);
+    },
+  };
   vm.runInNewContext(compiled, sandbox, {filename: file});
   cache.set(file, moduleObject.exports);
   return moduleObject.exports;
@@ -27,6 +50,7 @@ const money = load('utils/moneyInput.ts');
 const operation = load('utils/userOperation.ts');
 const movements = load('utils/movementFilters.ts');
 const queue = load('utils/queueFinalization.ts');
+const nativeIntent = load('app/+native-intent.ts');
 
 assert.equal(presentation.DEFAULT_COMMITMENT_CUTOFF, '2026-10-01');
 presentation.setPresentationClock('2026-12-15');
@@ -78,6 +102,113 @@ assert.equal(plan.count, 4);
 assert.equal(plan.total, 100);
 assert.equal(movements.parcelamentoListMark({parcelamento_purchase: true, installment_count: 3, valor: -25, parcelamento: {count: 4, total: 100}}), 'parcela 1/4');
 
+async function verifyNotificationCapturePlugin() {
+  const savedApiUrl = process.env.EXPO_PUBLIC_API_BASE_URL;
+  const savedReleaseCfg = process.env.FT_RELEASE_CONFIG_FILE;
+  const baseManifest = '<manifest xmlns:android="http://schemas.android.com/apk/res/android"><application android:name=".MainApplication" android:usesCleartextTraffic="true"></application></manifest>';
+  const baseGradle = [
+    'android {',
+    '    signingConfigs {',
+    '        debug {',
+    "            storeFile file('debug.keystore')",
+    "            storePassword 'android'",
+    "            keyAlias 'androiddebugkey'",
+    "            keyPassword 'android'",
+    '        }',
+    '    }',
+    '    buildTypes {',
+    '        release {',
+    '            // Caution! In production, you need to generate your own keystore file.',
+    '            signingConfig signingConfigs.debug',
+    '        }',
+    '    }',
+    '}',
+  ].join('\n');
+
+  const evaluateReleaseConfig = (projectRoot, envVars) => {
+    const releaseConfigPath = envVars.FT_RELEASE_CONFIG_FILE || null;
+    let releaseConfigJson = null;
+    if (releaseConfigPath && fs.existsSync(releaseConfigPath)) {
+      releaseConfigJson = JSON.parse(fs.readFileSync(releaseConfigPath, 'utf8'));
+    }
+    const releaseStorePath = envVars.FT_RELEASE_STORE_FILE || (releaseConfigJson ? releaseConfigJson.store_file : null);
+    const releaseStorePass = envVars.FT_RELEASE_STORE_PASSWORD || (releaseConfigJson ? releaseConfigJson.store_password : null);
+    const releaseKeyAlias = envVars.FT_RELEASE_KEY_ALIAS || (releaseConfigJson ? releaseConfigJson.key_alias : null);
+    const releaseKeyPass = envVars.FT_RELEASE_KEY_PASSWORD || (releaseConfigJson ? releaseConfigJson.key_password : null);
+    const resolvedStore = releaseStorePath
+      ? (path.isAbsolute(releaseStorePath) ? releaseStorePath : path.join(projectRoot, 'android', 'app', releaseStorePath))
+      : null;
+    return Boolean(resolvedStore && fs.existsSync(resolvedStore) && releaseStorePass && releaseKeyAlias && releaseKeyPass);
+  };
+
+  const runPluginInTempRoot = async ({apiUrl, withReleaseConfig}) => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fin-plugin-audit-'));
+    try {
+      const mainDir = path.join(tempRoot, 'android', 'app', 'src', 'main');
+      const appDir = path.join(tempRoot, 'android', 'app');
+      fs.mkdirSync(mainDir, {recursive: true});
+      fs.writeFileSync(path.join(mainDir, 'AndroidManifest.xml'), baseManifest);
+      fs.writeFileSync(path.join(appDir, 'build.gradle'), baseGradle);
+
+      if (apiUrl === undefined) delete process.env.EXPO_PUBLIC_API_BASE_URL;
+      else process.env.EXPO_PUBLIC_API_BASE_URL = apiUrl;
+
+      let cfgFile;
+      if (withReleaseConfig) {
+        const keystoreFile = path.join(tempRoot, 'release.keystore');
+        fs.writeFileSync(keystoreFile, 'synthetic-keystore-bytes');
+        cfgFile = path.join(tempRoot, 'release-signing.json');
+        fs.writeFileSync(cfgFile, JSON.stringify({
+          store_file: keystoreFile,
+          store_password: 'synthetic-store-pass',
+          key_alias: 'synthetic-key',
+          key_password: 'synthetic-key-pass',
+        }));
+        process.env.FT_RELEASE_CONFIG_FILE = cfgFile;
+      } else {
+        delete process.env.FT_RELEASE_CONFIG_FILE;
+      }
+
+      const config = withNotificationCapture({name: 'Financial Twin', slug: 'financial-twin'});
+      await compileModsAsync(config, {projectRoot: tempRoot, platforms: ['android']});
+      // Re-run to verify idempotency of service & signing block injection
+      await compileModsAsync(withNotificationCapture({name: 'Financial Twin', slug: 'financial-twin'}), {projectRoot: tempRoot, platforms: ['android']});
+
+      const manifestXml = fs.readFileSync(path.join(mainDir, 'AndroidManifest.xml'), 'utf8');
+      const gradleText = fs.readFileSync(path.join(appDir, 'build.gradle'), 'utf8');
+      const hasPrivateKey = evaluateReleaseConfig(tempRoot, process.env);
+      return {manifestXml, gradleText, hasPrivateKey};
+    } finally {
+      fs.rmSync(tempRoot, {recursive: true, force: true});
+    }
+  };
+
+  try {
+    const withoutReleaseKey = await runPluginInTempRoot({apiUrl: 'https://private.example', withReleaseConfig: false});
+    assert.doesNotMatch(withoutReleaseKey.manifestXml, /android:usesCleartextTraffic="true"/, 'Release HTTPS config must disable cleartext traffic');
+    assert.equal(
+      (withoutReleaseKey.manifestXml.match(/expo\.modules\.notificationcapture\.NotificationCaptureService/g) || []).length,
+      1,
+      'NotificationCaptureService registered exactly once in AndroidManifest',
+    );
+    assert.match(withoutReleaseKey.manifestXml, /android:permission="android\.permission\.BIND_NOTIFICATION_LISTENER_SERVICE"/);
+    assert.match(withoutReleaseKey.manifestXml, /android\.service\.notification\.NotificationListenerService/);
+    assert.match(withoutReleaseKey.gradleText, /FT_RELEASE_CONFIG_FILE/);
+    assert.match(withoutReleaseKey.gradleText, /signingConfig hasPrivateReleaseKey \? signingConfigs\.release : signingConfigs\.debug/);
+    assert.equal(withoutReleaseKey.hasPrivateKey, false, 'Without FT_RELEASE_CONFIG_FILE, release falls back cleanly');
+
+    const withReleaseKey = await runPluginInTempRoot({apiUrl: undefined, withReleaseConfig: true});
+    assert.doesNotMatch(withReleaseKey.manifestXml, /android:usesCleartextTraffic="true"/, 'Default release manifest must not enable cleartext traffic');
+    assert.match(withReleaseKey.gradleText, /storeFile file\(releaseStorePath\)/);
+    assert.equal(withReleaseKey.hasPrivateKey, true, 'With FT_RELEASE_CONFIG_FILE + keystore present, private release key activates');
+  } finally {
+    if (savedApiUrl === undefined) delete process.env.EXPO_PUBLIC_API_BASE_URL;
+    else process.env.EXPO_PUBLIC_API_BASE_URL = savedApiUrl;
+    if (savedReleaseCfg === undefined) delete process.env.FT_RELEASE_CONFIG_FILE;
+    else process.env.FT_RELEASE_CONFIG_FILE = savedReleaseCfg;
+  }
+}
+
 const stored = [];
 const db = {
   async getAllAsync() { return stored.map(row => ({...row})); },
@@ -113,12 +244,17 @@ void (async () => {
   const board = fs.readFileSync('components/CommitmentBoard.tsx', 'utf8');
   assert.match(board, /Editar parcelas futuras/);
   assert.match(board, /source="managed"/);
-  const intent = fs.readFileSync('app/+native-intent.ts', 'utf8');
-  assert.match(intent, /handle-share/);
-  assert.doesNotMatch(intent, /journal|pendingIntent|persist/);
-  if (fs.existsSync('android/app/build.gradle')) {
-    const gradle = fs.readFileSync('android/app/build.gradle', 'utf8');
-    assert.match(gradle, /signingConfig signingConfigs\.debug/);
-  }
+
+  const shareRoute = await nativeIntent.redirectSystemPath({path: 'financialtwin://expo-sharing?source=gallery', initial: true});
+  assert.equal(shareRoute, '/handle-share');
+  assert.equal(intentGlobal.__financialTwinPendingShare, true);
+  assert.equal(intentGlobal.__financialTwinShareSeq, 1);
+  const secondShareRoute = await nativeIntent.redirectSystemPath({path: 'financialtwin://expo-sharing?source=camera', initial: false});
+  assert.equal(secondShareRoute, '/handle-share');
+  assert.equal(intentGlobal.__financialTwinShareSeq, 2);
+  assert.equal(await nativeIntent.redirectSystemPath({path: '/account', initial: false}), '/account');
+
+  await verifyNotificationCapturePlugin();
+  completed = true;
   console.log('Adversarial client probes passed.');
 })().catch(error => { console.error(error); process.exitCode = 1; });

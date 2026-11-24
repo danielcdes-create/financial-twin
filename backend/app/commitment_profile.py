@@ -5,6 +5,8 @@ statement rows change together. Amount and date never fan out beyond the
 chosen open charges.
 """
 import calendar
+import re
+import unicodedata
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Literal
@@ -14,6 +16,7 @@ from bson import ObjectId
 from bson.decimal128 import Decimal128
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
+from app.account_profiles import legacy_accounts_by_profile
 from app.auth import require_session
 from pymongo.errors import DuplicateKeyError
 
@@ -26,6 +29,7 @@ from app.future_commitments import (
     FutureDelete, digest, editable, future_obligations_view, load, obligation_series_key,
     unpaid, view, write,
 )
+from app.platforms import platform_identity
 
 Nature = Literal['COMPRA', 'IMPOSTO_TRIBUTO', 'TARIFA_ENCARGO', 'ESTORNO', 'RENDIMENTO', 'TRANSFERENCIA']
 Pay = Literal['cartao', 'debito', 'pix', 'boleto', 'paypal', 'outro']
@@ -125,56 +129,205 @@ def _visible_card(db, profile: dict) -> dict:
     return profile
 
 
-def _paint(document, profile: dict, cleared: set[str] | tuple[str, ...] = ()) -> tuple[dict, dict]:
-    """Metadata only. Description, amount and event date stay unless the caller sets them."""
-    changes = {}
-    unsets = {}
-    cleared_set = set(cleared or ())
-    mapping = {
-        'display_name': 'vendedor',
-        'natureza': 'natureza',
-        'categoria': 'categoria',
-        'subcategoria': 'subcategoria',
-        'plataforma': 'plataforma',
-        'metodo_pagamento': 'metodo_pagamento',
-        'account_id': 'account_id',
-        'card_id': 'card_id',
-        'card_label': 'card_label',
+_TX_PAYMENT_METHODS = frozenset({
+    'cartao_credito', 'cartao_debito', 'pix', 'conta_corrente',
+    'debito_conta', 'transferencia', 'dinheiro', 'boleto',
+    'sem_parar', 'outro', 'desconhecido',
+})
+_PAYMENT_METHOD_SHORTHAND = {
+    'cartao': 'cartao_credito',
+    'credito': 'cartao_credito',
+    'debito': 'cartao_debito',
+    'paypal': 'outro',
+}
+_TX_NATURES = frozenset({
+    'COMPRA', 'IMPOSTO_TRIBUTO', 'TARIFA_ENCARGO',
+    'ESTORNO', 'RENDIMENTO', 'TRANSFERENCIA',
+})
+_FORBIDDEN_TX_FIELDS = (
+    'vendedor', 'merchant_name', 'plataforma',
+    'card_id', 'card_label', 'commitment_label',
+)
+
+
+def _norm_merchant_key(value: str) -> str:
+    plain = unicodedata.normalize('NFKD', str(value or '')).encode('ascii', 'ignore').decode('ascii').casefold()
+    return re.sub(r'\s+', ' ', re.sub(r'[^a-z0-9 ]', ' ', plain)).strip()
+
+
+def _resolve_or_create_merchant(db, seller_name: str, now: datetime) -> dict:
+    clean = seller_name.strip()
+    exact = db.merchants.find_one({'nome_padrao': clean})
+    if exact:
+        return exact
+    key = _norm_merchant_key(clean)
+    for mdoc in db.merchants.find({}):
+        if _norm_merchant_key(mdoc.get('nome_padrao') or '') == key:
+            return mdoc
+    norm_alias = re.sub(r'\s+', ' ', re.sub(r'[^A-Z0-9 ]', ' ', clean.upper())).strip() or clean.upper()
+    merchant = {
+        '_id': ObjectId(),
+        'external_key': f'merchant-user-{uuid4()}',
+        'schema_version': 2,
+        'created_at': now,
+        'updated_at': now,
+        'tipo_entidade': 'marca',
+        'nome_padrao': clean,
+        'aliases': [
+            {
+                'valor': clean,
+                'normalizado': norm_alias,
+                'status': 'confirmado',
+                'source_record_ids': [],
+            }
+        ],
     }
+    db.merchants.insert_one(merchant)
+    return merchant
+
+
+def _resolve_or_create_platform_merchant(db, platform_name: str, now: datetime) -> dict:
+    ident = platform_identity(platform_name)
+    canonical = ident[1] if ident else platform_name.strip()
+    found = db.merchants.find_one({'external_key': ident[0]}) if ident else None
+    if not found:
+        found = db.merchants.find_one({'nome_padrao': canonical})
+    if not found:
+        key = _norm_merchant_key(canonical)
+        for mdoc in db.merchants.find({}):
+            if _norm_merchant_key(mdoc.get('nome_padrao') or '') == key:
+                found = mdoc
+                break
+    if found:
+        return found
+    norm_alias = re.sub(r'\s+', ' ', re.sub(r'[^A-Z0-9 ]', ' ', canonical.upper())).strip() or canonical.upper()
+    platform = {
+        '_id': ObjectId(),
+        'external_key': ident[0] if ident else f'platform-user-{uuid4()}',
+        'schema_version': 2,
+        'created_at': now,
+        'updated_at': now,
+        'tipo_entidade': 'marca',
+        'nome_padrao': canonical,
+        'aliases': [
+            {
+                'valor': canonical,
+                'normalizado': norm_alias,
+                'status': 'confirmado',
+                'source_record_ids': [],
+            }
+        ],
+    }
+    db.merchants.insert_one(platform)
+    return platform
+
+
+def _resolve_tx_account_oid(db, raw_account) -> ObjectId | None:
+    if isinstance(raw_account, ObjectId):
+        return raw_account
+    if not isinstance(raw_account, str) or not raw_account.strip():
+        return None
+    text = raw_account.strip()
+    if text.startswith('profile:'):
+        prof_key = text.removeprefix('profile:').strip()
+        leg = legacy_accounts_by_profile(db).get(prof_key)
+        return leg['_id'] if isinstance(leg, dict) and isinstance(leg.get('_id'), ObjectId) else None
+    if ObjectId.is_valid(text):
+        return ObjectId(text)
+    leg = legacy_accounts_by_profile(db).get(text)
+    return leg['_id'] if isinstance(leg, dict) and isinstance(leg.get('_id'), ObjectId) else None
+
+
+def _normalize_tx_payment_method(raw_pm) -> str | None:
+    if _blank(raw_pm) or not isinstance(raw_pm, str):
+        return None
+    key = raw_pm.strip().lower()
+    mapped = _PAYMENT_METHOD_SHORTHAND.get(key, key)
+    return mapped if mapped in _TX_PAYMENT_METHODS else None
+
+
+def _paint(
+    db,
+    document: dict,
+    profile: dict,
+    cleared: set[str] | tuple[str, ...] = (),
+    *,
+    now: datetime | None = None,
+) -> tuple[dict, dict]:
+    """Metadata only, strictly obeying canonical `transactions` $jsonSchema."""
+    changes: dict = {}
+    unsets: dict = {}
+    cleared_set = set(cleared or ())
+    stamp = now or datetime.now(timezone.utc)
+
+    for legacy_key in _FORBIDDEN_TX_FIELDS:
+        if legacy_key in document:
+            unsets[legacy_key] = ''
+
+    seller_val = profile.get('display_name') if not _blank(profile.get('display_name')) else profile.get('vendedor')
+    if not _blank(seller_val):
+        merchant = _resolve_or_create_merchant(db, str(seller_val).strip(), stamp)
+        if document.get('merchant_id') != merchant['_id']:
+            changes['merchant_id'] = merchant['_id']
+    elif 'vendedor' in cleared_set and document.get('merchant_id') is not None:
+        unsets['merchant_id'] = ''
+
+    plat_val = profile.get('plataforma')
+    if not _blank(plat_val):
+        platform = _resolve_or_create_platform_merchant(db, str(plat_val).strip(), stamp)
+        if document.get('platform_id') != platform['_id']:
+            changes['platform_id'] = platform['_id']
+    elif 'plataforma' in cleared_set and document.get('platform_id') is not None:
+        unsets['platform_id'] = ''
+
     previous_category = document.get('categoria')
-    for source, target in mapping.items():
-        value = profile.get(source)
-        if not _blank(value):
-            text = value.strip() if isinstance(value, str) else value
-            if document.get(target) != text:
-                changes[target] = text
-        elif source in cleared_set and source not in {'display_name', 'account_id'}:
-            if source == 'subcategoria':
-                if document.get('subcategoria') not in (None, ''):
-                    unsets['subcategoria'] = ''
-            elif document.get(target) is not None:
-                unsets[target] = ''
-    if changes.get('categoria') and changes['categoria'] != previous_category and _blank(profile.get('subcategoria')):
-        if document.get('subcategoria') not in (None, ''):
+    if not _blank(profile.get('categoria')):
+        cat = str(profile['categoria']).strip()
+        if cat and document.get('categoria') != cat:
+            changes['categoria'] = cat
+
+    if not _blank(profile.get('subcategoria')):
+        sub = str(profile['subcategoria']).strip()
+        if document.get('subcategoria') != sub:
+            changes['subcategoria'] = sub
+    elif 'subcategoria' in cleared_set or (
+        changes.get('categoria') and changes['categoria'] != previous_category and _blank(profile.get('subcategoria'))
+    ):
+        if document.get('subcategoria') not in (None, '') or 'subcategoria' in document:
             unsets['subcategoria'] = ''
-    if changes.get('vendedor'):
-        changes['merchant_name'] = changes['vendedor']
-        if document.get('merchant_id') is not None:
-            unsets['merchant_id'] = ''
-    if changes.get('plataforma') or 'plataforma' in unsets:
-        if document.get('platform_id') is not None:
-            unsets['platform_id'] = ''
+
+    if not _blank(profile.get('natureza')):
+        nat = str(profile['natureza']).strip()
+        if nat in _TX_NATURES and document.get('natureza') != nat:
+            changes['natureza'] = nat
+    elif 'natureza' in cleared_set and document.get('natureza') is not None:
+        unsets['natureza'] = ''
+
+    raw_pm = profile.get('metodo_pagamento')
+    if not _blank(raw_pm):
+        norm_pm = _normalize_tx_payment_method(raw_pm)
+        if norm_pm and document.get('metodo_pagamento') != norm_pm:
+            changes['metodo_pagamento'] = norm_pm
+    elif 'metodo_pagamento' in cleared_set and document.get('metodo_pagamento') is not None:
+        unsets['metodo_pagamento'] = ''
+
+    if not _blank(profile.get('account_id')):
+        acc_oid = _resolve_tx_account_oid(db, profile.get('account_id'))
+        if isinstance(acc_oid, ObjectId) and document.get('account_id') != acc_oid:
+            changes['account_id'] = acc_oid
+
     return changes, unsets
 
 
 def paint_movement(db, document, profile: dict, cleared: set[str] | tuple[str, ...] = ()):
-    if not document:
+    if not document or document.get('provisional_id'):
         return {}
-    changes, unsets = _paint(document, profile, cleared)
+    now = datetime.now(timezone.utc)
+    changes, unsets = _paint(db, document, profile, cleared, now=now)
     if not changes and not unsets:
         return {}
-    changes['updated_at'] = datetime.now(timezone.utc)
-    update = {'$set': changes}
+    changes['updated_at'] = now
+    update: dict = {'$set': changes}
     if unsets:
         update['$unset'] = unsets
     db.transactions.update_one({'_id': document['_id']}, update)

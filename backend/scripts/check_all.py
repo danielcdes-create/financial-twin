@@ -17,7 +17,9 @@ def run(folder):
           ('check_adversarial_fixes.py','A-regressions'),('check_account_profiles.py','accounts'),
           ('check_audit_1209.py','C-regressions'),('check_structural_consistency.py','structural.json'),
           ('check_structural_restart.py','restart.json'),
-          ('check_android_recovery.py','android-recovery')]
+          ('check_android_recovery.py','android-recovery'),
+          ('check_domain_account_fixes.py','domain-account-fixes.json'),
+          ('check_domain_ledger_fixes.py','domain-ledger-fixes.json')]
     results=[]
     for script,destination in jobs:
         args=[sys.executable,str(Path(__file__).parent/script)]+([str(folder/destination)] if destination else [])

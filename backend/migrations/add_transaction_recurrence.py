@@ -1,8 +1,16 @@
-"""Extend the transactions validator with the optional recurrence object."""
+"""Extend the transactions validator with the optional recurrence object.
 
-from pymongo import MongoClient
+Dry run by default. Pass --apply to execute the validator update.
+"""
+
+import argparse
+import copy
+import sys
 from pathlib import Path
 
+from pymongo import MongoClient
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.config import Settings
 from app.main import configured_mongodb_uri
 
@@ -22,7 +30,10 @@ RECURRENCE_SCHEMA = {
 }
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--apply", action="store_true", help="Apply validator changes to MongoDB (default: dry-run).")
+    args = parser.parse_args(argv)
     settings = Settings(_env_file=Path(__file__).resolve().parents[2] / ".env")
     if not settings.mongodb_uri:
         raise RuntimeError("MONGODB_URI is required")
@@ -33,13 +44,16 @@ def main() -> None:
         if collection is None:
             raise RuntimeError("transactions collection does not exist")
         options = collection.get("options") or {}
-        validator = options.get("validator") or {}
+        validator = copy.deepcopy(options.get("validator") or {})
         json_schema = validator.get("$jsonSchema")
         if not isinstance(json_schema, dict):
             raise RuntimeError("transactions does not use a JSON schema validator")
         properties = json_schema.setdefault("properties", {})
         if properties.get("recorrencia") == RECURRENCE_SCHEMA:
             print("transactions recurrence validator already up to date")
+            return
+        if not args.apply:
+            print("dry-run: transactions recurrence validator requires update (pass --apply to execute)")
             return
         properties["recorrencia"] = RECURRENCE_SCHEMA
         database.command(

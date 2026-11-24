@@ -72,10 +72,27 @@ class VoiceCaptureTests(unittest.TestCase):
 
     def test_routes_retain_session_protection(self):
         app.dependency_overrides.pop(require_session,None)
+        mock_settings = SimpleNamespace(
+            environment='production',
+            app_password='configured',
+            jwt_secret='x' * 32,
+            account_setup_token='',
+        )
+        bad_headers = {'Authorization': 'Bearer invalid.jwt.token'}
         for path in ['/v1/capture/transcribe','/v1/capture/interpret']:
-            with patch('app.auth.get_settings',return_value=SimpleNamespace(environment='production',app_password='configured')):
-                response=self.client.post(path,files={'file':('a.wav',b'RIFFxxxxWAVEaudio','audio/wav')}) if path.endswith('transcribe') else self.client.post(path,json={'context':'purchase','text':'test'})
-            self.assertEqual(response.status_code,401)
+            with patch('app.auth.get_settings',return_value=mock_settings):
+                missing_resp = (
+                    self.client.post(path,files={'file':('a.wav',b'RIFFxxxxWAVEaudio','audio/wav')})
+                    if path.endswith('transcribe')
+                    else self.client.post(path,json={'context':'purchase','text':'test'})
+                )
+                invalid_resp = (
+                    self.client.post(path,files={'file':('a.wav',b'RIFFxxxxWAVEaudio','audio/wav')},headers=bad_headers)
+                    if path.endswith('transcribe')
+                    else self.client.post(path,json={'context':'purchase','text':'test'},headers=bad_headers)
+                )
+            self.assertEqual(missing_resp.status_code,401)
+            self.assertEqual(invalid_resp.status_code,401)
 
     def test_interpret_is_contextual_and_read_only(self):
         for context,model,answer in [('purchase',PurchaseOfferExtraction,PurchaseOfferExtraction(total_price='3256',installment_count=10)),('movement',CaptureDraft,CaptureDraft(kind='own_transfer',amount='20',origin_hint='Itaú',destination_hint='Inter')),('commitment',CaptureDraft,CaptureDraft(kind='assinatura',amount='35.90',frequency='mensal'))]:

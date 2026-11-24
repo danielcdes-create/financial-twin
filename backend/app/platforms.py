@@ -280,6 +280,37 @@ def _build_historical_context(
             if _row_has_user_review(row)
         ]
     ledger_rows = _safe_find(getattr(db, "transactions", None), {}, limit=800)
+    if ledger_rows:
+        ov_col = getattr(db, "transaction_field_overrides", None)
+        if ov_col is None and isinstance(db, dict) and "transaction_field_overrides" in db:
+            ov_col = db["transaction_field_overrides"]
+        ledger_ids = [r["_id"] for r in ledger_rows if r.get("_id") is not None]
+        if ledger_ids and ov_col is not None and hasattr(ov_col, "find"):
+            try:
+                ov_docs = list(ov_col.find({"_id": {"$in": ledger_ids}}))
+            except Exception:
+                ov_docs = []
+            ov_map = {
+                str(d["_id"]): [str(f) for f in d["user_cleared_fields"] if isinstance(f, str) and f]
+                for d in ov_docs
+                if isinstance(d, dict)
+                and d.get("_id") is not None
+                and isinstance(d.get("user_cleared_fields"), (list, tuple, set))
+            }
+            if ov_map:
+                ledger_rows = [
+                    (
+                        {
+                            **r,
+                            "user_cleared_fields": sorted(
+                                set(r.get("user_cleared_fields") or []) | set(ov_map[str(r["_id"])])
+                            ),
+                        }
+                        if r.get("_id") is not None and str(r["_id"]) in ov_map
+                        else r
+                    )
+                    for r in ledger_rows
+                ]
     raw_candidates: list[tuple[dict[str, Any], bool, bool, str, str]] = []
     for row in confirmed_captures + active_edited:
         pid = str(row.get("platform_id") or "")

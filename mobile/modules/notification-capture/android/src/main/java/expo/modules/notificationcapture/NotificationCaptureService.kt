@@ -59,7 +59,7 @@ class NotificationCaptureService : NotificationListenerService() {
       .firstOrNull{it.length>=3 && !Regex("cart[aã]o",RegexOption.IGNORE_CASE).containsMatchIn(it) && !genericApprovalTitleRegex.containsMatchIn(it) && listOf("nubank","ita[uú]","santander","inter","bradesco","c6 bank","mercado pago").none{bank->Regex(bank,RegexOption.IGNORE_CASE).containsMatchIn(it)}}?.take(120).orEmpty()
     val notificationTime=sbn.postTime.coerceAtLeast(0L)
     val eventTime=itauMatch?.let{match->runCatching{
-      val zone=TimeZone.getTimeZone("America/Sao_Paulo");val calendar=Calendar.getInstance(zone,Locale("pt","BR"));calendar.isLenient=false;calendar.timeInMillis=notificationTime
+      val zone=TimeZone.getTimeZone("America/Sao_Paulo");val calendar=Calendar.getInstance(zone,Locale.forLanguageTag("pt-BR"));calendar.isLenient=false;calendar.timeInMillis=notificationTime
       val rawYear=match.groupValues.getOrNull(4).orEmpty();val year=if(rawYear.isBlank())calendar.get(Calendar.YEAR) else rawYear.toInt().let{if(it<100)it+2000 else it}
       calendar.set(Calendar.YEAR,year);calendar.set(Calendar.MONTH,match.groupValues[3].toInt()-1);calendar.set(Calendar.DAY_OF_MONTH,match.groupValues[2].toInt());calendar.set(Calendar.HOUR_OF_DAY,match.groupValues[5].toInt());calendar.set(Calendar.MINUTE,match.groupValues[6].toInt());calendar.set(Calendar.SECOND,0);calendar.set(Calendar.MILLISECOND,0)
       if(rawYear.isBlank()&&calendar.timeInMillis>notificationTime+172800000L)calendar.add(Calendar.YEAR,-1)

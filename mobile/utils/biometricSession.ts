@@ -14,7 +14,6 @@ const options: SecureStore.SecureStoreOptions = {
 
 let inMemoryAnchor = '';
 let cachedEnvelope = '';
-let fallbackCounter = 0;
 
 function utf8Encode(str: string): Uint8Array {
   const bytes: number[] = [];
@@ -87,30 +86,18 @@ const SHA256_K = new Uint32Array([
   0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ]);
 
-export function sha256Bytes(data: Uint8Array): Uint8Array {
+export function createSha256Hasher(): {update: (chunk: Uint8Array) => void; digest: () => Uint8Array} {
   let h0 = 0x6a09e667, h1 = 0xbb67ae85, h2 = 0x3c6ef372, h3 = 0xa54ff53a;
   let h4 = 0x510e527f, h5 = 0x9b05688c, h6 = 0x1f83d9ab, h7 = 0x5be0cd19;
-  const bitLen = data.length * 8;
-  const padLen = (((data.length + 9 + 63) >> 6) << 6);
-  const padded = new Uint8Array(padLen);
-  padded.set(data);
-  padded[data.length] = 0x80;
-  const hi = Math.floor(bitLen / 0x100000000) >>> 0;
-  const lo = bitLen >>> 0;
-  padded[padLen - 8] = (hi >>> 24) & 0xff;
-  padded[padLen - 7] = (hi >>> 16) & 0xff;
-  padded[padLen - 6] = (hi >>> 8) & 0xff;
-  padded[padLen - 5] = hi & 0xff;
-  padded[padLen - 4] = (lo >>> 24) & 0xff;
-  padded[padLen - 3] = (lo >>> 16) & 0xff;
-  padded[padLen - 2] = (lo >>> 8) & 0xff;
-  padded[padLen - 1] = lo & 0xff;
   const w = new Uint32Array(64);
+  const buf = new Uint8Array(64);
+  let bufLen = 0;
+  let totalBytes = 0;
   const rotr = (x: number, n: number) => ((x >>> n) | (x << (32 - n))) >>> 0;
-  for (let offset = 0; offset < padLen; offset += 64) {
+  const processBlock = (block: Uint8Array, offset: number) => {
     for (let i = 0; i < 16; i++) {
       const j = offset + i * 4;
-      w[i] = ((padded[j] << 24) | (padded[j + 1] << 16) | (padded[j + 2] << 8) | padded[j + 3]) >>> 0;
+      w[i] = ((block[j] << 24) | (block[j + 1] << 16) | (block[j + 2] << 8) | block[j + 3]) >>> 0;
     }
     for (let i = 16; i < 64; i++) {
       const s0 = (rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3)) >>> 0;
@@ -130,34 +117,76 @@ export function sha256Bytes(data: Uint8Array): Uint8Array {
     }
     h0 = (h0 + a) >>> 0; h1 = (h1 + b) >>> 0; h2 = (h2 + c) >>> 0; h3 = (h3 + d) >>> 0;
     h4 = (h4 + e) >>> 0; h5 = (h5 + f) >>> 0; h6 = (h6 + g) >>> 0; h7 = (h7 + h) >>> 0;
-  }
-  const out = new Uint8Array(32);
-  const words = [h0, h1, h2, h3, h4, h5, h6, h7];
-  for (let i = 0; i < 8; i++) {
-    out[i * 4] = (words[i] >>> 24) & 0xff;
-    out[i * 4 + 1] = (words[i] >>> 16) & 0xff;
-    out[i * 4 + 2] = (words[i] >>> 8) & 0xff;
-    out[i * 4 + 3] = words[i] & 0xff;
-  }
-  return out;
+  };
+  return {
+    update(chunk: Uint8Array) {
+      if (!chunk || chunk.length === 0) return;
+      totalBytes += chunk.length;
+      let pos = 0;
+      if (bufLen > 0) {
+        const take = Math.min(chunk.length, 64 - bufLen);
+        buf.set(chunk.subarray(0, take), bufLen);
+        bufLen += take;
+        pos += take;
+        if (bufLen === 64) {
+          processBlock(buf, 0);
+          bufLen = 0;
+        }
+      }
+      while (pos + 64 <= chunk.length) {
+        processBlock(chunk, pos);
+        pos += 64;
+      }
+      if (pos < chunk.length) {
+        buf.set(chunk.subarray(pos), 0);
+        bufLen = chunk.length - pos;
+      }
+    },
+    digest(): Uint8Array {
+      const bitLen = totalBytes * 8;
+      const padLen = bufLen + 9 <= 64 ? 64 : 128;
+      const tail = new Uint8Array(padLen);
+      if (bufLen > 0) tail.set(buf.subarray(0, bufLen), 0);
+      tail[bufLen] = 0x80;
+      const hi = Math.floor(bitLen / 0x100000000) >>> 0;
+      const lo = bitLen >>> 0;
+      tail[padLen - 8] = (hi >>> 24) & 0xff;
+      tail[padLen - 7] = (hi >>> 16) & 0xff;
+      tail[padLen - 6] = (hi >>> 8) & 0xff;
+      tail[padLen - 5] = hi & 0xff;
+      tail[padLen - 4] = (lo >>> 24) & 0xff;
+      tail[padLen - 3] = (lo >>> 16) & 0xff;
+      tail[padLen - 2] = (lo >>> 8) & 0xff;
+      tail[padLen - 1] = lo & 0xff;
+      processBlock(tail, 0);
+      if (padLen === 128) processBlock(tail, 64);
+      const out = new Uint8Array(32);
+      const words = [h0, h1, h2, h3, h4, h5, h6, h7];
+      for (let i = 0; i < 8; i++) {
+        out[i * 4] = (words[i] >>> 24) & 0xff;
+        out[i * 4 + 1] = (words[i] >>> 16) & 0xff;
+        out[i * 4 + 2] = (words[i] >>> 8) & 0xff;
+        out[i * 4 + 3] = words[i] & 0xff;
+      }
+      return out;
+    },
+  };
+}
+
+export function sha256Bytes(data: Uint8Array): Uint8Array {
+  const hasher = createSha256Hasher();
+  hasher.update(data);
+  return hasher.digest();
 }
 
 function randomBytes(length: number): Uint8Array {
   const out = new Uint8Array(length);
   const g = globalThis as {crypto?: {getRandomValues?: (arr: Uint8Array) => Uint8Array}};
-  if (typeof g?.crypto?.getRandomValues === 'function') {
-    g.crypto.getRandomValues(out);
-    return out;
+  const cryptoObj = g?.crypto ?? (typeof crypto !== 'undefined' ? (crypto as {getRandomValues?: (arr: Uint8Array) => Uint8Array}) : undefined);
+  if (typeof cryptoObj?.getRandomValues !== 'function') {
+    throw new Error('Gerador criptográfico seguro indisponível neste dispositivo.');
   }
-  // Fallback strictly for isolated VM test harnesses that omit globalThis.crypto.
-  let offset = 0;
-  while (offset < length) {
-    const seed = `${Date.now()}:${++fallbackCounter}:${Math.random()}:${inMemoryAnchor.length}`;
-    const block = sha256Bytes(utf8Encode(seed));
-    const take = Math.min(block.length, length - offset);
-    out.set(block.subarray(0, take), offset);
-    offset += take;
-  }
+  cryptoObj.getRandomValues(out);
   return out;
 }
 
@@ -400,12 +429,23 @@ export async function readBiometricSession(): Promise<{token: string; expiresAt:
     cachedEnvelope = '';
     throw new Error('Biometria alterada ou sessão indisponível. Entre com sua senha e ative novamente.');
   }
+  let saved: any;
+  try {
+    saved = JSON.parse(value);
+  } catch {
+    inMemoryAnchor = '';
+    cachedEnvelope = '';
+    throw new Error('Sessão biométrica inválida ou corrompida. Entre com sua senha.');
+  }
   inMemoryAnchor = value;
-  let saved = JSON.parse(value);
   if (cachedEnvelope) {
     const refreshed = openEnvelope(value, cachedEnvelope);
-    if (refreshed && typeof refreshed.token === 'string' && typeof refreshed.expiresAt === 'number' &&
-        refreshed.expiresAt >= (typeof saved?.expiresAt === 'number' ? saved.expiresAt : 0)) {
+    if (!refreshed || typeof refreshed.token !== 'string' || typeof refreshed.expiresAt !== 'number') {
+      inMemoryAnchor = '';
+      cachedEnvelope = '';
+      throw new Error('Sessão biométrica inválida ou corrompida. Entre com sua senha.');
+    }
+    if (refreshed.expiresAt >= (typeof saved?.expiresAt === 'number' ? saved.expiresAt : 0)) {
       saved = refreshed;
     }
   }
@@ -419,6 +459,8 @@ export async function clearBiometricSession() {
   cachedEnvelope = '';
   await SecureStore.deleteItemAsync(KEY, options);
   await SecureStore.deleteItemAsync(ENABLED);
+}
+export async function clearSavedPdfCpf() {
   await SecureStore.deleteItemAsync('financial-twin-pdf-cpf').catch(() => {});
 }
 export async function removeLegacySession() {

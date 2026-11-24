@@ -10,6 +10,8 @@ try {
     & .\.venv\Scripts\python.exe -c "import sys; sys.path.insert(0,'backend'); from app.config import get_settings; from app.synthetic_testing import require_synthetic_target; require_synthetic_target(get_settings().mongodb_uri)"
     if($LASTEXITCODE -ne 0){throw 'Synthetic integration target rejected before any writes'}
   }
+  & .\.venv\Scripts\python.exe scripts/check_version_sync.py
+  if($LASTEXITCODE -ne 0){throw 'Version sync check failed'}
   & .\.venv\Scripts\python.exe -m unittest discover -s backend/tests -q
   if($LASTEXITCODE -ne 0){throw 'Backend regression suite failed'}
   & .\.venv\Scripts\python.exe -m pip_audit -r backend/requirements.lock.txt --no-deps --disable-pip
@@ -29,7 +31,7 @@ try {
     if($LASTEXITCODE -ne 0){throw 'Dependency security gate failed'}
     & pnpm exec tsc --noEmit
     if($LASTEXITCODE -ne 0){throw 'Typecheck failed'}
-    & pnpm exec eslint App.tsx components utils app
+    & pnpm exec eslint App.tsx components utils app modules/notification-capture/index.ts
     if($LASTEXITCODE -ne 0){throw 'Source lint failed'}
     if($WebExport){
       & pnpm exec expo export --platform web --output-dir desktop-dist

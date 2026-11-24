@@ -8,8 +8,10 @@ from pathlib import Path
 
 def validate(manifest_path, config_path):
     manifest_path, config_path = Path(manifest_path), Path(config_path)
+    if not manifest_path.name.endswith('.manifest.json'):
+        raise ValueError('Manifest path must end with .manifest.json')
     manifest = json.loads(manifest_path.read_text(encoding='utf-8-sig'))
-    apk = manifest_path.with_name(manifest_path.name.replace('.manifest.json', '.apk'))
+    apk = manifest_path.with_name(manifest_path.name.removesuffix('.manifest.json') + '.apk')
     config = json.loads(config_path.read_text(encoding='utf-8-sig'))['expo']
     if (manifest['version_name'], int(manifest['version_code'])) != (config['version'], int(config['android']['versionCode'])):
         raise ValueError('App config and compiled release disagree')

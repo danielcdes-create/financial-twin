@@ -10,7 +10,7 @@ from pathlib import Path
 
 from pymongo import MongoClient, UpdateOne
 
-sys.path.insert(0, str(Path(__file__).parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.config import Settings
 from app.main import configured_mongodb_uri
 from app.taxonomy import NATURES, infer_classification
